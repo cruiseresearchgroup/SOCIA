@@ -3,7 +3,7 @@
 An LLM-driven multi-agent social simulation generator that automatically creates simulation environments based on user requirements and data.
 
 <!-- Illustration Image Placeholder -->
-![SOCIA System Architecture](docs/images/socia_architecture.png)
+<img src="docs/images/socia_architecture.png" alt="SOCIA System Architecture" width="50%" />
 <!-- Replace this with your actual architecture diagram -->
 
 ## Architecture
