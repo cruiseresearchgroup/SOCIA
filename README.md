@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/socia_logo.png" alt="SOCIA Logo" width="200px" />
+</p>
+
 # SOCIA: Simulation Orchestration for City Intelligence and Agents
 
 An LLM-driven multi-agent social simulation generator that automatically creates simulation environments based on user requirements and data.
