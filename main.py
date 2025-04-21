@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+# SOCIA: Simulation Orchestration for City Intelligence and Agents
+
+import argparse
+import logging
+import os
+import sys
+from orchestration.workflow_manager import WorkflowManager
+import numpy as np
+import matplotlib.pyplot as plt
+from models.epidemic_model import create_epidemic_simulation
+from utils.llm_utils import load_api_key
+
+def setup_logging():
+    """Configure logging for the application."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return logging.getLogger('SOCIA')
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='SOCIA: LLM-driven multi-agent social simulation generator')
+    parser.add_argument('--task', type=str, help='Description of the simulation task')
+    parser.add_argument('--data', type=str, help='Path to input data directory')
+    parser.add_argument('--output', type=str, default='./output', help='Path to output directory')
+    parser.add_argument('--config', type=str, default='./config.yaml', help='Path to configuration file')
+    parser.add_argument('--iterations', type=int, default=3, help='Maximum number of iterations')
+    parser.add_argument('--debug', action='store_true', help='Enable debug mode')
+    parser.add_argument('--run-example', action='store_true', help='Run the example epidemic simulation')
+    parser.add_argument('--setup-api-key', action='store_true', help='Setup OpenAI API key')
+    
+    args = parser.parse_args()
+    
+    # Validate that --task is provided when not running the example
+    if not args.run_example and not args.setup_api_key and not args.task:
+        parser.error("--task is required unless --run-example or --setup-api-key is specified")
+    
+    return args
+
+def check_api_key() -> bool:
+    """
+    Check if OpenAI API key is configured in keys.py
+    
+    Returns:
+        bool: True if API key is configured, False otherwise
+    """
+    api_key = load_api_key("OPENAI_API_KEY")
+    return api_key is not None
+
+def plot_results(metrics_history):
+    """Plot the simulation results."""
+    # Extract data from metrics history
+    time_steps = [m['time_step'] for m in metrics_history]
+    susceptible = [m['susceptible_count'] for m in metrics_history]
+    infected = [m['infected_count'] for m in metrics_history]
+    recovered = [m['recovered_count'] for m in metrics_history]
+    
+    # Create figure and axis
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Plot the data
+    ax.plot(time_steps, susceptible, 'b-', label='Susceptible')
+    ax.plot(time_steps, infected, 'r-', label='Infected')
+    ax.plot(time_steps, recovered, 'g-', label='Recovered')
+    
+    # Add labels and legend
+    ax.set_title('SIR Epidemic Model Simulation')
+    ax.set_xlabel('Time Steps')
+    ax.set_ylabel('Population')
+    ax.legend()
+    ax.grid(True)
+    
+    # Save and show the figure
+    plt.savefig('epidemic_simulation_results.png')
+    plt.show()
+
+def plot_results_zh(metrics_history):
+    """Plot simulation results with Chinese labels (placeholder for now)."""
+    # Currently just calls the English version
+    plot_results(metrics_history)
+
+def run_epidemic_example():
+    # Get system locale
+    import locale
+    system_locale = locale.getdefaultlocale()[0]
+    
+    # Configuration for the simulation
+    config = {
+        'population_size': 1000,
+        'initial_infected': 5,
+        'transmission_rate': 0.3,
+        'recovery_rate': 0.1,
+        'contact_radius': 0.02,
+        'seed': 42
+    }
+    
+    # Create and initialize the simulation
+    simulation = create_epidemic_simulation(config)
+    simulation.initialize()
+    
+    # Run the simulation for 100 time steps
+    results = simulation.run(100)
+    
+    # Print final state
+    final_state = results['final_state']
+    print(f"Simulation completed after {final_state['time_step']} time steps")
+    print(f"Final state:")
+    print(f"  Susceptible: {final_state['susceptible_count']}")
+    print(f"  Infected: {final_state['infected_count']}")
+    print(f"  Recovered: {final_state['recovered_count']}")
+    
+    # Plot the results
+    plot_results(results['metrics_history'])
+
+def main():
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Setup logging
+    logger = setup_logging()
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+    
+    # If --setup-api-key is specified, just run the setup script
+    if args.setup_api_key:
+        # Run the setup script
+        os.system("python setup_api_key.py")
+        return 0
+    
+    # If --run-example is specified, run the example epidemic simulation
+    if args.run_example:
+        run_epidemic_example()
+        return 0
+    
+    # For LLM-dependent features, check API key in keys.py
+    if not check_api_key():
+        logger.error("OpenAI API key not found in keys.py")
+        logger.info("Please set up your API key using: python main.py --setup-api-key")
+        return 1
+    
+    try:
+        # Initialize workflow manager
+        workflow_manager = WorkflowManager(
+            task_description=args.task,
+            data_path=args.data,
+            output_path=args.output,
+            config_path=args.config,
+            max_iterations=args.iterations
+        )
+        
+        # Run the workflow
+        result = workflow_manager.run()
+        
+        logger.info(f"Workflow completed successfully. Results available at: {result['code_path']}")
+        return 0
+    
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        return 1
+
+if __name__ == '__main__':
+    sys.exit(main())
