@@ -103,3 +103,82 @@ For more advanced usage, see the examples directory for sample scripts that demo
 - `orchestration/`: Agent coordination
 - `utils/`: Utility functions
 - `tests/`: Test suite 
+
+## Dependency Injection
+
+SOCIA uses the `dependency-injector` framework to manage agent lifecycles and dependencies. This architectural pattern provides several benefits:
+
+### How Dependency Injection Works in SOCIA
+
+1. **Container Definition**: The `AgentContainer` class in `orchestration/container.py` serves as a central registry for all agents and their dependencies:
+
+```python
+class AgentContainer(containers.DeclarativeContainer):
+    # Configuration provider
+    config = providers.Configuration()
+    
+    # Agent factory providers
+    task_understanding_agent = providers.Factory(
+        TaskUnderstandingAgent,
+        config=providers.Selector(config, "agents.task_understanding")
+    )
+    # Other agents...
+```
+
+2. **Instance Management**: The container creates and manages agent instances through different provider types:
+   - `Factory`: Creates a new instance each time it's requested
+   - `Singleton`: Creates a single instance that's reused throughout the application
+   - `Resource`: Manages resources that require explicit acquisition and release
+
+3. **Wiring**: The container is connected to modules that use the `@inject` decorator:
+
+```python
+container.wire(modules=[sys.modules[__name__], "orchestration.workflow_manager"])
+```
+
+4. **Dependency Injection**: Components request dependencies through constructor parameters:
+
+```python
+@inject
+def __init__(
+    self,
+    task_description: str,
+    agent_container: AgentContainer = Provide[AgentContainer]
+):
+```
+
+### Benefits of Dependency Injection in SOCIA
+
+- **Decoupling**: Components depend on abstractions rather than concrete implementations
+- **Testability**: Makes it easy to substitute mock objects during testing
+- **Lifecycle Management**: Centralized control over component creation and destruction
+- **Configuration**: Centralized configuration management for all components
+- **Flexibility**: Easy to add, remove, or replace components without changing client code
+- **Resource Management**: Automatic cleanup of resources when they're no longer needed
+
+### Extending the Dependency Injection System
+
+To add a new agent type to the system:
+
+1. Create your agent class inheriting from `BaseAgent`
+2. Add a provider for your agent in `AgentContainer`:
+
+```python
+new_agent = providers.Factory(
+    NewAgentClass,
+    config=providers.Selector(config, "agents.new_agent")
+)
+```
+
+3. Include it in the `agent_providers` dictionary:
+
+```python
+agent_providers = providers.Dict({
+    # Existing agents...
+    "new_agent": new_agent
+})
+```
+
+4. Update the configuration in `config.yaml` to include settings for your new agent
+
+The dependency injection framework will handle the rest, ensuring your agent is created with the correct configuration and dependencies when needed by the workflow. 

@@ -8,6 +8,9 @@ import yaml
 import json
 from typing import Dict, Any, List, Optional
 
+from dependency_injector.wiring import inject, Provide
+from orchestration.container import AgentContainer
+
 class WorkflowManager:
     """
     Manages the workflow of agent interactions for generating simulation code.
@@ -18,13 +21,15 @@ class WorkflowManager:
     controlling iteration.
     """
     
+    @inject
     def __init__(
         self,
         task_description: str,
         data_path: Optional[str] = None,
         output_path: str = "./output",
         config_path: str = "./config.yaml",
-        max_iterations: int = 3
+        max_iterations: int = 3,
+        agent_container: AgentContainer = Provide[AgentContainer]
     ):
         """
         Initialize the WorkflowManager.
@@ -35,6 +40,7 @@ class WorkflowManager:
             output_path: Path to the output directory
             config_path: Path to the configuration file
             max_iterations: Maximum number of iterations
+            agent_container: Dependency injection container for agents
         """
         self.logger = logging.getLogger("SOCIA.WorkflowManager")
         self.task_description = task_description
@@ -46,7 +52,11 @@ class WorkflowManager:
         # Load configuration
         self.config = self._load_config()
         
-        # Initialize agents
+        # Initialize container with config
+        self.container = agent_container
+        self.container.config.from_dict(self.config)
+        
+        # Get agent instances via dependency injection
         self.agents = self._initialize_agents()
         
         # State management
@@ -81,30 +91,15 @@ class WorkflowManager:
             }
     
     def _initialize_agents(self) -> Dict[str, Any]:
-        """Initialize all agents based on configuration."""
-        from agents.task_understanding.agent import TaskUnderstandingAgent
-        from agents.data_analysis.agent import DataAnalysisAgent
-        from agents.model_planning.agent import ModelPlanningAgent
-        from agents.code_generation.agent import CodeGenerationAgent
-        from agents.code_verification.agent import CodeVerificationAgent
-        from agents.simulation_execution.agent import SimulationExecutionAgent
-        from agents.result_evaluation.agent import ResultEvaluationAgent
-        from agents.feedback_generation.agent import FeedbackGenerationAgent
-        from agents.iteration_control.agent import IterationControlAgent
-        
-        agents = {
-            "task_understanding": TaskUnderstandingAgent(self.config["agents"]["task_understanding"]),
-            "data_analysis": DataAnalysisAgent(self.config["agents"]["data_analysis"]),
-            "model_planning": ModelPlanningAgent(self.config["agents"]["model_planning"]),
-            "code_generation": CodeGenerationAgent(self.config["agents"]["code_generation"]),
-            "code_verification": CodeVerificationAgent(self.config["agents"]["code_verification"]),
-            "simulation_execution": SimulationExecutionAgent(self.config["agents"]["simulation_execution"]),
-            "result_evaluation": ResultEvaluationAgent(self.config["agents"]["result_evaluation"]),
-            "feedback_generation": FeedbackGenerationAgent(self.config["agents"]["feedback_generation"]),
-            "iteration_control": IterationControlAgent(self.config["agents"]["iteration_control"])
-        }
-        
-        return agents
+        """Initialize all agents via dependency injection."""
+        try:
+            # Use the agent providers from the container
+            agents = self.container.agent_providers()
+            self.logger.info("Agents initialized via dependency injection")
+            return agents
+        except Exception as e:
+            self.logger.error(f"Error initializing agents via DI: {e}")
+            raise
     
     def run(self) -> Dict[str, Any]:
         """
@@ -205,17 +200,20 @@ class WorkflowManager:
         
         # Step 8: Feedback Generation
         self.state["feedback"] = self.agents["feedback_generation"].process(
+            task_spec=self.state["task_spec"],
+            model_plan=self.state["model_plan"],
+            generated_code=self.state["generated_code"],
             verification_results=self.state["verification_results"],
             simulation_results=self.state["simulation_results"],
-            evaluation_results=self.state["evaluation_results"],
-            task_spec=self.state["task_spec"]
+            evaluation_results=self.state["evaluation_results"]
         )
         self._save_artifact("feedback", self.state["feedback"])
         
-        # Step 9: Iteration Control
+        # Step 9: Iteration Decision
         self.state["iteration_decision"] = self.agents["iteration_control"].process(
             current_iteration=self.current_iteration,
             max_iterations=self.max_iterations,
+            task_spec=self.state["task_spec"],
             verification_results=self.state["verification_results"],
             evaluation_results=self.state["evaluation_results"],
             feedback=self.state["feedback"]
@@ -227,19 +225,15 @@ class WorkflowManager:
         if data is None:
             return
         
-        file_path = os.path.join(self.output_path, f"{name}_iter_{self.current_iteration}.json")
-        with open(file_path, 'w') as f:
+        filepath = os.path.join(self.output_path, f"{name}_iter_{self.current_iteration}.json")
+        with open(filepath, 'w') as f:
             json.dump(data, f, indent=2)
     
     def _save_state(self):
         """Save the current state to the output directory."""
-        file_path = os.path.join(self.output_path, f"state_iter_{self.current_iteration}.json")
-        with open(file_path, 'w') as f:
-            # Convert the state to a JSON-serializable format
-            serializable_state = {k: v for k, v in self.state.items() if k != "generated_code"}
-            if "generated_code" in self.state and self.state["generated_code"]:
-                serializable_state["generated_code"] = {
-                    "metadata": self.state["generated_code"].get("metadata", {}),
-                    "code_summary": self.state["generated_code"].get("code_summary", "")
-                }
+        filepath = os.path.join(self.output_path, f"state_iter_{self.current_iteration}.json")
+        with open(filepath, 'w') as f:
+            # Convert state to a serializable format
+            serializable_state = {k: str(v) if not isinstance(v, (dict, list, str, int, float, bool, type(None))) else v
+                                for k, v in self.state.items()}
             json.dump(serializable_state, f, indent=2) 

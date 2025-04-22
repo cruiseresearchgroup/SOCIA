@@ -5,11 +5,14 @@ import argparse
 import logging
 import os
 import sys
+import yaml
 from orchestration.workflow_manager import WorkflowManager
+from orchestration.container import AgentContainer
 import numpy as np
 import matplotlib.pyplot as plt
 from models.epidemic_model import create_epidemic_simulation
 from utils.llm_utils import load_api_key
+from dependency_injector.wiring import Provide, inject
 
 def setup_logging():
     """Configure logging for the application."""
@@ -41,6 +44,61 @@ def parse_arguments():
         parser.error("--task is required unless --run-example or --setup-api-key is specified")
     
     return args
+
+def setup_container(config_path: str) -> AgentContainer:
+    """
+    Set up and configure the dependency injection container.
+    
+    Args:
+        config_path: Path to the configuration file
+    
+    Returns:
+        Configured AgentContainer instance
+    """
+    # Create container instance
+    container = AgentContainer()
+    
+    # Load configuration
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            container.config.from_dict(config)
+    except Exception as e:
+        logging.error(f"Error loading configuration: {e}")
+        # Use minimal default configuration
+        container.config.from_dict({
+            "system": {"name": "SOCIA", "version": "0.1.0"},
+            "agents": {
+                "task_understanding": {"prompt_template": "templates/task_understanding_prompt.txt"},
+                "data_analysis": {"prompt_template": "templates/data_analysis_prompt.txt"},
+                "model_planning": {"prompt_template": "templates/model_planning_prompt.txt"},
+                "code_generation": {"prompt_template": "templates/code_generation_prompt.txt"},
+                "code_verification": {"prompt_template": "templates/code_verification_prompt.txt"},
+                "simulation_execution": {"prompt_template": "templates/simulation_execution_prompt.txt"},
+                "result_evaluation": {"prompt_template": "templates/result_evaluation_prompt.txt"},
+                "feedback_generation": {"prompt_template": "templates/feedback_generation_prompt.txt"},
+                "iteration_control": {"prompt_template": "templates/iteration_control_prompt.txt"}
+            }
+        })
+    
+    # Wire the container for dependency injection
+    container.wire(modules=[
+        sys.modules[__name__],                # main.py
+        "orchestration.workflow_manager",     # WorkflowManager class
+        "agents.task_understanding.agent",    # Individual agent modules
+        "agents.data_analysis.agent",
+        "agents.model_planning.agent",
+        "agents.code_generation.agent",
+        "agents.code_verification.agent",
+        "agents.simulation_execution.agent",
+        "agents.result_evaluation.agent",
+        "agents.feedback_generation.agent",
+        "agents.iteration_control.agent",
+        "agents.base_agent",                  # Base agent class
+        "utils.llm_utils"                     # LLM utilities
+    ])
+    
+    return container
 
 def check_api_key() -> bool:
     """
@@ -117,6 +175,44 @@ def run_epidemic_example():
     # Plot the results
     plot_results(results['metrics_history'])
 
+@inject
+def run_workflow(
+    args,
+    logger,
+    agent_container: AgentContainer = Provide[AgentContainer]
+):
+    """
+    Run the workflow with dependency injection.
+    
+    Args:
+        args: Command line arguments
+        logger: Application logger
+        agent_container: Dependency injection container
+    
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    try:
+        # Initialize workflow manager with the container
+        workflow_manager = WorkflowManager(
+            task_description=args.task,
+            data_path=args.data,
+            output_path=args.output,
+            config_path=args.config,
+            max_iterations=args.iterations,
+            agent_container=agent_container
+        )
+        
+        # Run the workflow
+        result = workflow_manager.run()
+        
+        logger.info(f"Workflow completed successfully. Results available at: {result['code_path']}")
+        return 0
+    
+    except Exception as e:
+        logger.error(f"An error occurred: {e}")
+        return 1
+
 def main():
     # Parse command line arguments
     args = parse_arguments()
@@ -143,25 +239,11 @@ def main():
         logger.info("Please set up your API key using: python main.py --setup-api-key")
         return 1
     
-    try:
-        # Initialize workflow manager
-        workflow_manager = WorkflowManager(
-            task_description=args.task,
-            data_path=args.data,
-            output_path=args.output,
-            config_path=args.config,
-            max_iterations=args.iterations
-        )
-        
-        # Run the workflow
-        result = workflow_manager.run()
-        
-        logger.info(f"Workflow completed successfully. Results available at: {result['code_path']}")
-        return 0
+    # Set up the dependency injection container
+    container = setup_container(args.config)
     
-    except Exception as e:
-        logger.error(f"An error occurred: {e}")
-        return 1
+    # Run the workflow with dependency injection
+    return run_workflow(args, logger)
 
 if __name__ == '__main__':
     sys.exit(main())
