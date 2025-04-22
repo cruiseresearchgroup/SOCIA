@@ -45,47 +45,47 @@ class AgentContainer(containers.DeclarativeContainer):
     # Agents factory providers
     task_understanding_agent = providers.Factory(
         TaskUnderstandingAgent,
-        config=providers.Selector(config, "agents.task_understanding")
+        config=config.agents.task_understanding
     )
     
     data_analysis_agent = providers.Factory(
         DataAnalysisAgent,
-        config=providers.Selector(config, "agents.data_analysis")
+        config=config.agents.data_analysis
     )
     
     model_planning_agent = providers.Factory(
         ModelPlanningAgent,
-        config=providers.Selector(config, "agents.model_planning")
+        config=config.agents.model_planning
     )
     
     code_generation_agent = providers.Factory(
         CodeGenerationAgent,
-        config=providers.Selector(config, "agents.code_generation")
+        config=config.agents.code_generation
     )
     
     code_verification_agent = providers.Factory(
         CodeVerificationAgent,
-        config=providers.Selector(config, "agents.code_verification")
+        config=config.agents.code_verification
     )
     
     simulation_execution_agent = providers.Factory(
         SimulationExecutionAgent,
-        config=providers.Selector(config, "agents.simulation_execution")
+        config=config.agents.simulation_execution
     )
     
     result_evaluation_agent = providers.Factory(
         ResultEvaluationAgent,
-        config=providers.Selector(config, "agents.result_evaluation")
+        config=config.agents.result_evaluation
     )
     
     feedback_generation_agent = providers.Factory(
         FeedbackGenerationAgent,
-        config=providers.Selector(config, "agents.feedback_generation")
+        config=config.agents.feedback_generation
     )
     
     iteration_control_agent = providers.Factory(
         IterationControlAgent,
-        config=providers.Selector(config, "agents.iteration_control")
+        config=config.agents.iteration_control
     )
     
     # Agent provider dictionary for bulk access

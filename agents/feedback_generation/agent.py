@@ -24,7 +24,9 @@ class FeedbackGenerationAgent(BaseAgent):
         task_spec: Dict[str, Any],
         verification_results: Optional[Dict[str, Any]] = None,
         simulation_results: Optional[Dict[str, Any]] = None,
-        evaluation_results: Optional[Dict[str, Any]] = None
+        evaluation_results: Optional[Dict[str, Any]] = None,
+        model_plan: Optional[Dict[str, Any]] = None,
+        generated_code: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Generate feedback for improving the simulation.
@@ -34,6 +36,8 @@ class FeedbackGenerationAgent(BaseAgent):
             verification_results: Results from the Code Verification Agent (optional)
             simulation_results: Results from the Simulation Execution Agent (optional)
             evaluation_results: Results from the Result Evaluation Agent (optional)
+            model_plan: Model plan from the Model Planning Agent (optional)
+            generated_code: Generated code from the Code Generation Agent (optional)
         
         Returns:
             Dictionary containing feedback for improvement
@@ -45,7 +49,9 @@ class FeedbackGenerationAgent(BaseAgent):
             task_spec=task_spec,
             verification_results=verification_results,
             simulation_results=simulation_results,
-            evaluation_results=evaluation_results
+            evaluation_results=evaluation_results,
+            model_plan=model_plan,
+            generated_code=generated_code
         )
         
         # Call LLM to generate feedback

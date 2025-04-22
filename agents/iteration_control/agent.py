@@ -25,7 +25,8 @@ class IterationControlAgent(BaseAgent):
         max_iterations: int,
         verification_results: Optional[Dict[str, Any]] = None,
         evaluation_results: Optional[Dict[str, Any]] = None,
-        feedback: Optional[Dict[str, Any]] = None
+        feedback: Optional[Dict[str, Any]] = None,
+        task_spec: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Decide whether to continue with another iteration and what to focus on.
@@ -36,6 +37,7 @@ class IterationControlAgent(BaseAgent):
             verification_results: Results from the Code Verification Agent (optional)
             evaluation_results: Results from the Result Evaluation Agent (optional)
             feedback: Feedback from the Feedback Generation Agent (optional)
+            task_spec: Task specification from the Task Understanding Agent (optional)
         
         Returns:
             Dictionary containing the iteration decision
@@ -48,7 +50,8 @@ class IterationControlAgent(BaseAgent):
             max_iterations=max_iterations,
             verification_results=verification_results,
             evaluation_results=evaluation_results,
-            feedback=feedback
+            feedback=feedback,
+            task_spec=task_spec
         )
         
         # Call LLM to make the decision
