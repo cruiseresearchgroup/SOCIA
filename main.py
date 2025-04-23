@@ -16,8 +16,19 @@ from dependency_injector.wiring import Provide, inject
 
 def setup_logging():
     """Configure logging for the application."""
+    # Try to read logging level from config file
+    log_level = logging.INFO  # Default level is INFO
+    try:
+        with open("config.yaml", 'r') as f:
+            config = yaml.safe_load(f)
+            log_level_str = config.get("logging", {}).get("level", "INFO")
+            log_level = getattr(logging, log_level_str)
+    except Exception as e:
+        # If there's an error reading the config, use default level
+        print(f"Warning: Could not read logging level from config: {e}")
+    
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout)

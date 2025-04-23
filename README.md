@@ -75,7 +75,7 @@ Available LLM providers and their configurations:
   ```yaml
   llm_providers:
     gemini:
-      model: "gemini-2.5-flash-preview"  # options: gemini-2.5-flash-preview, gemini-pro, etc.
+      model: "models/gemini-2.5-flash-preview-04-17"  # options: gemini-2.5-flash-preview, gemini-pro, etc.
       temperature: 0.7
       max_tokens: 8192
   ```

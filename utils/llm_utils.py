@@ -147,11 +147,18 @@ class GeminiProvider(LLMProvider):
             # Configure the Gemini API
             genai.configure(api_key=api_key)
             
-            # Configure request parameters
-            model = self.config.get("model", "gemini-2.5-flash-preview")
+            # IMPORTANT: Use the exact model name from config
+            if "model" not in self.config:
+                self.logger.warning("Model not specified in config, using gemini-pro as fallback")
+                model = "models/gemini-pro"
+            else:
+                # Get model name EXACTLY as specified in config, no default value
+                model = self.config.get("model")
+            
             temperature = self.config.get("temperature", 0.7)
             max_tokens = self.config.get("max_tokens", 8192)
             
+            # Log the full model information
             self.logger.info(f"Using Gemini model: {model}")
             
             # Initialize model
@@ -309,6 +316,11 @@ def get_llm_provider(config: Dict[str, Any]) -> LLMProvider:
         # Get provider-specific config if available
         if provider_name in providers_config:
             provider_config = providers_config.get(provider_name, {})
+            
+            # Direct debugging of the actual model name coming from config
+            if provider_name == "gemini":
+                model_name = provider_config.get('model', 'NO_MODEL_FOUND_IN_CONFIG')
+                logging.getLogger("SOCIA.LLMProvider").info(f"Loading Gemini model from config: {model_name}")
         else:
             provider_config = {}
             
