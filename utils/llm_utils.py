@@ -115,6 +115,78 @@ class OpenAIProvider(LLMProvider):
             return f"Error: {str(e)}"
 
 
+class GeminiProvider(LLMProvider):
+    """
+    LLM provider using Google's Gemini API.
+    """
+    
+    def call(self, prompt: str) -> str:
+        """
+        Call Google's Gemini API with the provided prompt.
+        
+        Args:
+            prompt: The prompt to send to the LLM
+        
+        Returns:
+            The LLM's response
+        """
+        try:
+            import google.generativeai as genai
+            
+            # Get API key from keys.py file
+            api_key = load_api_key("GEMINI_API_KEY")
+            
+            # Use API key from config only as fallback
+            if not api_key:
+                api_key = self.config.get("api_key")
+                
+            if not api_key:
+                self.logger.error("Gemini API key not found in keys.py")
+                return "Error: Gemini API key not found in keys.py"
+            
+            # Configure the Gemini API
+            genai.configure(api_key=api_key)
+            
+            # Configure request parameters
+            model = self.config.get("model", "gemini-2.5-flash-preview")
+            temperature = self.config.get("temperature", 0.7)
+            max_tokens = self.config.get("max_tokens", 8192)
+            
+            self.logger.info(f"Using Gemini model: {model}")
+            
+            # Initialize model
+            generation_config = {
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+                "top_p": 0.95,
+                "top_k": 0
+            }
+            
+            # Get the generative model
+            model_instance = genai.GenerativeModel(model_name=model,
+                                            generation_config=generation_config)
+            
+            # Call the API
+            response = model_instance.generate_content(prompt)
+            
+            # Extract response text
+            if hasattr(response, 'text'):
+                return response.text
+            elif hasattr(response, 'parts'):
+                return ''.join([part.text for part in response.parts if hasattr(part, 'text')])
+            else:
+                self.logger.warning("Unexpected response format from Gemini")
+                return str(response)
+        
+        except ImportError:
+            self.logger.error("google-generativeai package not installed")
+            return "Error: google-generativeai package not installed"
+        
+        except Exception as e:
+            self.logger.error(f"Error calling Gemini API: {e}")
+            return f"Error: {str(e)}"
+
+
 class AnthropicProvider(LLMProvider):
     """
     LLM provider using Anthropic's API.
@@ -223,13 +295,45 @@ def get_llm_provider(config: Dict[str, Any]) -> LLMProvider:
     Returns:
         An LLM provider instance
     """
+    # Get the provider name from the config
     provider_name = config.get("provider", "mock").lower()
     
-    if provider_name == "openai":
-        return OpenAIProvider(config)
-    elif provider_name == "anthropic":
-        return AnthropicProvider(config)
-    elif provider_name == "llama":
-        return LlamaProvider(config)
-    else:
-        return MockProvider(config) 
+    # Load the global config to get provider-specific settings
+    try:
+        import yaml
+        with open("config.yaml", 'r') as f:
+            global_config = yaml.safe_load(f)
+        
+        providers_config = global_config.get("llm_providers", {})
+        
+        # Get provider-specific config if available
+        if provider_name in providers_config:
+            provider_config = providers_config.get(provider_name, {})
+        else:
+            provider_config = {}
+            
+        # Create and return the appropriate provider
+        if provider_name == "openai":
+            return OpenAIProvider(provider_config)
+        elif provider_name == "gemini":
+            return GeminiProvider(provider_config)
+        elif provider_name == "anthropic":
+            return AnthropicProvider(provider_config)
+        elif provider_name == "llama":
+            return LlamaProvider(provider_config)
+        else:
+            return MockProvider(provider_config)
+    
+    except Exception as e:
+        logging.getLogger("SOCIA.LLMProvider").error(f"Error loading provider config: {e}")
+        # Fallback to basic provider without specific config
+        if provider_name == "openai":
+            return OpenAIProvider({})
+        elif provider_name == "gemini":
+            return GeminiProvider({})
+        elif provider_name == "anthropic":
+            return AnthropicProvider({})
+        elif provider_name == "llama":
+            return LlamaProvider({})
+        else:
+            return MockProvider({}) 

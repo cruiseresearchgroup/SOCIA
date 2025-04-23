@@ -50,6 +50,50 @@ python main.py --setup-api-key
 
 This script will create or update the `keys.py` file with your API key.
 
+### 🤖 Language Model Selection
+
+SOCIA supports multiple large language model providers. You can easily switch between them by editing the `config.yaml` file:
+
+```yaml
+# In config.yaml
+llm:
+  provider: "gemini"  # options: openai, gemini, anthropic, llama
+```
+
+Available LLM providers and their configurations:
+
+- **OpenAI (GPT models)**
+  ```yaml
+  llm_providers:
+    openai:
+      model: "gpt-4o"  # options: gpt-4o, gpt-4-turbo, gpt-3.5-turbo, etc.
+      temperature: 0.7
+      max_tokens: 4000
+  ```
+
+- **Google Gemini**
+  ```yaml
+  llm_providers:
+    gemini:
+      model: "gemini-2.5-flash-preview"  # options: gemini-2.5-flash-preview, gemini-pro, etc.
+      temperature: 0.7
+      max_tokens: 8192
+  ```
+
+- **Anthropic Claude**
+  ```yaml
+  llm_providers:
+    anthropic:
+      model: "claude-3-opus-20240229"  # options: claude-3-opus, claude-3-sonnet, etc.
+      temperature: 0.7
+      max_tokens: 4000
+  ```
+
+To use a specific LLM provider:
+1. Make sure you have the appropriate API key in `keys.py`
+2. Update the `llm.provider` field in `config.yaml`
+3. Adjust provider-specific parameters in the `llm_providers` section if needed
+
 ## 🚀 Usage
 
 ### Example Commands

@@ -83,7 +83,8 @@ class BaseAgent(ABC):
             with open("config.yaml", 'r') as f:
                 global_config = yaml.safe_load(f)
             
-            llm_config = global_config.get("llm", {})
+            # Get only the LLM provider from llm section
+            llm_config = {"provider": global_config.get("llm", {}).get("provider", "mock")}
         except Exception as e:
             self.logger.error(f"Error loading global LLM configuration: {e}")
             llm_config = {"provider": "mock"}
