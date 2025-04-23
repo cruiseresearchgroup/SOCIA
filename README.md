@@ -116,8 +116,7 @@ This command runs a pre-configured epidemic simulation example to demonstrate th
 
 ```bash
 # Run a full workflow with a specific task
-python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./my_sim_output"```
-
+python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./output/my_sim_output"
 This command initiates the full SOCIA workflow:
 1. LLM agents analyze the task description
 2. The system designs and generates an epidemic simulation for a city of 1000 people
@@ -231,7 +230,7 @@ The dependency injection framework will handle the rest, ensuring your agent is 
 To run the complete system with dependency injection:
 
 ```bash
-python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./my_sim_output"
+python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./output/my_sim_output"
 ```
 
 This command automatically:
@@ -242,3 +241,34 @@ This command automatically:
 5. Runs the complete workflow using the injected dependencies
 
 The dependency injection system makes it possible to easily swap components, configure their behavior, and test them in isolation. 
+
+## 📝 Log
+
+SOCIA includes a comprehensive logging system that records all aspects of the simulation generation and execution process:
+
+- 🔍 **Detailed Execution Logs**: The system automatically records INFO, WARNING, and ERROR level messages
+- 📂 **Output Directory Integration**: Logs are saved directly in your output project directory
+- 🔄 **LLM Model Tracking**: Every LLM call is logged with the specific model version used
+- 🕒 **Timestamped Entries**: All log entries include precise timestamps for debugging and analysis
+
+To view logs for a simulation run:
+```bash
+# Logs are automatically saved in your output directory
+cat ./your_output_directory/socia.log
+
+# Example for checking LLM model usage
+grep "Using Gemini model" ./your_output_directory/socia.log
+```
+
+This logging system is invaluable for:
+- Debugging simulation generation issues
+- Tracking LLM model performance and usage
+- Analyzing the workflow execution process
+- Understanding agent decision-making
+
+Log settings can be configured in the `config.yaml` file:
+```yaml
+logging:
+  level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+``` 

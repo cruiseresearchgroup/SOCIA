@@ -14,7 +14,7 @@ from models.epidemic_model import create_epidemic_simulation
 from utils.llm_utils import load_api_key
 from dependency_injector.wiring import Provide, inject
 
-def setup_logging():
+def setup_logging(output_path=None):
     """Configure logging for the application."""
     # Try to read logging level from config file
     log_level = logging.INFO  # Default level is INFO
@@ -27,12 +27,29 @@ def setup_logging():
         # If there's an error reading the config, use default level
         print(f"Warning: Could not read logging level from config: {e}")
     
+    # Create handlers list
+    handlers = [logging.StreamHandler(sys.stdout)]
+    
+    # If output path is provided, add a file handler
+    if output_path:
+        try:
+            # Ensure output directory exists
+            os.makedirs(output_path, exist_ok=True)
+            
+            # Create log file path
+            log_file_path = os.path.join(output_path, "socia.log")
+            
+            # Add file handler to handlers list
+            handlers.append(logging.FileHandler(log_file_path))
+            print(f"Logging to file: {log_file_path}")
+        except Exception as e:
+            print(f"Warning: Could not set up logging to file: {e}")
+    
+    # Configure logging
     logging.basicConfig(
         level=log_level,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout)
-        ]
+        handlers=handlers
     )
     return logging.getLogger('SOCIA')
 
@@ -229,7 +246,7 @@ def main():
     args = parse_arguments()
     
     # Setup logging
-    logger = setup_logging()
+    logger = setup_logging(args.output)
     if args.debug:
         logger.setLevel(logging.DEBUG)
     
