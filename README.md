@@ -2,7 +2,7 @@
   <img src="docs/images/socia_logo.png" alt="SOCIA Logo" width="200px" />
 </p>
 
-# SOCIA: Simulation Orchestration for City Intelligence and Agents
+# 🌆 SOCIA: Simulation Orchestration for City Intelligence and Agents
 
 An LLM-driven multi-agent social simulation generator that automatically creates simulation environments based on user requirements and data.
 
@@ -12,7 +12,7 @@ An LLM-driven multi-agent social simulation generator that automatically creates
 </p>
 <!-- Replace this with your actual architecture diagram -->
 
-## Architecture
+## 🏗️ Architecture
 
 The system implements a distributed multi-agent architecture where each agent performs specialized tasks:
 
@@ -26,13 +26,13 @@ The system implements a distributed multi-agent architecture where each agent pe
 8. **Feedback Generation Agent**: Creates improvement suggestions
 9. **Iteration Control Agent**: Coordinates the workflow
 
-## Installation
+## 🔧 Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Configuration
+## ⚙️ Configuration
 
 ### API Key
 
@@ -50,7 +50,7 @@ python main.py --setup-api-key
 
 This script will create or update the `keys.py` file with your API key.
 
-## Usage
+## 🚀 Usage
 
 ### Example Commands
 
@@ -94,7 +94,7 @@ When running a simulation with a custom task, the system:
 
 For more advanced usage, see the examples directory for sample scripts that demonstrate specific simulation types.
 
-## Project Structure
+## 📁 Project Structure
 
 - `agents/`: Individual agent implementations
 - `core/`: Core simulation framework
@@ -104,7 +104,7 @@ For more advanced usage, see the examples directory for sample scripts that demo
 - `utils/`: Utility functions
 - `tests/`: Test suite 
 
-## Dependency Injection
+## 💉 Dependency Injection
 
 SOCIA uses the `dependency-injector` framework to manage agent lifecycles and dependencies. This architectural pattern provides several benefits:
 
