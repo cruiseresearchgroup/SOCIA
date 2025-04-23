@@ -72,8 +72,7 @@ This command runs a pre-configured epidemic simulation example to demonstrate th
 
 ```bash
 # Run a full workflow with a specific task
-python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./my_sim_output"
-```
+python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./my_sim_output"```
 
 This command initiates the full SOCIA workflow:
 1. LLM agents analyze the task description
@@ -188,7 +187,7 @@ The dependency injection framework will handle the rest, ensuring your agent is 
 To run the complete system with dependency injection:
 
 ```bash
-python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./my_sim_output3"
+python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./my_sim_output"
 ```
 
 This command automatically:
