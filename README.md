@@ -72,7 +72,7 @@ This command runs a pre-configured epidemic simulation example to demonstrate th
 
 ```bash
 # Run a full workflow with a specific task
-python main.py --task "Create an epidemic simulation for a city with 1000 people" --output "./my_sim_output"
+python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./my_sim_output"
 ```
 
 This command initiates the full SOCIA workflow:
@@ -183,77 +183,12 @@ agent_providers = providers.Dict({
 
 The dependency injection framework will handle the rest, ensuring your agent is created with the correct configuration and dependencies when needed by the workflow.
 
-### Testing with Dependency Injection
-
-Testing with dependency injection is straightforward and allows for better isolation of components. Here's how to create tests using the dependency injection system:
-
-```python
-import pytest
-from unittest.mock import MagicMock
-from orchestration.container import AgentContainer
-from orchestration.workflow_manager import WorkflowManager
-
-def test_workflow_with_dependency_injection():
-    # Create a container instance
-    container = AgentContainer()
-    
-    # Configure the container with test configuration
-    container.config.from_dict({
-        "system": {"name": "SOCIA", "version": "0.1.0"},
-        "agents": {
-            "task_understanding": {"prompt_template": "templates/task_understanding_prompt.txt"},
-            "data_analysis": {"prompt_template": "templates/data_analysis_prompt.txt"},
-            "model_planning": {"prompt_template": "templates/model_planning_prompt.txt"},
-            # Other agent configurations...
-        }
-    })
-    
-    # Create mock agents
-    mock_task_agent = MagicMock()
-    mock_task_agent.process.return_value = {"title": "Test Simulation", "entities": [{"name": "Person"}]}
-    
-    mock_model_agent = MagicMock()
-    mock_model_agent.process.return_value = {"model_type": "agent_based", "entities": [{"name": "Person"}]}
-    
-    # Override container providers with mocks
-    container.task_understanding_agent = lambda: mock_task_agent
-    container.model_planning_agent = lambda: mock_model_agent
-    
-    # Create a dictionary with all mock agents
-    agent_providers_dict = {
-        "task_understanding": mock_task_agent,
-        "model_planning": mock_model_agent,
-        # Add other mock agents as needed...
-    }
-    
-    # Override the agent_providers with our mocks
-    container.agent_providers = lambda: agent_providers_dict
-    
-    # Wire the container to the modules that use @inject
-    container.wire(modules=["orchestration.workflow_manager", "main"])
-    
-    # Create a workflow manager with the test container
-    workflow_manager = WorkflowManager(
-        task_description="Create a test simulation",
-        output_path="./test_output",
-        agent_container=container
-    )
-    
-    # Run the workflow
-    result = workflow_manager.run()
-    
-    # Assert expected behavior
-    assert mock_task_agent.process.called
-    assert mock_model_agent.process.called
-    # Additional assertions...
-```
-
 ### Running the System with Dependency Injection
 
 To run the complete system with dependency injection:
 
 ```bash
-python main.py --task "Create a simulation for a city with 1000 people" --output "./my_sim_output"
+python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./my_sim_output3"
 ```
 
 This command automatically:
