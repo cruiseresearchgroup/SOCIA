@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/socia_logo.png" alt="SOCIA Logo" width="200px" />
+  <img src="docs/images/socia_logo_large.jpg" alt="SOCIA Logo" width="200px" />
 </p>
 
 # 🌆 SOCIA: Simulation Orchestration for City Intelligence and Agents
@@ -32,9 +32,49 @@ The system implements a distributed multi-agent architecture where each agent pe
 pip install -r requirements.txt
 ```
 
+### 🐳 Docker Installation (Required for Sandbox Isolation)
+
+SOCIA uses Docker for isolated code execution and verification. You need to install Docker on your system to fully utilize the code verification and simulation execution features.
+
+#### Linux
+```bash
+# Update package index
+sudo apt-get update
+
+# Install prerequisites
+sudo apt-get install apt-transport-https ca-certificates curl software-properties-common
+
+# Add Docker's official GPG key
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+
+# Add Docker repository
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+# Install Docker CE
+sudo apt-get update
+sudo apt-get install docker-ce
+
+# Start Docker service
+sudo systemctl start docker
+
+# Enable Docker to start on boot
+sudo systemctl enable docker
+
+# Add your user to the docker group to run Docker without sudo
+sudo usermod -aG docker $USER
+```
+
+#### macOS
+The easiest way to install Docker on macOS is using Docker Desktop:
+
+1. Download Docker Desktop for Mac from [Docker's official website](https://www.docker.com/products/docker-desktop)
+2. Install the application by dragging it to your Applications folder
+3. Launch Docker Desktop and follow the setup wizard
+4. Verify installation with: `docker --version`
+
 ## ⚙️ Configuration
 
-### API Key
+### 🔑 API Key
 
 The system uses OpenAI's API for the LLM-based agents. The API key is hardcoded in the `keys.py` file:
 
@@ -96,7 +136,7 @@ To use a specific LLM provider:
 
 ## 🚀 Usage
 
-### Example Commands
+### 💻 Example Commands
 
 Here are some example commands to help you get started with SOCIA:
 
@@ -127,7 +167,7 @@ This command initiates the full SOCIA workflow:
 
 Use this command pattern when you want to create custom simulations based on your specific requirements. You can customize the task description to focus on different urban simulation scenarios.
 
-### Running Custom Simulations
+### 🧪 Running Custom Simulations
 
 When running a simulation with a custom task, the system:
 1. Parses your requirements using natural language processing
@@ -137,6 +177,56 @@ When running a simulation with a custom task, the system:
 5. Produces results and visualizations
 
 For more advanced usage, see the examples directory for sample scripts that demonstrate specific simulation types.
+
+## 🏃 Sandbox Isolation Environment
+
+SOCIA implements a secure sandbox isolation environment using Docker containers for safely executing and validating generated simulation code. This approach ensures:
+
+1. **Security**: Generated code runs in an isolated container with limited access to host resources
+2. **Dependency Management**: Automatic installation and verification of required packages
+3. **Error Detection**: Comprehensive execution monitoring and error reporting
+4. **Resource Control**: Memory and CPU limitations to prevent resource exhaustion
+
+### 🛡️ Code Verification Agent Sandbox
+
+The Code Verification Agent uses a sandbox environment to perform a comprehensive verification of generated code:
+
+1. **Syntax Verification**: Checks for syntax errors before execution
+2. **Dependency Analysis**: Extracts imports and identifies required packages
+3. **Dependency Installation**: Attempts to install all required packages in the sandbox
+4. **Smoke Test Execution**: Runs a minimal test execution to verify basic functionality
+
+When the system encounters verification issues, it will:
+- Provide detailed error messages
+- Generate suggestions for fixing the issues
+- Allow for iterative improvement of the code
+
+The verification process is implemented in `agents/code_verification/sandbox.py` and follows this workflow:
+```
+1. Syntax check → 2. Dependency analysis → 3. Docker sandbox creation → 4. Code execution → 5. Results collection
+```
+
+### 🖥️ Simulation Execution Agent Sandbox
+
+The Simulation Execution Agent uses a similar Docker-based sandbox for safely running the full simulation:
+
+1. **Environment Setup**: Creates a clean Docker container with Python
+2. **Package Installation**: Installs common simulation packages (numpy, matplotlib, etc.)
+3. **Metric Collection**: Injects code to collect performance and simulation metrics
+4. **Execution Monitoring**: Tracks execution time, memory usage, and errors
+5. **Results Extraction**: Captures simulation output and metrics for evaluation
+
+If Docker is not available on your system, SOCIA will fall back to using the LLM to simulate the execution, which provides a less accurate but still useful approximation of the simulation results.
+
+The execution sandbox is implemented in `agents/simulation_execution/agent.py` and follows a similar pattern to the verification sandbox, with additional focus on capturing simulation metrics and performance data.
+
+Both sandbox implementations use the base `DockerSandbox` class that provides a secure, isolated execution environment with:
+
+- Network access controls
+- Memory limitations
+- Execution timeouts
+- File system isolation
+- Standard output/error capturing 
 
 ## 📁 Project Structure
 
@@ -177,4 +267,4 @@ Log settings can be configured in the `config.yaml` file:
 logging:
   level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-``` 
+```

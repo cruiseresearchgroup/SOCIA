@@ -56,6 +56,10 @@ class WorkflowManager:
         self.container = agent_container
         self.container.config.from_dict(self.config)
         
+        # Set output path in container
+        self.container.output_path.override(self.output_path)
+        self.logger.debug(f"Set container output_path to: {self.output_path}")
+        
         # Get agent instances via dependency injection
         self.agents = self._initialize_agents()
         
@@ -176,6 +180,15 @@ class WorkflowManager:
         )
         self._save_artifact("verification_results", self.state["verification_results"])
         
+        # Log verification results clearly
+        if self.state["verification_results"]["passed"]:
+            self.logger.info(f"Iteration {self.current_iteration + 1}: Code verification PASSED")
+        else:
+            self.logger.warning(f"Iteration {self.current_iteration + 1}: Code verification FAILED")
+            if "critical_issues" in self.state["verification_results"]:
+                for issue in self.state["verification_results"]["critical_issues"]:
+                    self.logger.warning(f"Critical issue: {issue}")
+        
         # If code verification failed, skip execution and evaluation
         if not self.state["verification_results"]["passed"]:
             self.logger.warning("Code verification failed, skipping execution and evaluation")
@@ -183,12 +196,19 @@ class WorkflowManager:
             self.state["evaluation_results"] = None
         else:
             # Step 6: Simulation Execution
+            self.logger.info(f"Iteration {self.current_iteration + 1}: Starting simulation execution")
             self.state["simulation_results"] = self.agents["simulation_execution"].process(
                 code_path=code_file_path,
                 task_spec=self.state["task_spec"],
                 data_path=self.data_path
             )
             self._save_artifact("simulation_results", self.state["simulation_results"])
+            
+            # Log simulation execution results
+            if self.state["simulation_results"]["execution_status"] == "success":
+                self.logger.info(f"Iteration {self.current_iteration + 1}: Simulation execution completed successfully")
+            else:
+                self.logger.warning(f"Iteration {self.current_iteration + 1}: Simulation execution failed: {self.state['simulation_results'].get('summary', 'Unknown error')}")
             
             # Step 7: Result Evaluation
             self.state["evaluation_results"] = self.agents["result_evaluation"].process(
@@ -219,6 +239,10 @@ class WorkflowManager:
             feedback=self.state["feedback"]
         )
         self._save_artifact("iteration_decision", self.state["iteration_decision"])
+        
+        # Log iteration decision
+        continue_msg = "CONTINUE" if self.state["iteration_decision"]["continue"] else "STOP"
+        self.logger.info(f"Iteration {self.current_iteration + 1} decision: {continue_msg} - {self.state['iteration_decision'].get('reason', 'No reason provided')}")
     
     def _save_artifact(self, name: str, data: Any):
         """Save an artifact to the output directory."""

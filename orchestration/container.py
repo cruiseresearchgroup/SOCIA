@@ -42,6 +42,24 @@ class AgentContainer(containers.DeclarativeContainer):
         lambda: logging.getLogger("SOCIA.Container")
     )
     
+    # Shared output path provider
+    output_path = providers.Callable(lambda: "output")
+    
+    # Helper function for providing default configs
+    def get_default_config(agent_name):
+        defaults = {
+            "task_understanding": {"prompt_template": "templates/task_understanding_prompt.txt", "output_format": "json"},
+            "data_analysis": {"prompt_template": "templates/data_analysis_prompt.txt", "output_format": "json"},
+            "model_planning": {"prompt_template": "templates/model_planning_prompt.txt", "output_format": "json"},
+            "code_generation": {"prompt_template": "templates/code_generation_prompt.txt", "output_format": "python"},
+            "code_verification": {"prompt_template": "templates/code_verification_prompt.txt", "output_format": "json"},
+            "simulation_execution": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
+            "result_evaluation": {"prompt_template": "templates/result_evaluation_prompt.txt", "output_format": "json"},
+            "feedback_generation": {"prompt_template": "templates/feedback_generation_prompt.txt", "output_format": "json"},
+            "iteration_control": {"prompt_template": "templates/iteration_control_prompt.txt", "output_format": "json"}
+        }
+        return defaults.get(agent_name, {})
+
     # Agents factory providers
     task_understanding_agent = providers.Factory(
         TaskUnderstandingAgent,
@@ -65,11 +83,13 @@ class AgentContainer(containers.DeclarativeContainer):
     
     code_verification_agent = providers.Factory(
         CodeVerificationAgent,
+        output_dir=providers.Callable(lambda op: f"{op}/verification", output_path),
         config=config.agents.code_verification
     )
     
     simulation_execution_agent = providers.Factory(
         SimulationExecutionAgent,
+        output_dir=providers.Callable(lambda op: f"{op}/execution", output_path),
         config=config.agents.simulation_execution
     )
     
