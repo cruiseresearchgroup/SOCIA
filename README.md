@@ -36,7 +36,8 @@ pip install -r requirements.txt
 
 SOCIA uses Docker for isolated code execution and verification. You need to install Docker on your system to fully utilize the code verification and simulation execution features.
 
-**Always keep Docker running while using SOCIA for social simulation creation.**
+**Please be kindly noted: 
+Always keep Docker running while using SOCIA for social simulation creation.**
 
 #### Linux
 ```bash
