@@ -93,6 +93,38 @@ The data is split into:
 
 This allows for predictive modeling of mask-wearing behavior based on network features, demographic information, and early adoption patterns.
 
+## 📏 Evaluation Metrics
+
+The following metrics are recommended for evaluating predictive models using this dataset:
+
+### 📉 Root Mean Square Error (RMSE)
+
+- Highly suitable for assessing the overall predictive accuracy of mask adoption rates
+- Since adoption rates are in the 0-1 range, RMSE values can be directly interpreted as percentage deviations
+- Particularly useful for evaluating model performance on the test set (last 10 days)
+- Formula: RMSE = √(Σ(predicted_rate - actual_rate)²/n)
+
+### 🔝 Peak Adoption Rate Error
+
+- Data shows mask adoption rates rise after intervention and stabilize around 57-59%
+- This metric precisely measures whether a model accurately captures this peak level
+- Valuable for assessing model accuracy in predicting the maximum effect of government interventions
+- Formula: |predicted_peak_rate - actual_peak_rate|
+
+### ⏱️ Time-to-Peak Error
+
+- Especially meaningful for simulations with a clear intervention point (Day 10)
+- Evaluates whether the model accurately predicts the time lag from intervention to behavior change
+- Helps understand the dynamics of information propagation and behavior change
+- Formula: |predicted_peak_day - actual_peak_day|
+
+### 📈 Intervention Response Rate
+
+- Measures the rate of change in adoption during the first 5 days after intervention (Days 10-15)
+- Evaluates whether the model accurately captures the dynamics of initial response
+- Helps understand the immediate effectiveness of interventions through social networks
+- Formula: (rate_day15 - rate_day10) / 5
+
 ## 🚀 Usage
 
 To run the simulation:
