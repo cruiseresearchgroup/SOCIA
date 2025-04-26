@@ -1,88 +1,104 @@
-# 🔬 Epidemic Data Fitting Package
+# 📊 Data Fitting and Synthesis
 
-## 📋 Introduction
+This directory contains tools for generating synthetic data for social network mask adoption behavior simulation.
 
-This package provides tools to generate and analyze detailed individual-level epidemic simulation data that accurately fits the mathematical SIR (Susceptible-Infected-Recovered) model. The package implements an agent-based simulation approach while ensuring that the emergent behavior of the system closely matches the differential equation-based SIR model with specified parameters:
+## 🎯 Task Description
 
-- Transmission rate (β): 0.1873
-- Recovery rate (γ): 0.0472
-- Basic reproduction number (R₀): 3.97
+The main task implemented in this directory is to simulate and analyze the spread of mask-wearing behavior through social networks. The simulation models how individuals adopt mask-wearing behaviors based on:
 
-## 📊 Data Description
+- Social influence from different connection types (family, work/school, community)
+- Government interventions and information propagation
+- Personal risk perception
 
-The simulation generates data for 1000 individuals over 100 days, tracking:
+The model implements a multi-layered social network with agents of varying demographics, and tracks how mask-wearing behavior and information spread through the network over time. The implementation includes calibration to align with epidemiological models.
 
-- Individual health states (susceptible, infected, recovered) over time
-- Spatial positions of each individual on a 100×100 grid
-- Population-level metrics (daily counts of S, I, R)
+## 📁 Generated Data Description
 
-The generated data achieves a high level of fit to the ideal SIR model curves, with an overall normalized RMSE of approximately 1.92%, indicating excellent agreement between the individual-based simulation and the mathematical model.
+Running `data_synthesis.py` generates several output files in the `mask_adoption_data` directory:
 
-## ⚙️ Data Generation Methodology
+### Data Files
 
-The data is generated using an agent-based simulation that incorporates several sophisticated mechanisms to bridge the gap between discrete individual behavior and continuous SIR dynamics:
+| File | Description |
+|------|-------------|
+| `agent_attributes.csv` | Contains demographic and behavioral attributes of each agent, including age, occupation, risk perception, and social connection counts |
+| `social_network.pkl` | Pickled network data representing all connections between agents, categorized by connection type |
+| `social_network.gexf` | Graph file (compatible with Gephi) for network visualization and analysis |
+| `time_series_data.csv` | Daily data for each agent's mask-wearing status and information reception status |
+| `daily_aggregate_data.csv` | Daily aggregated statistics across the population, including overall mask-wearing rate and information spread rate |
+| `train_data.csv` | First 30 days of time series data, for model training |
+| `test_data.csv` | Last 10 days of time series data, for model testing |
 
-### 🔄 1. Enhanced Mixing and Transmission Mechanisms
+### Visualization Files
 
-- **Extended Movement Range**: Individuals move within a range of -3 to +3 grid cells per time step, better approximating the well-mixed population assumption of the SIR model.
-- **Long-Range Contacts**: 10% probability of making jumps up to 10 grid cells away, simulating long-distance connections in the population.
-- **Combined Transmission Pressure**: Infection risk combines:
-  - Local transmission based on nearby infected individuals
-  - Global transmission pressure proportional to the overall infection prevalence, simulating the effect of random mixing
+| File | Description |
+|------|-------------|
+| `simulation_results.png` | Line chart showing daily mask-wearing rates and information reception rates across the simulation period, with intervention and train/test split markers |
+| `network_day_0.png` | Network visualization at the initial state (Day 0), with nodes colored by mask-wearing and information status |
+| `network_day_10.png` | Network visualization at intervention start (Day 10), showing changes in mask-wearing and information propagation |
+| `network_day_39.png` | Network visualization at the final simulation state (Day 39), showing the ultimate diffusion of behaviors |
 
-### 🚀 2. Optimized Initial Conditions
+## 🔬 Data Synthesis Methodology
 
-- **Increased Seed Infections**: 50 initially infected individuals (up from 20) to ensure robust epidemic growth.
-- **Strategic Distribution**: Infected individuals are distributed across 10 infection centers throughout the grid, preventing isolated clusters.
-- **Uniform Population Distribution**: The population is evenly distributed across the grid rather than concentrated in the center, promoting more realistic mixing patterns.
+### Population Generation
 
-### 🔧 3. Calibration Mechanism
+The simulation starts by generating a population of 1,000 agents with diverse attributes:
 
-- **Regular Calibration**: Every 5 simulation days, the system compares the current state with the ideal SIR curve.
-- **Differential Adjustment**: Automatically calculates discrepancies in susceptible, infected, and recovered counts.
-- **Controlled Modifications**: Makes limited adjustments (maximum 2% of the population per calibration event) to align the simulation with the SIR model while preserving realistic individual dynamics.
-- **Transition Priorities**: Implements targeted S→I and I→R transitions as needed to match the theoretical curve.
+- Age distribution across four groups: Youth (0-18), Young Adult (19-40), Middle Age (41-65), and Elderly (66+)
+- Occupation assignment: Student, White Collar, Blue Collar, and Retired
+- Initial mask-wearing status (10% adoption rate)
+- Risk perception (drawn from a beta distribution)
 
-### 📏 4. Fit Quality Assessment
+### Social Network Construction
 
-- **Comprehensive Metrics**: Calculates Root Mean Square Error (RMSE) and Normalized RMSE for each component (S, I, R).
-- **Component-Specific Evaluation**: Separately evaluates the fit quality for susceptible, infected, and recovered curves.
-- **Overall Quality Index**: Provides a single metric (overall NRMSE) to evaluate the overall fit quality, with lower values indicating better fit.
+A multi-layered social network is created with three connection types:
 
-## ✂️ Training and Test Set Division
+1. **Family connections** (strong ties):
+   - Agents are grouped into family units of 1-6 members
+   - Family members have high influence on each other (80% probability of information transmission)
 
-The generated data is split into training and test sets to support machine learning applications:
+2. **Work/School connections** (medium ties):
+   - Agents are grouped by occupation and age
+   - Small-world networks are created within each group
+   - Medium influence (50% probability of information transmission)
 
-- **Training Set**: 900 randomly selected individuals (90% of the population)
-- **Test Set**: The remaining 100 individuals (10% of the population)
+3. **Community connections** (weak ties):
+   - Random connections representing casual community interactions
+   - Weak influence (30% probability of information transmission)
 
-The split is performed at the individual level, meaning each person's complete 100-day trajectory is assigned entirely to either the training or test set. This approach:
+### Behavior Simulation
 
-1. Preserves the temporal continuity of individual disease progression
-2. Allows for testing predictive models on unseen individuals
-3. Maintains similar epidemiological characteristics between training and test sets
+The simulation runs for 40 days with the following mechanisms:
 
-Both sets show similar epidemic curves when normalized by their respective population sizes, validating the representativeness of the sampling process.
+1. **Mask-wearing behavior update**:
+   - Base probability (5%)
+   - Risk perception influence (weighted by 40%)
+   - Social influence from connected agents (weighted by 30%)
+   - Government information influence (weighted by 30%, if received)
 
-## 📁 Generated Files
+2. **Information propagation**:
+   - Government intervention begins on Day 10
+   - Initial information sources are community leaders (highest-centrality nodes)
+   - Information spreads through the network based on connection types
+   - Probability of receiving information is highest from family connections, lower from community connections
 
-The package produces several key files:
+3. **Model calibration**:
+   - Information reception continues to 100% after intervention
+   - Mask-wearing reaches around 57-59% by the end of the simulation
 
-- `population_full.pkl`: Complete data for all 1000 individuals
-- `population_train.pkl`: Data for the 900 individuals in the training set
-- `population_test.pkl`: Data for the 100 individuals in the test set
-- `epidemic_simulation_data.csv`: Detailed CSV format of all simulation data
-- `epidemic_fit_full.png`: Visualization of the full dataset and SIR model fit
-- `epidemic_fit_train.png`: Visualization of the training dataset and SIR model fit
-- `epidemic_fit_test.png`: Visualization of the test dataset
-- `train_test_comparison.png`: Comparative visualization of training and test set dynamics
+### Data Analysis
 
-## 🖥️ Usage
+The data is split into:
+- Training set (first 30 days)
+- Testing set (last 10 days)
 
-To generate the data and create visualizations:
+This allows for predictive modeling of mask-wearing behavior based on network features, demographic information, and early adoption patterns.
 
-```python
-python fit_epidemic_data.py
+## 🚀 Usage
+
+To run the simulation:
+
+```bash
+python data_synthesis.py
 ```
 
-This will run the simulation with the default parameters, generate all data files, and produce the visualization plots. 
+The script will generate all data files and visualizations in the `mask_adoption_data` directory. 
