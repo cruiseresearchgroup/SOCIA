@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/socia_logo_large.jpg" alt="SOCIA Logo" width="200px" />
+  <img src="docs/images/socia_logo_large.png" alt="SOCIA Logo" width="200px" />
 </p>
 
 # 🌆 SOCIA: Simulation Orchestration for City Intelligence and Agents
