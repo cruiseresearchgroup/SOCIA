@@ -382,7 +382,10 @@ def run_simulation(population, social_network, families, days=40, intervention_d
         random.shuffle(update_order)
         
         for agent_id in update_order:
-            if intervention_active and population[agent_id].receive_information(info_sources):
+            # Record information reception status for each agent (appends to info_history)
+            received = population[agent_id].receive_information(info_sources)
+            # If intervention is active and agent newly received information, add to sources
+            if intervention_active and received:
                 new_info_sources.append(agent_id)
         
         # Update information sources

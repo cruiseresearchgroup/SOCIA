@@ -118,13 +118,6 @@ The following metrics are recommended for evaluating predictive models using thi
 - Helps understand the dynamics of information propagation and behavior change
 - Formula: |predicted_peak_day - actual_peak_day|
 
-### 📈 Intervention Response Rate
-
-- Measures the rate of change in adoption during the first 5 days after intervention (Days 10-15)
-- Evaluates whether the model accurately captures the dynamics of initial response
-- Helps understand the immediate effectiveness of interventions through social networks
-- Formula: (rate_day15 - rate_day10) / 5
-
 ## 🚀 Usage
 
 To run the simulation:
