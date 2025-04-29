@@ -142,15 +142,39 @@ class SimulationExecutionAgent(BaseAgent):
     def _execute_locally(self) -> Dict[str, Any]:
         """本地执行模拟"""
         try:
+            # 设置环境变量
+            env = os.environ.copy()
+            env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            
+            # 确保输出目录存在
+            os.makedirs(self.output_dir, exist_ok=True)
+            
+            # 获取相对路径
+            code_file_name = os.path.basename(self.code_file)
+            
+            # 使用虚拟环境中的Python解释器
+            python_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "socia_env", "bin", "python")
+            
             # 执行Python脚本
             result = subprocess.run(
-                ["python", self.code_file],
+                [python_path, code_file_name],
                 cwd=self.output_dir,
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 check=False
             )
+            
+            # 记录详细的执行信息
+            logger.info(f"执行命令: {python_path} {code_file_name}")
+            logger.info(f"工作目录: {self.output_dir}")
+            logger.info(f"环境变量: PYTHONPATH={env['PYTHONPATH']}")
+            logger.info(f"返回码: {result.returncode}")
+            if result.stdout:
+                logger.info(f"标准输出: {result.stdout[:200]}...")  # 只记录前200个字符
+            if result.stderr:
+                logger.warning(f"标准错误: {result.stderr}")  # 改为warning级别
             
             # 记录推理过程
             reasoning = f"我在本地环境中执行了模拟代码。"
@@ -160,8 +184,11 @@ class SimulationExecutionAgent(BaseAgent):
             
             self.memory.add_reasoning("执行模拟", reasoning)
             
+            # 如果返回码为0，则认为执行成功
+            success = result.returncode == 0
+            
             return {
-                "success": result.returncode == 0,
+                "success": success,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "returncode": result.returncode
@@ -376,7 +403,21 @@ CMD ["python", "simulation.py"]
         
         # 解析JSON
         try:
-            result = json.loads(response)
+            # 添加日志记录原始LLM响应内容
+            logger.info(f"LLM原始响应内容: {response}")
+            
+            # 处理可能的markdown代码块格式
+            json_str = response
+            if response.strip().startswith("```") and "```" in response:
+                # 提取代码块中的内容
+                lines = response.strip().split("\n")
+                json_str = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+                # 如果第一行是```json，移除它
+                if json_str.startswith("json"):
+                    json_str = json_str[4:].strip()
+                    
+            logger.info(f"处理后的JSON字符串前100个字符: {json_str[:100]}")
+            result = json.loads(json_str)
             
             # 记录推理过程
             reasoning = f"我分析了模拟结果，执行状态为{result.get('执行状态', '未知')}。"

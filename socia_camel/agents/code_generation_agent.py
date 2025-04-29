@@ -341,7 +341,21 @@ class CodeGenerationAgent(BaseAgent):
         
         # 解析JSON
         try:
-            result = json.loads(response)
+            # 添加日志记录原始LLM响应内容
+            logger.info(f"LLM原始响应内容: {response}")
+            
+            # 处理可能的markdown代码块格式
+            json_str = response
+            if response.strip().startswith("```") and "```" in response:
+                # 提取代码块中的内容
+                lines = response.strip().split("\n")
+                json_str = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+                # 如果第一行是```json，移除它
+                if json_str.startswith("json"):
+                    json_str = json_str[4:].strip()
+                    
+            logger.info(f"处理后的JSON字符串前100个字符: {json_str[:100]}")
+            result = json.loads(json_str)
             
             # 记录推理过程
             reasoning = f"我分析了模型规划的代码实现难点和可能的解决方案。"
