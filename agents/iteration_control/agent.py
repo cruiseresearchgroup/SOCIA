@@ -10,13 +10,12 @@ from agents.base_agent import BaseAgent
 class IterationControlAgent(BaseAgent):
     """
     Iteration Control Agent determines whether another iteration of the simulation
-    generation process is needed, and if so, what adjustments should be made.
-    
-    This agent is responsible for:
-    1. Assessing whether the simulation has converged to a satisfactory solution
-    2. Deciding whether to continue with another iteration
-    3. Identifying areas to focus on in the next iteration
-    4. Suggesting adjustments to other agents
+    generation process is needed within the current soft window, and if so,
+    what adjustments should be made for the next iteration.
+
+    This agent uses a soft iteration limit (passed as max_iterations) to guide
+    its decision. WorkflowManager may extend the soft window until the hard
+    maximum iteration limit is reached.
     """
     
     def process(
@@ -33,7 +32,7 @@ class IterationControlAgent(BaseAgent):
         
         Args:
             current_iteration: Current iteration number (0-based)
-            max_iterations: Maximum number of iterations
+            max_iterations: Soft maximum number of iterations in current window
             verification_results: Results from the Code Verification Agent (optional)
             evaluation_results: Results from the Result Evaluation Agent (optional)
             feedback: Feedback from the Feedback Generation Agent (optional)

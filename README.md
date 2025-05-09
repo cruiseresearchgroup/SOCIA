@@ -137,6 +137,17 @@ To use a specific LLM provider:
 2. Update the `llm.provider` field in `config.yaml`
 3. Adjust provider-specific parameters in the `llm_providers` section if needed
 
+### 📁 Supported File Types for DataAnalysisAgent
+
+The `DataAnalysisAgent` is capable of reading and analyzing the following file types:
+
+- **CSV Files** (`.csv`): Used for tabular data analysis.
+- **JSON Files** (`.json`): Supports standard JSON format for structured data.
+- **GeoJSON Files** (`.geojson`): A specialized format for encoding geographic data structures.
+- **Pickle Files** (`.pkl`): Used for loading serialized Python objects, such as network structures.
+
+Ensure that the files are correctly formatted to allow for successful analysis.
+
 ## 🚀 Usage
 
 ### 💻 Example Commands
@@ -271,3 +282,74 @@ logging:
   level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 ```
+
+## 🤖 Agents
+
+SOCIA employs a multi-agent architecture where specialized agents work together in a workflow to accomplish complex simulation tasks. Each agent leverages LLM capabilities for their specific domain responsibilities.
+
+### 🧠 Task Understanding Agent
+
+The Task Understanding Agent serves as the entry point to the SOCIA workflow, responsible for interpreting user requirements and creating a structured task specification:
+
+1. **Natural Language Processing**
+   - Parses unstructured or semi-structured user task descriptions
+   - Extracts key requirements, constraints, and objectives
+   - Identifies domain-specific terminology and concepts
+
+2. **Task Formalization**
+   - Converts natural language requirements into a formal, structured specification
+   - Identifies required data files and their purposes
+   - Establishes evaluation metrics for assessing simulation quality
+
+3. **Contextual Understanding**
+   - Recognizes the simulation domain (epidemiology, urban planning, etc.)
+   - Identifies implicit requirements not explicitly stated by the user
+   - Considers constraints that might affect simulation design
+
+4. **Integration with Workflow**
+   - Provides a clear, structured `task_spec` to downstream agents
+   - Sets initial parameters and constraints for the entire simulation process
+   - Creates a foundation for all subsequent agent activities
+
+The Task Understanding Agent outputs a comprehensive JSON structure that serves as the blueprint for the entire simulation development process, ensuring all agents have a consistent understanding of user requirements.
+
+### 📊 Data Analysis Agent
+
+The Data Analysis Agent has been redesigned to leverage LLM capabilities for intelligent data analysis, understanding, and correction:
+
+1. **LLM-Powered Intelligent Data Correction**
+   - No longer relies on hardcoded rules for data analysis
+   - Uses LLM to detect issues and suggest corrections
+   - Automatically identifies and converts various boolean representations (strings "True"/"False", numbers 1/0)
+   - Understands data context and semantics rather than just mechanical processing
+
+2. **Enhanced Data Analysis Workflow**
+   - **Intelligent Preprocessing**:
+     - Reads raw data
+     - Provides sample data and task description to LLM
+     - LLM identifies potential data issues and correction methods
+     - Automatically applies appropriate corrections based on LLM suggestions
+   - **Deep Understanding**:
+     - LLM explains meaning and context of each field
+     - Detects patterns and relationships that might not be obvious
+     - Identifies key features useful for simulation calibration
+   - **Calibration Recommendations**:
+     - Extracts key distributions, patterns, and relationships from data
+     - Suggests how to use the data to calibrate the simulator
+     - Provides specific parameter values and configuration suggestions
+
+3. **Structured Output Optimization**
+   - Produces detailed structured results including:
+     - `data_summary`: Key patterns, distributions, and relationships in the data
+     - `simulation_parameters`: Parameter values and recommendations extracted from data
+     - `calibration_strategy`: Strategies for using data to calibrate the simulator
+     - `processed_data`: Corrected and processed data
+     - `file_info`: Detailed information and purpose for each file
+
+4. **Downstream Agent Integration**
+   - Provides high-quality inputs to the Model Planning Agent and Code Generation Agent:
+     - Clearly communicates what information the data contains
+     - Explains in detail how to use the data for simulation calibration
+     - Delivers structured data and analysis results for easy processing
+
+This redesign enables the Data Analysis Agent to function as a true LLM agent, leveraging powerful language model capabilities to understand and process data rather than relying on predefined rules and hardcoded logic.

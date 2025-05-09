@@ -79,6 +79,8 @@ class SimulationExecutionAgent(BaseAgent):
         """
         self.logger.info("Executing simulation code")
         
+        # Data will be loaded directly from data_path
+        
         # Read the code file
         try:
             with open(code_path, 'r') as f:
@@ -97,13 +99,14 @@ class SimulationExecutionAgent(BaseAgent):
         
         # Try to execute the code in a Docker sandbox if available
         if self.docker_available:
-            execution_result = self._execute_code_in_sandbox(code)
+            execution_result = self._execute_code_in_sandbox(code, data_path)
             if execution_result:
                 return execution_result
         
         # Fall back to LLM simulation if Docker execution fails or is unavailable
         self.logger.info("Using LLM to simulate execution")
         
+        # Build prompt for LLM simulation, include file references if available
         prompt = self._build_prompt(
             task_spec=task_spec,
             code=code,
@@ -154,13 +157,15 @@ class SimulationExecutionAgent(BaseAgent):
     
     def _execute_code_in_sandbox(
         self,
-        code: str
+        code: str,
+        data_path: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Execute the code in a sandbox environment.
         
         Args:
             code: The simulation code
+            data_path: Path to input data (optional)
         
         Returns:
             Dictionary containing execution results or None if execution failed
@@ -177,7 +182,8 @@ class SimulationExecutionAgent(BaseAgent):
                 base_image="python:3.9-slim",
                 timeout=120,  # 2 minutes timeout
                 max_memory="1g",
-                network_enabled=False
+                network_enabled=True,  # Enable network to install packages
+                data_path=data_path  # Pass data_path to DockerSandbox
             ) as sandbox:
                 # Write a custom entry point to collect metrics
                 entry_point = """
@@ -255,7 +261,7 @@ except Exception as e:
 collected_metrics["performance_metrics"]["execution_time"] = time.time() - start_time
 
 # Save metrics to a file
-with open('/workspace/simulation_metrics.json', 'w') as f:
+with open('/sandbox/simulation_metrics.json', 'w') as f:
     json.dump(collected_metrics, f, indent=2)
 """
                 
@@ -289,8 +295,11 @@ with open('/workspace/simulation_metrics.json', 'w') as f:
                     }
                     
                     # Add execution stdout/stderr
-                    result["stdout"] = execution_results.get("stdout", "")
-                    result["stderr"] = execution_results.get("stderr", "")
+                    stdout_full = execution_results.get("stdout", "")
+                    stderr_full = execution_results.get("stderr", "")
+                    MAX_SNIPPET_LEN = 500
+                    result["stdout"] = (stdout_full[:MAX_SNIPPET_LEN] + "... (truncated)") if len(stdout_full) > MAX_SNIPPET_LEN else stdout_full
+                    result["stderr"] = (stderr_full[:MAX_SNIPPET_LEN] + "... (truncated)") if len(stderr_full) > MAX_SNIPPET_LEN else stderr_full
                     
                     # Save execution results
                     results_file = os.path.join(execution_output_dir, "execution_results.json")
@@ -320,9 +329,12 @@ with open('/workspace/simulation_metrics.json', 'w') as f:
                         "summary": "Execution failed to produce metrics"
                     }
                     
-                    # Add execution stdout/stderr
-                    result["stdout"] = execution_results.get("stdout", "")
-                    result["stderr"] = execution_results.get("stderr", "")
+                    # Add truncated execution stdout/stderr to avoid huge logs
+                    stdout_full = execution_results.get("stdout", "")
+                    stderr_full = execution_results.get("stderr", "")
+                    MAX_SNIPPET_LEN = 500
+                    result["stdout"] = (stdout_full[:MAX_SNIPPET_LEN] + "... (truncated)") if len(stdout_full) > MAX_SNIPPET_LEN else stdout_full
+                    result["stderr"] = (stderr_full[:MAX_SNIPPET_LEN] + "... (truncated)") if len(stderr_full) > MAX_SNIPPET_LEN else stderr_full
                     
                     # Save execution results
                     results_file = os.path.join(execution_output_dir, "execution_results.json")
@@ -349,56 +361,23 @@ with open('/workspace/simulation_metrics.json', 'w') as f:
         data_path: Optional[str] = None
     ) -> str:
         """
-        Build a prompt for the LLM to simulate the execution of the code.
+        Build a prompt for the LLM to simulate execution.
         
         Args:
             task_spec: Task specification
-            code: The simulation code
+            code: The generated code
             data_path: Path to input data (optional)
-            
+        
         Returns:
             Prompt for the LLM
         """
-        prompt = f"""
-You are a simulation execution expert. You need to simulate the execution of the following code and provide realistic results.
+        return f"""
+You are a simulation expert. Your task is to simulate running Python code for a social simulation.
 
-The code is implementing the following task:
+Use the following information:
+TASK SPECIFICATION:
 {json.dumps(task_spec, indent=2)}
 
-The code to simulate:
-```python
-{code}
-```
-
-Please execute this code in your mind and provide realistic simulation results. Format your response as a JSON object with the following structure:
-{{
-  "execution_status": "success/failed",
-  "runtime_errors": [], // List of error messages if any
-  "performance_metrics": {{
-    "execution_time": 0.0,
-    "memory_usage": 0
-  }},
-  "simulation_metrics": {{
-    // Final metrics produced by the simulation
-  }},
-  "time_series_data": [
-    {{
-      "time_step": 0,
-      "metrics": {{
-        // Metrics at this time step
-      }}
-    }},
-    // Additional time steps...
-  ],
-  "visualizations": [
-    {{
-      "type": "chart_type",
-      "description": "Description of the visualization"
-    }}
-  ],
-  "summary": "Brief summary of the execution and results"
-}}
-
-Provide realistic values for the above fields based on the expected behavior of the code.
-"""
-        return prompt 
+Data Path:
+{data_path}
+""" 

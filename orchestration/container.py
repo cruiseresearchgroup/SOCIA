@@ -68,7 +68,8 @@ class AgentContainer(containers.DeclarativeContainer):
     
     data_analysis_agent = providers.Factory(
         DataAnalysisAgent,
-        config=config.agents.data_analysis
+        config=config.agents.data_analysis,
+        output_path=output_path
     )
     
     model_planning_agent = providers.Factory(

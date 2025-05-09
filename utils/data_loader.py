@@ -7,6 +7,7 @@ import json
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List, Union, Optional, Tuple
+import pickle
 
 class DataLoader:
     """
@@ -67,6 +68,16 @@ class DataLoader:
         """
         return self.load_json(file_path)
     
+    def load_pickle(self, file_path: str) -> Any:
+        """
+        Load data from a pickle (.pkl) file.
+        """
+        full_path = os.path.join(self.data_path, file_path)
+        with open(full_path, 'rb') as f:
+            data = pickle.load(f)
+        self.loaded_data[file_path] = data
+        return data
+    
     def get_data(self, file_path: str) -> Union[pd.DataFrame, Dict[str, Any]]:
         """
         Get previously loaded data.
@@ -98,6 +109,11 @@ class DataAnalyzer:
         Returns:
             Dictionary containing distribution statistics
         """
+        # Check if data is boolean and convert to int if needed
+        if hasattr(data, 'dtype') and data.dtype == 'bool':
+            # Convert boolean to integer (True=1, False=0) 
+            data = data.astype(int)
+            
         if isinstance(data, pd.Series):
             data = data.values
         elif isinstance(data, list):

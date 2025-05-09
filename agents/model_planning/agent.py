@@ -4,6 +4,11 @@ ModelPlanningAgent: Designs the simulation model based on task requirements and 
 
 import logging
 from typing import Dict, Any, Optional, List
+import pandas as pd
+import pickle
+import os
+import json
+import numpy as np
 
 from agents.base_agent import BaseAgent
 
@@ -36,7 +41,58 @@ class ModelPlanningAgent(BaseAgent):
         """
         self.logger.info("Creating simulation model plan")
         
-        # Build prompt from template
+        # If processed data references are provided, log them and optionally load
+        if data_analysis and "file_references" in data_analysis:
+            refs = data_analysis.get("file_references", {})
+            self.logger.info(f"Processed data file references: {refs}")
+            # Example: load small sample if needed
+            loaded = {}
+            for name, path in refs.items():
+                try:
+                    if path.endswith('.csv'):
+                        df = pd.read_csv(path)
+                        # 将DataFrame转换为JSON可序列化的字典格式
+                        loaded[name] = {
+                            "sample": df.head(5).to_dict('records'),
+                            "columns": df.columns.tolist(),
+                            "shape": list(df.shape),
+                            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()}
+                        }
+                    elif path.endswith('.pkl'):
+                        with open(path, 'rb') as f:
+                            obj = pickle.load(f)
+                        # 提供对象的更详细描述，确保可序列化
+                        obj_type = str(type(obj))
+                        obj_info = {"type": obj_type}
+                        
+                        # 根据对象类型提供不同的描述
+                        if isinstance(obj, dict):
+                            obj_info["keys"] = list(obj.keys())[:10]  # 最多包含前10个键
+                            obj_info["value_types"] = {k: str(type(v)) for k, v in list(obj.items())[:5]}
+                            obj_info["size"] = len(obj)
+                        elif isinstance(obj, (list, tuple)):
+                            obj_info["length"] = len(obj)
+                            obj_info["sample_types"] = [str(type(x)) for x in obj[:5]] if obj else []
+                        elif hasattr(obj, 'shape'):  # numpy arrays, matrices等
+                            obj_info["shape"] = list(map(int, obj.shape))
+                            obj_info["dtype"] = str(obj.dtype)
+                        elif hasattr(obj, 'nodes'):  # 可能是networkx图
+                            obj_info["nodes"] = len(obj.nodes)
+                            obj_info["edges"] = len(obj.edges) if hasattr(obj, 'edges') else "unknown"
+                            
+                        loaded[name] = obj_info
+                except Exception as e:
+                    self.logger.warning(f"Could not load processed file {name}: {e}")
+                    loaded[name] = {"error": str(e)}
+            data_analysis['loaded_samples'] = loaded
+        
+        # Override task_spec data_files to point to processed data files
+        if data_analysis and "file_references" in data_analysis:
+            self.logger.info("Overriding task_spec data_files with processed file paths")
+            task_spec = dict(task_spec)
+            task_spec["data_files"] = data_analysis["file_references"]
+        
+        # Build prompt from template (includes file_summaries, calibration context, and optionally loaded samples)
         prompt = self._build_prompt(
             task_spec=task_spec,
             data_analysis=data_analysis

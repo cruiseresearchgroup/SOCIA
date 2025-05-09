@@ -62,7 +62,8 @@ class CodeVerificationAgent(BaseAgent):
     def process(
         self,
         code: str,
-        task_spec: Dict[str, Any]
+        task_spec: Dict[str, Any],
+        data_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Verify the generated simulation code.
@@ -70,6 +71,7 @@ class CodeVerificationAgent(BaseAgent):
         Args:
             code: The generated simulation code
             task_spec: Task specification from the Task Understanding Agent
+            data_path: Original data directory path (optional)
         
         Returns:
             Dictionary containing verification results
@@ -79,6 +81,10 @@ class CodeVerificationAgent(BaseAgent):
         # Try to use the sandbox for comprehensive verification if available
         if self.sandbox_available:
             try:
+                # Update sandbox with data_path if provided
+                if data_path and hasattr(self.sandbox, 'data_path'):
+                    self.sandbox.data_path = data_path
+                
                 # Use the sandbox for comprehensive verification
                 verification_result = self.sandbox.verify_code(code)
                 
@@ -298,6 +304,9 @@ The code to verify is:
 {code}
 ```
 
+SPECIAL REQUIREMENTS:
+- At the end of the file, include a direct call to the main() function (e.g., `# Execute main for both direct execution and sandbox wrapper invocation\nmain()`) instead of using the traditional `if __name__ == "__main__"` guard to ensure compatibility with sandbox execution. This is a STANDARD REQUIREMENT for all simulations in this system and should NOT be considered an issue.
+
 Please verify the code on the following aspects:
 1. Syntax: Is the code syntactically correct?
 2. Imports: Are all necessary libraries and modules imported?
@@ -305,6 +314,7 @@ Please verify the code on the following aspects:
 4. Logic: Is the logic of the simulation correct?
 5. Error handling: Does the code handle errors appropriately?
 6. Performance: Are there any obvious performance issues?
+7. Main function call: Verify that the main() function is called directly at the global scope rather than inside an if __name__ == "__main__" guard. This is the required pattern for our system.
 
 Provide your verification results in the following JSON format:
 {{

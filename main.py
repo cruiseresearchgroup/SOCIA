@@ -57,10 +57,10 @@ def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='SOCIA: LLM-driven multi-agent social simulation generator')
     parser.add_argument('--task', type=str, help='Description of the simulation task')
-    parser.add_argument('--data', type=str, help='Path to input data directory')
+    parser.add_argument('--task-file', type=str, help='Path to task description JSON file containing task_objective, data_folder, data_files, and evaluation_metrics')
     parser.add_argument('--output', type=str, default='./output', help='Path to output directory')
     parser.add_argument('--config', type=str, default='./config.yaml', help='Path to configuration file')
-    parser.add_argument('--iterations', type=int, default=3, help='Maximum number of iterations')
+    parser.add_argument('--iterations', type=int, default=3, help='Hard maximum number of iterations (multiple of 3 recommended); soft window starts at 3.')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     parser.add_argument('--run-example', action='store_true', help='Run the example epidemic simulation')
     parser.add_argument('--setup-api-key', action='store_true', help='Setup OpenAI API key')
@@ -224,7 +224,7 @@ def run_workflow(
         # Initialize workflow manager with the container
         workflow_manager = WorkflowManager(
             task_description=args.task,
-            data_path=args.data,
+            data_path=args.task_file,
             output_path=args.output,
             config_path=args.config,
             max_iterations=args.iterations,
@@ -234,7 +234,11 @@ def run_workflow(
         # Run the workflow
         result = workflow_manager.run()
         
-        logger.info(f"Workflow completed successfully. Results available at: {result['code_path']}")
+        # Log workflow completion depending on whether code file was generated
+        if os.path.exists(result['code_path']):
+            logger.info(f"Workflow completed. Results available at: {result['code_path']}")
+        else:
+            logger.warning(f"Workflow ended but code file not found at: {result['code_path']}. Please check the logs and artifacts.")
         return 0
     
     except Exception as e:
