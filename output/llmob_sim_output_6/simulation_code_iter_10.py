@@ -183,7 +183,7 @@ def llm_generate_day_schedule(resident_profile: Dict[str, Any], past7_activities
     location_examples = set()
     for activity in past7_activities:
         parts = activity.split(" at ")
-        if len(parts) >= 3:  # 活动格式为 "活动类型 at 时间 at 地点"
+        if len(parts) >= 3:  # Activity format is "activity_type at time at location"
             location = parts[2].strip()
             if "#" in location:  # Only include POI-style locations
                 location_examples.add(location)
@@ -241,7 +241,10 @@ def llm_generate_day_schedule(resident_profile: Dict[str, Any], past7_activities
         "6. For 'work' activities, use the resident's work_location\n"
         "7. For others, select from the activity-specific POI options\n"
         "8. Include at least 5 activities in the schedule for a realistic day\n"
-        "Return a valid JSON array. Do NOT wrap in markdown."
+        "9. Try to keep consecutive activities geographically close (within ~5 km, ideally ≤3 km). Provide an estimated 'transition_distance' (km) for each activity showing distance from previous activity.\n"
+        "10. Reuse locations already used earlier in the day when reasonable to avoid unnecessary travel.\n"
+        "11. For dining and socializing activities, choose locations within 3 km of either the resident's home_location or work_location.\n"
+        "Return a valid JSON array. Do NOT wrap in markdown. Each activity object MUST include an extra numeric field 'transition_distance'.\n"
     )
 
     user_msg = (
@@ -349,7 +352,8 @@ def llm_generate_day_schedule(resident_profile: Dict[str, Any], past7_activities
                 "type": activity_type,
                 "start_time": start_time,
                 "duration_minutes": duration,
-                "location": location
+                "location": location,
+                "transition_distance": item.get("transition_distance", -1)
             })
         
         # Ensure we have at least 5 activities for a proper day
@@ -362,8 +366,8 @@ def llm_generate_day_schedule(resident_profile: Dict[str, Any], past7_activities
             if not any(act["type"] == "resting" and act["start_time"] < "09:00:00" for act in valid_schedule):
                 valid_schedule.append({
                     "type": "resting",
-                    "start_time": "07:00:00",
-                    "duration_minutes": 60,
+                    "start_time": "07:30:00",
+                    "duration_minutes": 90,
                     "location": home_location
                 })
             
@@ -507,7 +511,7 @@ class Resident:
         work_days = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday"}
         day_of_week = current_time.strftime("%A")
         
-        # 如果工作地点是随机生成的（以Workplace_开头），则不进行通勤
+        # If the workplace is randomly generated (starting with Workplace_), skip commuting
         if self.work_location.startswith("Workplace_"):
             return
         
@@ -639,9 +643,9 @@ class UrbanSimulation:
         self.residents = {}  # Dictionary of resident_id -> Resident
         self.locations = []
         self.poi_data = {}
-        self.category_data = {}  # 存储类别数据
-        self.poi_by_category = {}  # 按类别存储POI数据
-        self.poi_by_name = {}  # 按名称存储POI数据
+        self.category_data = {}  # Store category data
+        self.poi_by_category = {}  # Store POI data by category
+        self.poi_by_name = {}  # Store POI data by name
         self.random_seed = random_seed
         random.seed(self.random_seed)
         np.random.seed(self.random_seed)
@@ -655,7 +659,7 @@ class UrbanSimulation:
             self.poi_data = load_json("poi_category_192021_longitude_latitude_complement_alignment_clean.json")
             self.category_data = load_json("catto.json")
             
-            # 处理POI数据，建立查找索引
+            # Process POI data and build lookup indexes
             for category, pois in self.poi_data.items():
                 self.poi_by_category[category] = []
                 for poi in pois:
@@ -663,7 +667,7 @@ class UrbanSimulation:
                         poi_name = poi[2]
                         coordinates = (float(poi[0]), float(poi[1]))
                         
-                        # 存储不含编号的POI名称与完整POI信息的映射
+                        # Store mappings between base POI names (without ID numbers) and complete POI information
                         base_name = poi_name.split("#")[0] if "#" in poi_name else poi_name
                         if base_name not in self.poi_by_name:
                             self.poi_by_name[base_name] = []
@@ -673,7 +677,7 @@ class UrbanSimulation:
                             "coordinates": coordinates
                         })
                         
-                        # 存储POI类别与POI信息的映射
+                        # Store mappings between POI categories and POI information
                         self.poi_by_category[category].append({
                             "name": poi_name,
                             "coordinates": coordinates
@@ -760,12 +764,12 @@ class UrbanSimulation:
             work_categories = ["Office", "Company", "School", "University", "Hospital"]
             work_location = self.select_poi_from_categories(work_categories)
             
-            # 如果以上类别找不到，使用商业区域作为备选
+            # If categories above are not found, use commercial areas as fallbacks
             if not work_location:
                 fallback_categories = ["Shopping Mall", "Department Store", "Building"]
                 work_location = self.select_poi_from_categories(fallback_categories)
                 
-            # 最后才使用默认值
+            # Use default value only as a last resort
             if not work_location:
                 work_location = f"Workplace_{resident_id}"
             
@@ -791,13 +795,13 @@ class UrbanSimulation:
     
     def select_poi_from_categories(self, categories: List[str]) -> Optional[str]:
         """
-        从指定类别中选择一个POI
+        Select a POI from the specified categories
         
         Args:
-            categories: POI类别列表
+            categories: List of POI categories
         
         Returns:
-            选中的POI名称，如果没有找到则返回None
+            Selected POI name, or None if not found
         """
         for category in categories:
             if category in self.poi_by_category and self.poi_by_category[category]:
@@ -806,7 +810,7 @@ class UrbanSimulation:
                     chosen_poi = random.choice(poi_options)
                     return chosen_poi["name"]
         
-        # 如果找不到指定类别，尝试从任何类别中选择
+        # If specified categories are not found, try to select from any category
         all_categories = list(self.poi_by_category.keys())
         if all_categories:
             random_category = random.choice(all_categories)
@@ -818,13 +822,13 @@ class UrbanSimulation:
 
     def infer_home_work_locations(self, historical_activities: Dict[str, List[str]]) -> Tuple[Optional[str], Optional[str]]:
         """
-        推断居民的家庭和工作地点，基于他们的历史活动
+        Infer resident's home and work locations based on their historical activities
         
         Args:
-            historical_activities: 按日期索引的历史活动记录
+            historical_activities: Historical activities indexed by date
         
         Returns:
-            家庭位置和工作位置的元组(home_location, work_location)
+            Tuple of (home_location, work_location)
         """
         # 记录与"home"相关活动和"work"相关活动的地点频率
         home_locations = {}
@@ -839,7 +843,7 @@ class UrbanSimulation:
         for day_activities in historical_activities.values():
             for activity in day_activities:
                 parts = activity.split(" at ")
-                if len(parts) >= 3:  # 活动格式为 "活动类型 at 时间 at 地点"
+                if len(parts) >= 3:  # Activity format is "activity_type at time at location"
                     activity_type = parts[0].lower().strip()
                     location = parts[2].strip()
                     
@@ -1420,6 +1424,9 @@ class UrbanSimulation:
         # Sort schedule by start time
         schedule.sort(key=lambda x: x["start_time"])
         
+        # Refine schedule to minimize long-distance jumps before execution
+        self._refine_schedule_locations(schedule, resident)
+        
         return schedule
         
     def standardize_activity_type(self, activity_type: str) -> str:
@@ -1485,7 +1492,7 @@ class UrbanSimulation:
         if previous_activities:
             for activity in previous_activities:
                 parts = activity.split(" at ")
-                if len(parts) >= 3:  # 活动格式为 "活动类型 at 时间 at 地点"
+                if len(parts) >= 3:  # Activity format is "activity_type at time at location"
                     hist_activity_type = parts[0]
                     location = parts[2].strip()
                     
@@ -1942,7 +1949,7 @@ class UrbanSimulation:
         Returns:
             Tuple of (longitude, latitude) if found, None otherwise
         """
-        # 处理带编号的地点名称
+        # Process location names with ID numbers
         base_name = location_name.split("#")[0] if "#" in location_name else location_name
         
         # 1. 直接查找完整地点名
@@ -2041,6 +2048,37 @@ class UrbanSimulation:
         
         # 4. Trajectory map plot
         self._plot_trajectory_map(output_dir)
+
+    def _distance_between(self, loc1: str, loc2: str) -> Optional[float]:
+        """Calculate geodesic distance between two POI names (km)."""
+        coords1 = self.get_location_coordinates(loc1)
+        coords2 = self.get_location_coordinates(loc2)
+        if not coords1 or not coords2:
+            return None
+        try:
+            return geodesic(coords1, coords2).km
+        except Exception:
+            return None
+
+    def _refine_schedule_locations(self, schedule: List[Dict[str, Any]], resident: Resident, max_distance_km: float = 5.0) -> None:
+        """Refine schedule by iteratively shrinking allowed jump distance (5→4→3 km)."""
+        thresholds = [max_distance_km, max_distance_km - 1.0, 3.0]
+        for thr in thresholds:
+            for idx in range(1, len(schedule)):
+                prev_loc = schedule[idx - 1]["location"]
+                cur_loc = schedule[idx]["location"]
+                dist = self._distance_between(prev_loc, cur_loc)
+                if dist is None or dist <= thr:
+                    continue  # Within current threshold
+                activity_type = schedule[idx]["type"]
+                alt_loc = self.get_location_for_activity(activity_type, resident)
+                alt_dist = self._distance_between(prev_loc, alt_loc)
+                if alt_loc and alt_dist is not None and alt_dist < dist and alt_dist <= thr:
+                    logging.info(
+                        f"Refined (thr={thr:.1f} km) location for {activity_type}: {cur_loc} -> {alt_loc} (distance {dist:.1f}→{alt_dist:.1f} km)"
+                    )
+                    schedule[idx]["location"] = alt_loc
+        # Schedule modified in place
 
 def main() -> None:
     """Main function to set up and run the urban simulation."""
