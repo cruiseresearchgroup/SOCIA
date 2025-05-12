@@ -8,7 +8,7 @@ An LLM-driven multi-agent social simulation generator that automatically creates
 
 <!-- Illustration Image Placeholder -->
 <p align="center">
-  <img src="docs/images/socia_architecture.png" alt="SOCIA System Architecture" width="40%" />
+  <img src="docs/images/SOCIA_FRAMEWORK.png" alt="SOCIA System Architecture" width="100%" />
 </p>
 <!-- Replace this with your actual architecture diagram -->
 
