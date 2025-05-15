@@ -181,6 +181,19 @@ This command initiates the full SOCIA workflow:
 
 Use this command pattern when you want to create custom simulations based on your specific requirements. You can customize the task description to focus on different urban simulation scenarios.
 
+```bash
+# Run a multi-agent urban resident simulation with LLM prompting
+export PROJECT_ROOT="/Users/z3546829/PycharmProjects/SOCIA" && export DATA_PATH="data_fitting/llmob_data/" && python main.py --task "Develop a multi-agent simulation system to simulate the daily activity trajectories of urban residents based on LLM prompting." --task-file examples/llmob_task.json --output ./output/llmob_sim_output
+```
+
+This command sets up environment variables for data paths and initiates a complex multi-agent simulation focused on urban resident activities. It uses:
+1. Project root and data path environment variables to specify data locations
+2. A detailed task description for the simulation focus (urban resident daily activities)
+3. Additional parameters from a task file for more complex configuration
+4. LLM prompting techniques to generate realistic human behaviors and trajectories
+
+This advanced configuration demonstrates how SOCIA can leverage LLM capabilities to model complex human behaviors in urban environments with high fidelity.
+
 ### 🧪 Running Custom Simulations
 
 When running a simulation with a custom task, the system:
