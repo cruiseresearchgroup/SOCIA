@@ -4,6 +4,8 @@
 
 # 🌆 SOCIA: Simulation Orchestration for City Intelligence and Agents
 
+<p align="center"><i>The work is still in progress...</i></p>
+
 An LLM-driven multi-agent social simulation generator that automatically creates simulation environments based on user requirements and data.
 
 <!-- Illustration Image Placeholder -->
@@ -183,7 +185,7 @@ Use this command pattern when you want to create custom simulations based on you
 
 ```bash
 # Run a multi-agent urban resident simulation with LLM prompting
-export PROJECT_ROOT="/Users/z3546829/PycharmProjects/SOCIA" && export DATA_PATH="data_fitting/llmob_data/" && python main.py --task "Develop a multi-agent simulation system to simulate the daily activity trajectories of urban residents based on LLM prompting." --task-file examples/llmob_task.json --output ./output/llmob_sim_output
+export PROJECT_ROOT="/Users/Your_User_Name/PycharmProjects/SOCIA" && export DATA_PATH="data_fitting/llmob_data/" && python main.py --task "Develop a multi-agent simulation system to simulate the daily activity trajectories of urban residents based on LLM prompting." --task-file examples/llmob_task.json --output ./output/llmob_sim_output
 ```
 
 This command sets up environment variables for data paths and initiates a complex multi-agent simulation focused on urban resident activities. It uses:
