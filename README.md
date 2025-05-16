@@ -2,11 +2,11 @@
   <img src="docs/images/socia_logo_large.png" alt="SOCIA Logo" width="200px" />
 </p>
 
-# 🌆 SOCIA: Simulation Orchestration for City Intelligence and Agents
+# 🌆 SOCIA: Simulation Orchestration for Cyber-Physical-Social Intelligence and Agents
 
 [//]: # (<p align="center"><i>The work is still in progress...</i></p>)
 
-An LLM-driven multi-agent social simulation generator that automatically creates simulation environments based on user requirements and data.
+An LLM-driven multi-agent Cyber-Physical-Social simulation generator that automatically creates simulation environments based on user requirements and data.
 
 <!-- Illustration Image Placeholder -->
 <p align="center">
