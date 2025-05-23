@@ -265,6 +265,9 @@ class DataAnalysisAgent(BaseAgent):
                     # Pickle files (e.g., network data) - ensure case insensitive matching
                     self.logger.info(f"Found pickle file: {full_path}")
                     result.append({"path": rel_path, "type": "pkl"})
+                elif file.endswith('.py'):
+                    self.logger.info(f"Found Python file: {full_path}")
+                    result.append({"path": rel_path, "type": "py"})
         
         self.logger.info(f"Total files found: {len(result)} in path {data_path}")
         for f in result:
@@ -617,8 +620,13 @@ Provide only valid JSON that can be parsed. Don't include any other explanation 
         if file_type == 'csv' and hasattr(data, 'head'):
             sample = data.head(5).to_dict(orient='records')
         elif file_type == 'json':
+            if isinstance(data, dict):
             sample_keys = list(data.keys())[:5]
             sample = {k: data[k] for k in sample_keys}
+            elif isinstance(data, list):
+                sample = data[:5] # Sample the first 5 items if it's a list
+            else:
+                sample = str(data)[:500] # Fallback for other unexpected json structures
         elif file_type == 'pkl' and isinstance(data, dict):
             sample_keys = list(data.keys())[:5]
             sample = {k: data[k] for k in sample_keys}

@@ -216,6 +216,10 @@ class Simulation:
     def run(self, start_day: int = 30, end_day: int = 39, env_risk_growth_rate: float = 0.0):
         print(f"Running simulation from day {start_day} to {end_day} (env growth {env_risk_growth_rate:.3f})…")
         total_days = end_day - start_day + 1
+        
+        # Create a list to store daily states
+        self.daily_states = []
+        
         for day_offset in range(total_days):
             current_day = start_day + day_offset
             # Adjust environmental risk if a growth rate is provided
@@ -223,6 +227,22 @@ class Simulation:
                 Person.environmental_risk = np.clip(Person.environmental_risk + env_risk_growth_rate, 0.0, 0.45)
             # Propagate behaviour in the network
             self.social_network.propagate_behavior()
+            
+            # Record daily state
+            daily_state = {
+                'day': current_day,
+                'agents': [
+                    {
+                        'agent_id': agent.agent_id,
+                        'mask_wearing_status': agent.mask_wearing_status,
+                        'risk_perception': agent.risk_perception,
+                        'social_influence': agent.social_influence
+                    }
+                    for agent in self.agents
+                ]
+            }
+            self.daily_states.append(daily_state)
+            
             if day_offset % 2 == 0 or current_day == end_day:
                 wearing = sum(int(a.mask_wearing_status) for a in self.agents)
                 print(f"  Day {current_day}: {wearing}/{len(self.agents)} wearing ({wearing/len(self.agents)*100:.2f}%)  envRisk={Person.environmental_risk:.3f}")
@@ -238,12 +258,36 @@ class Simulation:
         # Save to the specified directory
         output_path = os.path.join(output_dir, path)
         
+        # Save final state for backward compatibility
         df = pd.DataFrame({
             'agent_id': [ag.agent_id for ag in self.agents],
             'mask_wearing_status': [ag.mask_wearing_status for ag in self.agents]
         })
         df.to_csv(output_path, index=False)
-        print(f"Results saved to: {output_path}")
+        print(f"Final state results saved to: {output_path}")
+        
+        # Save daily states if available
+        if hasattr(self, 'daily_states'):
+            # Create a new dataframe for all daily data
+            daily_data = []
+            
+            for state in self.daily_states:
+                day = state['day']
+                
+                for agent_data in state['agents']:
+                    daily_data.append({
+                        'day': day,
+                        'agent_id': agent_data['agent_id'],
+                        'mask_wearing_status': agent_data['mask_wearing_status'],
+                        'risk_perception': agent_data['risk_perception'],
+                        'social_influence': agent_data['social_influence']
+                    })
+            
+            # Save to CSV
+            daily_filename = os.path.splitext(path)[0] + "_daily.csv"
+            daily_output_path = os.path.join(output_dir, daily_filename)
+            pd.DataFrame(daily_data).to_csv(daily_output_path, index=False)
+            print(f"Daily states saved to: {daily_output_path}")
 
 # ----------------------------------------------------------------------
 # Main entry: run baseline, high-risk and intervention scenarios
@@ -255,6 +299,10 @@ def main():
     # Create output directory
     output_dir = os.path.join(PROJECT_ROOT, "output/mask_adoption_sim_output_newfeedback_codegeneration")
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Create evaluation directory
+    eval_dir = os.path.join(PROJECT_ROOT, "output/evaluation_results")
+    os.makedirs(eval_dir, exist_ok=True)
 
     # -------------------- Scenario 1: Baseline with dynamic risk --------------------
     print("SCENARIO 1 – Baseline (dynamic environmental risk)")
@@ -264,6 +312,21 @@ def main():
     growth_rate = (0.35 - initial_env_risk) / 9
     baseline_sim.run(env_risk_growth_rate=growth_rate)
     baseline_sim.save_results("baseline_results_iter4.csv")
+    
+    # Save daily data for baseline scenario
+    if hasattr(baseline_sim, 'daily_states'):
+        daily_data_baseline = []
+        for state in baseline_sim.daily_states:
+            day = state['day']
+            for agent_data in state['agents']:
+                daily_data_baseline.append({
+                    'day': day,
+                    'agent_id': agent_data['agent_id'],
+                    'mask_wearing_status': agent_data['mask_wearing_status'],
+                    'scenario': 'baseline'
+                })
+        pd.DataFrame(daily_data_baseline).to_csv(os.path.join(eval_dir, "baseline_all_days_iter4.csv"), index=False)
+        print(f"Baseline daily data saved to evaluation directory")
 
     # -------------------- Scenario 2: High environmental risk (static) --------------
     print("\nSCENARIO 2 – High Environmental Risk (static 0.35)")
@@ -271,6 +334,21 @@ def main():
     high_risk_sim = Simulation()  # re-instantiate to reset agents with new class params
     high_risk_sim.run(env_risk_growth_rate=0.0)
     high_risk_sim.save_results("high_risk_results_iter4.csv")
+    
+    # Save daily data for high risk scenario
+    if hasattr(high_risk_sim, 'daily_states'):
+        daily_data_high_risk = []
+        for state in high_risk_sim.daily_states:
+            day = state['day']
+            for agent_data in state['agents']:
+                daily_data_high_risk.append({
+                    'day': day,
+                    'agent_id': agent_data['agent_id'],
+                    'mask_wearing_status': agent_data['mask_wearing_status'],
+                    'scenario': 'high_risk'
+                })
+        pd.DataFrame(daily_data_high_risk).to_csv(os.path.join(eval_dir, "high_risk_all_days_iter4.csv"), index=False)
+        print(f"High risk daily data saved to evaluation directory")
 
     # -------------------- Scenario 3: Targeted intervention -------------------------
     print("\nSCENARIO 3 – Targeted Intervention + dynamic risk")
@@ -283,6 +361,31 @@ def main():
         ag.social_influence += 0.6  # large boost
     intervention_sim.run(env_risk_growth_rate=growth_rate)
     intervention_sim.save_results("intervention_results_iter4.csv")
+    
+    # Save daily data for intervention scenario
+    if hasattr(intervention_sim, 'daily_states'):
+        daily_data_intervention = []
+        for state in intervention_sim.daily_states:
+            day = state['day']
+            for agent_data in state['agents']:
+                daily_data_intervention.append({
+                    'day': day,
+                    'agent_id': agent_data['agent_id'],
+                    'mask_wearing_status': agent_data['mask_wearing_status'],
+                    'scenario': 'intervention'
+                })
+        pd.DataFrame(daily_data_intervention).to_csv(os.path.join(eval_dir, "intervention_all_days_iter4.csv"), index=False)
+        print(f"Intervention daily data saved to evaluation directory")
+    
+    # Combine all daily results
+    if all(hasattr(sim, 'daily_states') for sim in [baseline_sim, high_risk_sim, intervention_sim]):
+        all_daily_data = pd.concat([
+            pd.DataFrame(daily_data_baseline),
+            pd.DataFrame(daily_data_high_risk),
+            pd.DataFrame(daily_data_intervention)
+        ])
+        all_daily_data.to_csv(os.path.join(eval_dir, "all_scenarios_all_days_iter4.csv"), index=False)
+        print(f"Combined daily data for all scenarios saved to evaluation directory")
     
     # Save comparison visualization
     plt.figure(figsize=(12, 8))
@@ -310,6 +413,56 @@ def main():
     plt.savefig(scenario_comparison_path)
     plt.close()
     print(f"\nScenario comparison chart saved to: {scenario_comparison_path}")
+    
+    # Create additional visualization with daily data
+    if all(hasattr(sim, 'daily_states') for sim in [baseline_sim, high_risk_sim, intervention_sim]):
+        plt.figure(figsize=(15, 10))
+        
+        # Plot daily mask wearing rates over time
+        days = range(30, 40)
+        
+        # Calculate daily mask-wearing rates for each simulation
+        baseline_daily_rates = []
+        high_risk_daily_rates = []
+        intervention_daily_rates = []
+        
+        for i, day in enumerate(days):
+            # Baseline
+            baseline_state = baseline_sim.daily_states[i]
+            baseline_rate = sum(agent['mask_wearing_status'] for agent in baseline_state['agents']) / len(baseline_state['agents']) * 100
+            baseline_daily_rates.append(baseline_rate)
+            
+            # High risk
+            high_risk_state = high_risk_sim.daily_states[i]
+            high_risk_rate = sum(agent['mask_wearing_status'] for agent in high_risk_state['agents']) / len(high_risk_state['agents']) * 100
+            high_risk_daily_rates.append(high_risk_rate)
+            
+            # Intervention
+            intervention_state = intervention_sim.daily_states[i]
+            intervention_rate = sum(agent['mask_wearing_status'] for agent in intervention_state['agents']) / len(intervention_state['agents']) * 100
+            intervention_daily_rates.append(intervention_rate)
+        
+        # Plot the data
+        plt.plot(days, baseline_daily_rates, 'o-', color='blue', label='Baseline')
+        plt.plot(days, high_risk_daily_rates, 's-', color='red', label='High Risk')
+        plt.plot(days, intervention_daily_rates, '^-', color='green', label='Intervention')
+        
+        # Add target rate line (using same target as in evaluate_daily_data.py)
+        plt.axhline(y=57.51, color='black', linestyle='--', label='Target Rate (57.51%)')
+        
+        plt.title('Daily Mask Wearing Rates Over Time (Iter4)')
+        plt.xlabel('Day')
+        plt.ylabel('Mask Wearing Rate (%)')
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.xticks(days)
+        
+        # Save the time series visualization
+        plt.tight_layout()
+        time_series_path = os.path.join(output_dir, 'daily_rates_comparison_iter4.png')
+        plt.savefig(time_series_path)
+        plt.close()
+        print(f"Daily rates comparison chart saved to: {time_series_path}")
 
     print("\nSimulation finished – results saved for all scenarios (iter4).")
 

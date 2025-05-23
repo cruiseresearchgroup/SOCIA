@@ -23,6 +23,33 @@ class FeedbackGenerationAgent(BaseAgent):
     4. Providing specific guidance on how to implement improvements
     """
     
+    def __init__(self, config: Dict[str, Any] = None, output_path: Optional[str] = None):
+        """
+        Initialize the Feedback Generation Agent.
+        
+        Args:
+            config: Configuration dictionary for the agent
+            output_path: Directory to store feedback artifacts
+        """
+        # If config is not provided, use a minimal default configuration
+        if config is None:
+            config = {
+                "prompt_template": "templates/feedback_generation_prompt.txt",
+                "output_format": "json"
+            }
+        
+        super().__init__(config)
+        
+        # Base output path for persisting processed data
+        self.output_path = output_path or os.getcwd()
+        
+        # Set template directory path to the templates folder at project root
+        self.template_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "templates"
+        )
+        self.logger.debug(f"Template directory set to: {self.template_dir}")
+    
     def process(
         self,
         task_spec: Dict[str, Any],
@@ -229,13 +256,18 @@ class FeedbackGenerationAgent(BaseAgent):
             with open(os.path.join(self.template_dir, "fix_check_prompt.txt"), "r") as f:
                 prompt_template = f.read()
                 
-            # Format the prompt - 注意这里需要将双花括号替换为单花括号，因为模板中已经使用双花括号作为转义
-            prompt_template = prompt_template.replace("{{", "{").replace("}}", "}")
+            # 只替换用于实际变量替换的花括号对，保留示例中的双花括号
+            # 1. 先标记示例中的双花括号
+            prompt_template = prompt_template.replace("{{", "‡‡").replace("}}", "††")
                 
+            # 2. 格式化实际变量
             prompt = prompt_template.format(
                 historical_issues=historical_issues_str,
                 code_content=current_code
             )
+            
+            # 3. 恢复示例中的双花括号
+            prompt = prompt.replace("‡‡", "{{").replace("††", "}}")
             
             # 安全检查，确保没有未替换的占位符
             if "{" in prompt and "}" in prompt:
