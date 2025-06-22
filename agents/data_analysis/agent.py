@@ -621,8 +621,8 @@ Provide only valid JSON that can be parsed. Don't include any other explanation 
             sample = data.head(5).to_dict(orient='records')
         elif file_type == 'json':
             if isinstance(data, dict):
-            sample_keys = list(data.keys())[:5]
-            sample = {k: data[k] for k in sample_keys}
+                sample_keys = list(data.keys())[:5]
+                sample = {k: data[k] for k in sample_keys}
             elif isinstance(data, list):
                 sample = data[:5] # Sample the first 5 items if it's a list
             else:

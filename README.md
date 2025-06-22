@@ -196,6 +196,80 @@ This command sets up environment variables for data paths and initiates a comple
 
 This advanced configuration demonstrates how SOCIA can leverage LLM capabilities to model complex human behaviors in urban environments with high fidelity.
 
+### 🎯 Auto Mode vs Manual Mode
+
+SOCIA supports two modes of operation to give you control over the feedback process:
+
+1. **Manual Mode** (`--auto=False` or default): User provides manual feedback in each iteration
+2. **Automatic Mode** (`--auto=True` or `--auto`): System generates all feedback automatically
+
+#### Manual Mode Usage (Default)
+
+```bash
+python main.py --task "Your simulation task"
+# or explicitly:
+python main.py --task "Your simulation task" --auto=False
+```
+
+When running in manual mode (default), after each iteration you will be prompted to provide feedback:
+
+```
+================================================================================
+MANUAL FEEDBACK INPUT
+================================================================================
+Please provide your feedback for the current iteration.
+This feedback will be used to improve the simulation code in the next iteration.
+You can include suggestions for:
+- Code improvements or bug fixes
+- Model accuracy enhancements  
+- Performance optimizations
+- Any other observations or recommendations
+
+Enter your feedback (press Enter twice to finish):
+--------------------------------------------------------------------------------
+```
+
+#### Automatic Mode Usage
+
+```bash
+python main.py --task "Your simulation task" --auto
+```
+
+In automatic mode, the system uses only AI-generated feedback without user intervention.
+
+#### Manual Mode Features
+
+Your feedback can include:
+
+1. **Code Issues**: Point out syntax errors, logical bugs, or implementation problems
+2. **Model Improvements**: Suggest better algorithms, parameters, or model structures
+3. **Performance Optimizations**: Recommend efficiency improvements
+4. **Domain Knowledge**: Share domain-specific insights that the system might miss
+5. **Requirements Clarification**: Clarify or refine the original task requirements
+
+**Example User Feedback:**
+```
+The epidemic model is missing age-stratified transmission rates. 
+Please add age groups (0-18, 19-64, 65+) with different transmission probabilities.
+Also, the recovery rate seems too high - use 1/14 days instead of 1/7 days.
+The visualization should include separate plots for each age group.
+```
+
+#### How User Feedback is Processed
+
+1. **Priority**: User feedback gets **HIGHEST PRIORITY** over system-generated feedback
+2. **Integration**: User feedback is combined with system feedback in a structured format
+3. **Persistence**: All feedback is saved in the iteration artifacts for tracking
+4. **Propagation**: User feedback influences the next iteration's code generation
+
+#### Benefits of Manual Mode
+
+- **Domain Expertise**: Incorporate human domain knowledge that AI might miss
+- **Quality Control**: Human oversight of each iteration ensures better results
+- **Customization**: Tailor the simulation to specific requirements in real-time
+- **Learning**: Understand how the system works by reviewing each iteration
+- **Debugging**: Identify and fix issues that automated feedback might miss
+
 ### 🧪 Running Custom Simulations
 
 When running a simulation with a custom task, the system:

@@ -30,6 +30,7 @@ class WorkflowManager:
         output_path: str = "./output",
         config_path: str = "./config.yaml",
         max_iterations: int = 3,
+        auto_mode: bool = False,
         agent_container: AgentContainer = Provide[AgentContainer]
     ):
         """
@@ -41,6 +42,7 @@ class WorkflowManager:
             output_path: Path to the output directory
             config_path: Path to the configuration file
             max_iterations: Maximum number of iterations
+            auto_mode: If True, uses automatic feedback generation; if False, prompts user for manual feedback
             agent_container: Dependency injection container for agents
         """
         self.logger = logging.getLogger("SOCIA.WorkflowManager")
@@ -51,6 +53,7 @@ class WorkflowManager:
         # Hard maximum iteration limit (user-specified) and initial soft window limit
         self.hard_max_iterations = max_iterations
         self.soft_max_iterations = 3
+        self.auto_mode = auto_mode
         
         # Initialize historical fix log to track issues across iterations
         self.historical_fix_log = {}
@@ -128,6 +131,58 @@ class WorkflowManager:
         
         # Create output directory
         os.makedirs(output_path, exist_ok=True)
+    
+    def _get_user_feedback(self) -> str:
+        """
+        Prompt user for manual feedback input.
+        
+        Returns:
+            User's feedback as a string
+        """
+        print("\n" + "="*80)
+        print("MANUAL FEEDBACK INPUT")
+        print("="*80)
+        print("Please provide your feedback for the current iteration.")
+        print("This feedback will be used to improve the simulation code in the next iteration.")
+        print("You can include suggestions for:")
+        print("- Code improvements or bug fixes")
+        print("- Model accuracy enhancements")
+        print("- Performance optimizations")
+        print("- Any other observations or recommendations")
+        print("\nEnter your feedback (press Enter twice to finish):")
+        print("-"*80)
+        
+        feedback_lines = []
+        empty_line_count = 0
+        
+        while True:
+            try:
+                line = input()
+                if line.strip() == "":
+                    empty_line_count += 1
+                    if empty_line_count >= 2:
+                        break
+                    feedback_lines.append(line)
+                else:
+                    empty_line_count = 0
+                    feedback_lines.append(line)
+            except (EOFError, KeyboardInterrupt):
+                print("\nFeedback input interrupted.")
+                break
+        
+        user_feedback = "\n".join(feedback_lines).strip()
+        
+        if user_feedback:
+            print("-"*80)
+            print("Your feedback has been recorded:")
+            print(user_feedback)
+            print("="*80)
+        else:
+            print("-"*80)
+            print("No feedback provided.")
+            print("="*80)
+        
+        return user_feedback
     
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from the config file."""
@@ -313,18 +368,77 @@ class WorkflowManager:
         current_code_filename = f"simulation_code_iter_{self.current_iteration}.py"
         current_code = current_code_dict[current_code_filename]
         
-        self.state["feedback"] = self.agents["feedback_generation"].process(
-            task_spec=self.state["task_spec"],
-            model_plan=self.state["model_plan"],
-            generated_code=self.state["generated_code"],
-            verification_results=self.state["verification_results"],
-            simulation_results=self.state["simulation_results"],
-            evaluation_results=self.state["evaluation_results"],
-            current_code=current_code,
-            previous_code=previous_code,
-            iteration=self.current_iteration,
-            historical_fix_log=self.historical_fix_log  # Pass historical fix log to feedback agent
-        )
+        # Generate system feedback using the feedback agent
+        if self.auto_mode:
+            # In automatic mode, use system-generated feedback only
+            self.state["feedback"] = self.agents["feedback_generation"].process(
+                task_spec=self.state["task_spec"],
+                model_plan=self.state["model_plan"],
+                generated_code=self.state["generated_code"],
+                verification_results=self.state["verification_results"],
+                simulation_results=self.state["simulation_results"],
+                evaluation_results=self.state["evaluation_results"],
+                current_code=current_code,
+                previous_code=previous_code,
+                iteration=self.current_iteration,
+                historical_fix_log=self.historical_fix_log  # Pass historical fix log to feedback agent
+            )
+        else:
+            # In manual mode, get user feedback and combine with system feedback
+            self.logger.info("Manual feedback mode enabled - prompting user for feedback")
+            
+            # Generate system feedback first
+            system_feedback = self.agents["feedback_generation"].process(
+                task_spec=self.state["task_spec"],
+                model_plan=self.state["model_plan"],
+                generated_code=self.state["generated_code"],
+                verification_results=self.state["verification_results"],
+                simulation_results=self.state["simulation_results"],
+                evaluation_results=self.state["evaluation_results"],
+                current_code=current_code,
+                previous_code=previous_code,
+                iteration=self.current_iteration,
+                historical_fix_log=self.historical_fix_log
+            )
+            
+            # Get user feedback
+            user_feedback_text = self._get_user_feedback()
+            
+            # Combine system and user feedback
+            combined_feedback = dict(system_feedback)  # Copy system feedback
+            
+            # Add user feedback to the combined feedback
+            if user_feedback_text:
+                # Create user feedback section
+                user_feedback_section = {
+                    "source": "user",
+                    "content": user_feedback_text,
+                    "note": "This is user-provided feedback. Please pay special attention to these suggestions."
+                }
+                
+                # Add user feedback to the combined feedback structure
+                if "feedback_sections" not in combined_feedback:
+                    combined_feedback["feedback_sections"] = []
+                
+                # Insert user feedback at the beginning to prioritize it
+                combined_feedback["feedback_sections"].insert(0, {
+                    "section": "USER_FEEDBACK",
+                    "priority": "CRITICAL",
+                    "feedback": user_feedback_section
+                })
+                
+                # Also add to summary if it exists
+                if "summary" in combined_feedback:
+                    combined_feedback["summary"] = f"USER FEEDBACK: {user_feedback_text}\n\nSYSTEM FEEDBACK: {combined_feedback['summary']}"
+                else:
+                    combined_feedback["summary"] = f"USER FEEDBACK: {user_feedback_text}"
+                    
+                self.logger.info("User feedback has been integrated with system feedback")
+            else:
+                self.logger.info("No user feedback provided - using system feedback only")
+            
+            self.state["feedback"] = combined_feedback
+        
         self._save_artifact("feedback", self.state["feedback"])
         
         # Update historical fix log with new critical issues
