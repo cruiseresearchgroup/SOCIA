@@ -225,7 +225,8 @@ You can include suggestions for:
 - Performance optimizations
 - Any other observations or recommendations
 
-Enter your feedback (press Enter twice to finish):
+If you don't want to provide feedback, just press Enter twice to skip.
+Otherwise, enter your feedback (press Enter twice to finish):
 --------------------------------------------------------------------------------
 ```
 
