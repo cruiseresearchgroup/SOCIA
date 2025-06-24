@@ -51,12 +51,14 @@ class WorkflowManager:
         self.output_path = output_path
         self.config_path = config_path
         # Hard maximum iteration limit (user-specified) and initial soft window limit
-        self.hard_max_iterations = max_iterations
-        # In manual mode, set a high limit since user controls stopping with #STOP#
         if auto_mode:
+            self.hard_max_iterations = max_iterations
             self.soft_max_iterations = 3
         else:
-            self.soft_max_iterations = 100  # High limit for manual mode
+            # In manual mode, set a high hard limit since user controls stopping with #STOP#
+            # Default to 100 unless user explicitly set a higher value
+            self.hard_max_iterations = max(max_iterations, 100)
+            self.soft_max_iterations = 3  # Start with soft limit of 3, can expand
         self.auto_mode = auto_mode
         
         # Initialize historical fix log to track issues across iterations
