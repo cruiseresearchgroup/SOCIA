@@ -25,7 +25,9 @@ class IterationControlAgent(BaseAgent):
         verification_results: Optional[Dict[str, Any]] = None,
         evaluation_results: Optional[Dict[str, Any]] = None,
         feedback: Optional[Dict[str, Any]] = None,
-        task_spec: Optional[Dict[str, Any]] = None
+        task_spec: Optional[Dict[str, Any]] = None,
+        auto_mode: bool = True,
+        user_feedback: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Decide whether to continue with another iteration and what to focus on.
@@ -37,6 +39,8 @@ class IterationControlAgent(BaseAgent):
             evaluation_results: Results from the Result Evaluation Agent (optional)
             feedback: Feedback from the Feedback Generation Agent (optional)
             task_spec: Task specification from the Task Understanding Agent (optional)
+            auto_mode: Whether the system is running in automatic mode
+            user_feedback: User-provided feedback in manual mode (optional)
         
         Returns:
             Dictionary containing the iteration decision
@@ -61,7 +65,7 @@ class IterationControlAgent(BaseAgent):
         
         # If LLM response parsing failed, create a basic result
         if isinstance(iteration_decision, str):
-            iteration_decision = self._create_default_decision(current_iteration, max_iterations)
+            iteration_decision = self._create_default_decision(current_iteration, max_iterations, auto_mode, user_feedback)
         
         # Ensure the result has the expected structure
         if "continue" not in iteration_decision:
@@ -69,23 +73,36 @@ class IterationControlAgent(BaseAgent):
             iteration_decision["continue"] = continue_iteration
             iteration_decision["reason"] = "Default decision based on iteration count"
         
+        # Add user feedback to the decision structure in manual mode
+        if not auto_mode:
+            iteration_decision["human_feedback"] = user_feedback if user_feedback else "No user feedback provided"
+            self.logger.info(f"Added human feedback to iteration decision: {'Yes' if user_feedback else 'No'}")
+            
+            # Check if user wants to stop iterations
+            if user_feedback and "#STOP#" in user_feedback:
+                iteration_decision["continue"] = False
+                iteration_decision["reason"] = "User requested to stop iterations via #STOP# command in feedback."
+                self.logger.info("User requested to stop iterations via #STOP# command")
+        
         self.logger.info(f"Iteration decision: {'continue' if iteration_decision['continue'] else 'stop'}")
         return iteration_decision
     
-    def _create_default_decision(self, current_iteration: int, max_iterations: int) -> Dict[str, Any]:
+    def _create_default_decision(self, current_iteration: int, max_iterations: int, auto_mode: bool = True, user_feedback: Optional[str] = None) -> Dict[str, Any]:
         """
         Create a default iteration decision based on the iteration count.
         
         Args:
             current_iteration: Current iteration number (0-based)
             max_iterations: Maximum number of iterations
+            auto_mode: Whether the system is running in automatic mode
+            user_feedback: User-provided feedback in manual mode (optional)
         
         Returns:
             Dictionary containing the default iteration decision
         """
         continue_iteration = current_iteration < max_iterations - 1
         
-        return {
+        decision = {
             "continue": continue_iteration,
             "reason": "Default decision based on iteration count",
             "convergence_assessment": {
@@ -135,6 +152,17 @@ class IterationControlAgent(BaseAgent):
                 }
             }
         }
+        
+        # Add user feedback in manual mode
+        if not auto_mode:
+            decision["human_feedback"] = user_feedback if user_feedback else "No user feedback provided"
+            
+            # Check if user wants to stop iterations
+            if user_feedback and "#STOP#" in user_feedback:
+                decision["continue"] = False
+                decision["reason"] = "User requested to stop iterations via #STOP# command in feedback."
+        
+        return decision
     
     def _assess_convergence(
         self,

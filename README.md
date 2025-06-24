@@ -196,6 +196,185 @@ This command sets up environment variables for data paths and initiates a comple
 
 This advanced configuration demonstrates how SOCIA can leverage LLM capabilities to model complex human behaviors in urban environments with high fidelity.
 
+### 🎯 Auto Mode vs Manual Mode
+
+SOCIA supports two modes of operation to give you control over the feedback process:
+
+1. **Manual Mode** (`--auto=False` or default): User provides manual feedback in each iteration
+2. **Automatic Mode** (`--auto=True` or `--auto`): System generates all feedback automatically
+
+#### Manual Mode Usage (Default) - Human-in-the-Loop
+
+```bash
+python main.py --task "Your simulation task"
+# or explicitly:
+python main.py --task "Your simulation task" --auto=False
+```
+
+Manual mode enables **Human-in-the-Loop (HITL)** functionality, giving you complete control over the iterative simulation development process. In this mode, you actively participate in refining and improving the simulation through direct feedback.
+
+##### 🔄 Interactive Feedback Loop
+
+After each iteration, you will be prompted to provide feedback in an interactive session:
+
+```
+================================================================================
+MANUAL FEEDBACK INPUT - ITERATION 2/100
+================================================================================
+Current iteration completed. Review the generated code and results.
+
+Please provide your feedback for the current iteration.
+This feedback will be used to improve the simulation code in the next iteration.
+You can include suggestions for:
+- Code improvements or bug fixes
+- Model accuracy enhancements  
+- Performance optimizations
+- Visualization improvements
+- Parameter adjustments
+- Any other observations or recommendations
+
+SPECIAL COMMANDS:
+- Type "#STOP#" to terminate the iteration process
+- Press Enter twice (empty input) to skip feedback and continue with system feedback only
+
+Enter your feedback (press Enter twice to finish):
+--------------------------------------------------------------------------------
+```
+
+##### 🛑 Controlling Iteration Termination
+
+You have **full control** over when to stop the iterative refinement process:
+
+1. **Manual Termination**: Type `#STOP#` when you're satisfied with the simulation quality
+2. **Automatic Continuation**: Provide feedback or skip (empty input) to continue improving
+3. **Intelligent Limits**: The system uses soft limits (starting at 3 iterations) that expand automatically in manual mode, with a high hard limit (100 iterations by default)
+
+**Example Termination Scenarios:**
+```bash
+# When satisfied with results:
+Your feedback: #STOP#
+
+# To continue refining:
+Your feedback: Please add age-based contact matrices to the epidemic model.
+
+# To skip this iteration but continue:
+Your feedback: [Press Enter twice - empty input]
+```
+
+##### 📝 Feedback Guidelines and Best Practices
+
+**Effective Feedback Types:**
+
+1. **Technical Improvements**
+   ```
+   The infection probability calculation is incorrect. It should use:
+   P_infection = 1 - exp(-beta * contacts * dt)
+   instead of the current linear approximation.
+   ```
+
+2. **Model Enhancements**
+   ```
+   Add spatial heterogeneity to the model:
+   - Divide the population into geographic regions
+   - Implement different contact rates between regions
+   - Add commuting patterns between work and home locations
+   ```
+
+3. **Visualization Requests**
+   ```
+   Please add the following visualizations:
+   - Time series plot of daily new infections
+   - Geographic heat map of infection density
+   - Age-stratified epidemic curves
+   - Network visualization of transmission chains
+   ```
+
+4. **Parameter Adjustments**
+   ```
+   Update the model parameters based on COVID-19 data:
+   - Incubation period: 5.1 days (not 3 days)
+   - Recovery time: 14 days for mild cases, 21 days for severe
+   - Case fatality rate: 1.4% overall, stratified by age
+   ```
+
+5. **Performance Optimizations**
+   ```
+   The simulation is too slow for large populations. Please:
+   - Implement vectorized operations using NumPy
+   - Use sparse matrices for contact networks
+   - Add progress bars for long-running simulations
+   ```
+
+##### 🔧 Advanced Feedback Features
+
+**Multi-aspect Feedback**: You can address multiple aspects in a single feedback session:
+```
+Feedback covering multiple areas:
+
+BUGS:
+- Fix the division by zero error in line 45 when population is 0
+- The random seed is not being set, causing non-reproducible results
+
+ENHANCEMENTS:
+- Add vaccination rollout capability with age-based prioritization
+- Implement behavioral changes (mask wearing, social distancing) as time-dependent parameters
+
+VISUALIZATION:
+- Create an animated plot showing the spread over time
+- Add a dashboard-style summary with key metrics
+```
+
+**Iterative Refinement Strategy**: Use feedback to gradually build complexity:
+```
+Iteration 1: "Start with a simple SIR model"
+Iteration 2: "Add age groups and contact matrices" 
+Iteration 3: "Include spatial structure and mobility"
+Iteration 4: "Add interventions and policy scenarios"
+Iteration 5: "#STOP#" (when satisfied)
+```
+
+#### Automatic Mode Usage
+
+```bash
+python main.py --task "Your simulation task" --auto
+```
+
+In automatic mode, the system uses only AI-generated feedback without user intervention. This mode completes in fewer iterations (typically 3) and is suitable for quick prototypes or when human oversight is not required.
+
+#### How User Feedback is Processed
+
+**Feedback Priority System:**
+1. **🥇 HIGHEST PRIORITY**: User manual feedback (when provided)
+2. **🥈 MEDIUM PRIORITY**: System-generated feedback from evaluation agents
+3. **🥉 LOWEST PRIORITY**: Default improvement suggestions
+
+**Integration Process:**
+1. **Parsing**: User feedback is analyzed and structured by the system
+2. **Merging**: Combined with system feedback in a prioritized format
+3. **Context Preservation**: Previous feedback history is maintained across iterations
+4. **Targeted Application**: Feedback is mapped to specific code sections and improvements
+
+**Feedback Persistence:**
+- All feedback is logged in `{output_dir}/feedback_iter_{n}.json`
+- User feedback is marked with highest priority flags
+- System tracks which feedback items have been addressed in subsequent iterations
+
+#### Benefits of Human-in-the-Loop Mode
+
+- **🧠 Domain Expertise**: Incorporate specialized knowledge that AI might miss
+- **🎯 Quality Control**: Human oversight ensures scientifically accurate and practically useful simulations
+- **⚡ Real-time Customization**: Adapt the simulation direction based on emerging insights
+- **🔍 Error Detection**: Catch logical errors, unrealistic assumptions, or implementation bugs
+- **📚 Learning Opportunity**: Understand the iterative development process and system capabilities
+- **🎛️ Fine-tuned Control**: Adjust the balance between automation and human guidance
+
+**Use Cases for Manual Mode:**
+- Research simulations requiring high accuracy
+- Educational scenarios where understanding the process is important  
+- Complex domains where domain expertise is critical
+- Prototyping where requirements may evolve during development
+- Quality assurance for production simulations
+
 ### 🧪 Running Custom Simulations
 
 When running a simulation with a custom task, the system:

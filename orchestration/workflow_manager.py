@@ -30,6 +30,7 @@ class WorkflowManager:
         output_path: str = "./output",
         config_path: str = "./config.yaml",
         max_iterations: int = 3,
+        auto_mode: bool = False,
         agent_container: AgentContainer = Provide[AgentContainer]
     ):
         """
@@ -41,6 +42,7 @@ class WorkflowManager:
             output_path: Path to the output directory
             config_path: Path to the configuration file
             max_iterations: Maximum number of iterations
+            auto_mode: If True, uses automatic feedback generation; if False, prompts user for manual feedback
             agent_container: Dependency injection container for agents
         """
         self.logger = logging.getLogger("SOCIA.WorkflowManager")
@@ -49,8 +51,15 @@ class WorkflowManager:
         self.output_path = output_path
         self.config_path = config_path
         # Hard maximum iteration limit (user-specified) and initial soft window limit
-        self.hard_max_iterations = max_iterations
-        self.soft_max_iterations = 3
+        if auto_mode:
+            self.hard_max_iterations = max_iterations
+            self.soft_max_iterations = 3
+        else:
+            # In manual mode, set a high hard limit since user controls stopping with #STOP#
+            # Default to 100 unless user explicitly set a higher value
+            self.hard_max_iterations = max(max_iterations, 100)
+            self.soft_max_iterations = 3  # Start with soft limit of 3, can expand
+        self.auto_mode = auto_mode
         
         # Initialize historical fix log to track issues across iterations
         self.historical_fix_log = {}
@@ -128,6 +137,216 @@ class WorkflowManager:
         
         # Create output directory
         os.makedirs(output_path, exist_ok=True)
+    
+    def _get_user_feedback(
+        self,
+        verification_results: Optional[Dict[str, Any]] = None,
+        simulation_results: Optional[Dict[str, Any]] = None,
+        evaluation_results: Optional[Dict[str, Any]] = None,
+        generated_code: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Prompt user for manual feedback input, showing current iteration summary first.
+        
+        Args:
+            verification_results: Results from code verification
+            simulation_results: Results from simulation execution
+            evaluation_results: Results from result evaluation
+            generated_code: Generated code information
+        
+        Returns:
+            User's feedback as a string
+        """
+        # First show the iteration summary
+        self._display_iteration_summary(verification_results, simulation_results, evaluation_results, generated_code)
+        
+        print("\n" + "="*80)
+        print("MANUAL FEEDBACK INPUT")
+        print("="*80)
+        print("Based on the execution summary above, please provide your feedback for the current iteration.")
+        print("This feedback will be used to improve the simulation code in the next iteration.")
+        print("You can include suggestions for:")
+        print("- Code improvements or bug fixes")
+        print("- Model accuracy enhancements")
+        print("- Performance optimizations")
+        print("- Any other observations or recommendations")
+        print("\n⚠️  ITERATION CONTROL:")
+        print("- If you want to STOP iterations and finalize results, type: #STOP#")
+        print("- Otherwise, the system will continue to the next iteration after your feedback")
+        print("\nIf you don't want to provide feedback, just press Enter twice to skip.")
+        print("Otherwise, enter your feedback (press Enter twice to finish):")
+        print("-"*80)
+        
+        feedback_lines = []
+        empty_line_count = 0
+        
+        while True:
+            try:
+                line = input()
+                if line.strip() == "":
+                    empty_line_count += 1
+                    if empty_line_count >= 2:
+                        break
+                    feedback_lines.append(line)
+                else:
+                    empty_line_count = 0
+                    feedback_lines.append(line)
+            except (EOFError, KeyboardInterrupt):
+                print("\nFeedback input interrupted.")
+                break
+        
+        user_feedback = "\n".join(feedback_lines).strip()
+        
+        if user_feedback:
+            print("-"*80)
+            print("Your feedback has been recorded:")
+            print(user_feedback)
+            print("="*80)
+        else:
+            print("-"*80)
+            print("No feedback provided. Using system-generated feedback only.")
+            print("="*80)
+        
+        return user_feedback
+    
+    def _display_iteration_summary(
+        self,
+        verification_results: Optional[Dict[str, Any]] = None,
+        simulation_results: Optional[Dict[str, Any]] = None,
+        evaluation_results: Optional[Dict[str, Any]] = None,
+        generated_code: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Display a summary of the current iteration's execution status.
+        
+        Args:
+            verification_results: Results from code verification
+            simulation_results: Results from simulation execution
+            evaluation_results: Results from result evaluation
+            generated_code: Generated code information
+        """
+        print("\n" + "="*80)
+        print(f"ITERATION {self.current_iteration + 1} EXECUTION SUMMARY")
+        print("="*80)
+        
+        # Code Generation Summary
+        print("📝 CODE GENERATION:")
+        if generated_code:
+            if "metadata" in generated_code:
+                metadata = generated_code["metadata"]
+                print(f"   ✓ Model Type: {metadata.get('model_type', 'Unknown')}")
+                if 'entities' in metadata:
+                    print(f"   ✓ Entities: {', '.join(metadata['entities'])}")
+                if 'behaviors' in metadata:
+                    print(f"   ✓ Behaviors: {', '.join(metadata['behaviors'])}")
+            
+            code_summary = generated_code.get("code_summary", "No summary available")
+            print(f"   ✓ Summary: {code_summary}")
+        else:
+            print("   ❌ No code generation results available")
+        
+        # Code Verification Summary
+        print("\n🔍 CODE VERIFICATION:")
+        if verification_results:
+            if verification_results.get("passed", False):
+                print("   ✅ Status: PASSED")
+                print(f"   ✓ Summary: {verification_results.get('summary', 'Verification successful')}")
+            else:
+                print("   ❌ Status: FAILED")
+                if "critical_issues" in verification_results:
+                    print("   ❌ Critical Issues:")
+                    for issue in verification_results["critical_issues"]:
+                        print(f"      • {issue}")
+                if "warnings" in verification_results:
+                    print("   ⚠️  Warnings:")
+                    for warning in verification_results["warnings"]:
+                        print(f"      • {warning}")
+                print(f"   📋 Summary: {verification_results.get('summary', 'Verification failed')}")
+        else:
+            print("   ❓ No verification results available")
+        
+        # Simulation Execution Summary
+        print("\n🚀 SIMULATION EXECUTION:")
+        if simulation_results:
+            execution_status = simulation_results.get("execution_status", "unknown")
+            if execution_status == "success":
+                print("   ✅ Status: SUCCESS")
+                
+                # Performance metrics
+                if "performance_metrics" in simulation_results:
+                    perf = simulation_results["performance_metrics"]
+                    if "execution_time" in perf:
+                        print(f"   ⏱️  Execution Time: {perf['execution_time']:.2f} seconds")
+                    if "memory_usage" in perf:
+                        print(f"   💾 Memory Usage: {perf['memory_usage']} MB")
+                
+                # Simulation metrics
+                if "simulation_metrics" in simulation_results:
+                    sim_metrics = simulation_results["simulation_metrics"]
+                    print("   📊 Simulation Metrics:")
+                    for key, value in sim_metrics.items():
+                        print(f"      • {key}: {value}")
+                
+                # Time series data summary
+                if "time_series_data" in simulation_results:
+                    ts_data = simulation_results["time_series_data"]
+                    if ts_data:
+                        print(f"   📈 Time Series: {len(ts_data)} data points collected")
+                
+            elif execution_status == "failed":
+                print("   ❌ Status: FAILED")
+                if "runtime_errors" in simulation_results:
+                    print("   ❌ Runtime Errors:")
+                    for error in simulation_results["runtime_errors"]:
+                        # Truncate very long error messages
+                        error_str = str(error)
+                        if len(error_str) > 200:
+                            error_str = error_str[:200] + "..."
+                        print(f"      • {error_str}")
+            else:
+                print(f"   ❓ Status: {execution_status.upper()}")
+            
+            summary = simulation_results.get("summary", "No summary available")
+            print(f"   📋 Summary: {summary}")
+        else:
+            print("   ❓ No simulation execution results available")
+        
+        # Result Evaluation Summary
+        print("\n📊 RESULT EVALUATION:")
+        if evaluation_results:
+            if "overall_score" in evaluation_results:
+                score = evaluation_results["overall_score"]
+                print(f"   📈 Overall Score: {score}")
+            
+            if "metrics" in evaluation_results:
+                metrics = evaluation_results["metrics"]
+                print("   📋 Evaluation Metrics:")
+                if isinstance(metrics, dict):
+                    for metric_name, metric_value in metrics.items():
+                        if isinstance(metric_value, (int, float)):
+                            print(f"      • {metric_name}: {metric_value:.4f}")
+                        else:
+                            print(f"      • {metric_name}: {metric_value}")
+                elif isinstance(metrics, list):
+                    for i, metric in enumerate(metrics):
+                        if isinstance(metric, dict):
+                            for key, value in metric.items():
+                                print(f"      • {key}: {value}")
+                        else:
+                            print(f"      • Metric {i+1}: {metric}")
+                else:
+                    print(f"      • {metrics}")
+            
+            if "recommendations" in evaluation_results:
+                recommendations = evaluation_results["recommendations"]
+                if recommendations:
+                    print("   💡 Recommendations:")
+                    for rec in recommendations[:3]:  # Show only first 3 recommendations
+                        print(f"      • {rec}")
+        else:
+            print("   ❓ No evaluation results available")
+        
+        print("="*80)
     
     def _load_config(self) -> Dict[str, Any]:
         """Load configuration from the config file."""
@@ -286,10 +505,13 @@ class WorkflowManager:
             self._save_artifact("simulation_results", self.state["simulation_results"])
             
             # Log simulation execution results
-            if self.state["simulation_results"]["execution_status"] == "success":
+            if self.state["simulation_results"] and self.state["simulation_results"].get("execution_status") == "success":
                 self.logger.info(f"Iteration {self.current_iteration + 1}: Simulation execution completed successfully")
             else:
-                self.logger.warning(f"Iteration {self.current_iteration + 1}: Simulation execution failed: {self.state['simulation_results'].get('summary', 'Unknown error')}")
+                summary = "Unknown error"
+                if self.state["simulation_results"]:
+                    summary = self.state["simulation_results"].get('summary', 'Unknown error')
+                self.logger.warning(f"Iteration {self.current_iteration + 1}: Simulation execution failed: {summary}")
             
             # Step 7: Result Evaluation
             self.state["evaluation_results"] = self.agents["result_evaluation"].process(
@@ -313,31 +535,108 @@ class WorkflowManager:
         current_code_filename = f"simulation_code_iter_{self.current_iteration}.py"
         current_code = current_code_dict[current_code_filename]
         
-        self.state["feedback"] = self.agents["feedback_generation"].process(
-            task_spec=self.state["task_spec"],
-            model_plan=self.state["model_plan"],
-            generated_code=self.state["generated_code"],
-            verification_results=self.state["verification_results"],
-            simulation_results=self.state["simulation_results"],
-            evaluation_results=self.state["evaluation_results"],
-            current_code=current_code,
-            previous_code=previous_code,
-            iteration=self.current_iteration,
-            historical_fix_log=self.historical_fix_log  # Pass historical fix log to feedback agent
-        )
+        # Generate system feedback using the feedback agent
+        if self.auto_mode:
+            # In automatic mode, use system-generated feedback only
+            self.state["feedback"] = self.agents["feedback_generation"].process(
+                task_spec=self.state["task_spec"],
+                model_plan=self.state["model_plan"],
+                generated_code=self.state["generated_code"],
+                verification_results=self.state["verification_results"],
+                simulation_results=self.state["simulation_results"],
+                evaluation_results=self.state["evaluation_results"],
+                current_code=current_code,
+                previous_code=previous_code,
+                iteration=self.current_iteration,
+                historical_fix_log=self.historical_fix_log  # Pass historical fix log to feedback agent
+            )
+        else:
+            # In manual mode, get user feedback and combine with system feedback
+            self.logger.info("Manual feedback mode enabled - prompting user for feedback")
+            
+            # Generate system feedback first
+            system_feedback = self.agents["feedback_generation"].process(
+                task_spec=self.state["task_spec"],
+                model_plan=self.state["model_plan"],
+                generated_code=self.state["generated_code"],
+                verification_results=self.state["verification_results"],
+                simulation_results=self.state["simulation_results"],
+                evaluation_results=self.state["evaluation_results"],
+                current_code=current_code,
+                previous_code=previous_code,
+                iteration=self.current_iteration,
+                historical_fix_log=self.historical_fix_log
+            )
+            
+            # Get user feedback with current iteration status
+            user_feedback_text = self._get_user_feedback(
+                verification_results=self.state["verification_results"],
+                simulation_results=self.state["simulation_results"],
+                evaluation_results=self.state["evaluation_results"],
+                generated_code=self.state["generated_code"]
+            )
+            
+            # Combine system and user feedback
+            combined_feedback = dict(system_feedback)  # Copy system feedback
+            
+            # Add user feedback to the combined feedback
+            if user_feedback_text:
+                # Create user feedback section
+                user_feedback_section = {
+                    "source": "user",
+                    "content": user_feedback_text,
+                    "note": "This is user-provided feedback. Please pay special attention to these suggestions."
+                }
+                
+                # Add user feedback to the combined feedback structure
+                if "feedback_sections" not in combined_feedback:
+                    combined_feedback["feedback_sections"] = []
+                
+                # Insert user feedback at the beginning to prioritize it
+                combined_feedback["feedback_sections"].insert(0, {
+                    "section": "USER_FEEDBACK",
+                    "priority": "CRITICAL",
+                    "feedback": user_feedback_section
+                })
+                
+                # Also add to summary if it exists
+                if "summary" in combined_feedback:
+                    combined_feedback["summary"] = f"USER FEEDBACK: {user_feedback_text}\n\nSYSTEM FEEDBACK: {combined_feedback['summary']}"
+                else:
+                    combined_feedback["summary"] = f"USER FEEDBACK: {user_feedback_text}"
+                    
+                self.logger.info("User feedback has been integrated with system feedback")
+            else:
+                self.logger.info("No user feedback provided - using system feedback only")
+            
+            self.state["feedback"] = combined_feedback
+        
         self._save_artifact("feedback", self.state["feedback"])
         
         # Update historical fix log with new critical issues
         self._update_historical_fix_log()
         
         # Step 9: Iteration Decision
+        # Extract user feedback if available for manual mode
+        user_feedback_text = None
+        if not self.auto_mode and self.state["feedback"]:
+            # Try to extract user feedback from the combined feedback structure
+            feedback_sections = self.state["feedback"].get("feedback_sections", [])
+            for section in feedback_sections:
+                if section.get("section") == "USER_FEEDBACK":
+                    user_feedback_data = section.get("feedback", {})
+                    user_feedback_text = user_feedback_data.get("content")
+                    break
+        
         self.state["iteration_decision"] = self.agents["iteration_control"].process(
             current_iteration=self.current_iteration,
             max_iterations=self.soft_max_iterations,
             task_spec=self.state["task_spec"],
             verification_results=self.state["verification_results"],
             evaluation_results=self.state["evaluation_results"],
-            feedback=self.state["feedback"]
+            feedback=self.state["feedback"],
+            auto_mode=self.auto_mode,
+            user_feedback=user_feedback_text
         )
         self._save_artifact("iteration_decision", self.state["iteration_decision"])
         
