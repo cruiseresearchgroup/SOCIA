@@ -164,15 +164,8 @@ python main.py --help
 This command shows all available options and parameters for running SOCIA, including task description, output directories, and other configuration options.
 
 ```bash
-# Run the built-in example simulation
-python main.py --run-example
-```
-
-This command runs a pre-configured epidemic simulation example to demonstrate the system's capabilities. It's a good starting point to verify that your installation is working correctly.
-
-```bash
-# Run a full workflow with a specific task
-python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./output/my_sim_output"
+# Run a full workflow with a specific task using `Manual Mode` as the default mode.
+python main.py --task "Create a simple epidemic simulation model that models the spread of a virus in a population of 1000 people." --output "./output/my_sim_output_hitl"
 ```
 
 This command initiates the full SOCIA workflow:
@@ -180,6 +173,7 @@ This command initiates the full SOCIA workflow:
 2. The system designs and generates an epidemic simulation for a city of 1000 people
 3. The simulation is executed and results are saved to the "./my_sim_output" directory
 4. Visualizations and analysis are automatically generated
+5. The default mode is **Manual Mode** (`--auto=False`) where user provides manual feedback in each iteration and manually stop iteration by entering `#STOP#`.
 
 Use this command pattern when you want to create custom simulations based on your specific requirements. You can customize the task description to focus on different urban simulation scenarios.
 
@@ -188,7 +182,7 @@ Use this command pattern when you want to create custom simulations based on you
 export PROJECT_ROOT="/Users/Your_User_Name/PycharmProjects/SOCIA" && export DATA_PATH="data_fitting/llmob_data/" && python main.py --task "Develop a multi-agent simulation system to simulate the daily activity trajectories of urban residents based on LLM prompting." --task-file examples/llmob_task.json --output ./output/llmob_sim_output
 ```
 
-This command sets up environment variables for data paths and initiates a complex multi-agent simulation focused on urban resident activities. It uses:
+If we also want to feed data into SOCIA for simulator establishment, this command sets up environment variables for data paths and initiates a complex multi-agent simulation focused on urban resident activities. It uses:
 1. Project root and data path environment variables to specify data locations
 2. A detailed task description for the simulation focus (urban resident daily activities)
 3. Additional parameters from a task file for more complex configuration
@@ -261,7 +255,7 @@ Your feedback: Please add age-based contact matrices to the epidemic model.
 Your feedback: [Press Enter twice - empty input]
 ```
 
-##### 📝 Feedback Guidelines and Best Practices
+##### 📝 Feedback Guidelines and Best Practices (Examples)
 
 **Effective Feedback Types:**
 
