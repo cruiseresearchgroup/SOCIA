@@ -62,7 +62,7 @@ class DockerSandbox:
     Provides isolation for executing untrusted code with resource limitations.
     """
 
-    def __init__(self, base_image: str = "python:3.9-slim", 
+    def __init__(self, base_image: str = "python:3.10-slim", 
                  timeout: int = 30, 
                  max_memory: str = "512m",
                  network_enabled: bool = False,
@@ -126,6 +126,12 @@ class DockerSandbox:
         else:
             docker_cmd.extend(["-e", "DATA_PATH=data"])
         
+        # Pass through OpenAI API key if available in host environment
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if openai_api_key:
+            docker_cmd.extend(["-e", f"OPENAI_API_KEY={openai_api_key}"])
+            logger.debug("OPENAI_API_KEY environment variable passed to container")
+        
         # Mount code exchange directory to a dedicated /sandbox path to avoid overlap with /workspace
         docker_cmd.extend(["-v", f"{self.temp_dir}:/sandbox"])
         
@@ -152,7 +158,7 @@ class DockerSandbox:
         
         # Install essential packages in container
         logger.info("Installing essential packages in Docker container...")
-        essential_packages = ["numpy", "pandas", "matplotlib", "networkx", "pytest"]
+        essential_packages = ["numpy", "pandas", "matplotlib", "networkx", "pytest", "openai"]
         if self.network_enabled:
             packages_str = " ".join(essential_packages)
             install_cmd = f"pip install --no-cache-dir {packages_str} && echo 'PACKAGES_INSTALLED_SUCCESSFULLY'"
@@ -272,7 +278,7 @@ class DockerSandbox:
                 packages = analyzer.analyze_dependencies(code)
                 
                 # Ensure essential packages are installed
-                essential_packages = ["numpy", "pandas", "matplotlib", "networkx", "scikit-learn"]
+                essential_packages = ["numpy", "pandas", "matplotlib", "networkx", "scikit-learn", "openai"]
                 for package in essential_packages + packages:
                     self.install_package(package)
                     
@@ -542,7 +548,7 @@ class CodeVerificationSandbox:
     
     def __init__(self, 
                  output_dir: str,
-                 base_image: str = "python:3.9-slim", 
+                 base_image: str = "python:3.10-slim", 
                  timeout: int = 30,
                  network_enabled: bool = True,
                  data_path: Optional[str] = None):

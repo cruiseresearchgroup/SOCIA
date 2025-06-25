@@ -190,6 +190,31 @@ If we also want to feed data into SOCIA for simulator establishment, this comman
 
 This advanced configuration demonstrates how SOCIA can leverage LLM capabilities to model complex human behaviors in urban environments with high fidelity.
 
+```bash
+# Run LLM-based agent reasoning simulation with explicit OpenAI API calls
+conda activate SOCIA && export OPENAI_API_KEY="your-openai-api-key-here" && export PROJECT_ROOT="/Users/Your_User_Name/PycharmProjects/SOCIA" && export DATA_PATH="data_fitting/agent_society/" && python main.py --task "Develop a multi-agent simulation system to simulate the review and star a use will comment on a product. Do not use transformers to predict review or stars (conduct reasoning), you should call the provided openai key to construct LLM agent to do the reasoning." --task-file examples/agent_society.json --output ./output/agent_society_output_hitl_openaitest
+```
+
+**Important Note for LLM Agent Reasoning Simulations**: This example demonstrates how to run SOCIA when the generated agents need to make **explicit API calls to OpenAI** for reasoning tasks. This is particularly useful for:
+
+1. **Agent-based reasoning scenarios**: When your simulation requires agents to perform complex reasoning using LLM capabilities
+2. **Review and recommendation systems**: Agents that need to generate realistic reviews, ratings, or recommendations
+3. **Social media simulations**: Where agents post comments, reactions, and engage in discussions
+4. **Decision-making simulations**: Agents that need to make intelligent choices based on context
+
+**Key Environment Variables**:
+- `OPENAI_API_KEY`: Your OpenAI API key for the generated agents to use
+- `PROJECT_ROOT`: Absolute path to your SOCIA project directory
+- `DATA_PATH`: Relative path to your data files within the project
+
+**When to use this pattern**:
+- The simulation task explicitly mentions "reasoning", "LLM", or "intelligent behavior"
+- You want agents to generate dynamic, contextual responses rather than using pre-trained models
+- The simulation involves natural language generation tasks (reviews, comments, discussions)
+- You need agents that can adapt their behavior based on complex decision-making processes
+
+Replace `"your-openai-api-key-here"` with your actual OpenAI API key and adjust the paths according to your system setup.
+
 ### 🎯 Auto Mode vs Manual Mode
 
 SOCIA supports two modes of operation to give you control over the feedback process:

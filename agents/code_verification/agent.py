@@ -50,7 +50,7 @@ class CodeVerificationAgent(BaseAgent):
         try:
             self.sandbox = CodeVerificationSandbox(
                 output_dir=os.path.join(output_dir, "verification"),
-                base_image="python:3.9-slim",
+                base_image="python:3.10-slim",
                 timeout=60,
                 network_enabled=False
             )

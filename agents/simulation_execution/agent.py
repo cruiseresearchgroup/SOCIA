@@ -179,7 +179,7 @@ class SimulationExecutionAgent(BaseAgent):
             
             # Create a sandbox for execution
             with DockerSandbox(
-                base_image="python:3.9-slim",
+                base_image="python:3.10-slim",
                 timeout=120,  # 2 minutes timeout
                 max_memory="1g",
                 network_enabled=True,  # Enable network to install packages
