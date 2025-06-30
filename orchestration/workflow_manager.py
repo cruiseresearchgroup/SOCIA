@@ -31,6 +31,7 @@ class WorkflowManager:
         config_path: str = "./config.yaml",
         max_iterations: int = 3,
         auto_mode: bool = False,
+        mode: str = "full",
         agent_container: AgentContainer = Provide[AgentContainer]
     ):
         """
@@ -43,6 +44,7 @@ class WorkflowManager:
             config_path: Path to the configuration file
             max_iterations: Maximum number of iterations
             auto_mode: If True, uses automatic feedback generation; if False, prompts user for manual feedback
+            mode: Workflow mode (e.g., 'lite', 'medium', 'full')
             agent_container: Dependency injection container for agents
         """
         self.logger = logging.getLogger("SOCIA.WorkflowManager")
@@ -60,6 +62,7 @@ class WorkflowManager:
             self.hard_max_iterations = max(max_iterations, 100)
             self.soft_max_iterations = 3  # Start with soft limit of 3, can expand
         self.auto_mode = auto_mode
+        self.mode = mode
         
         # Initialize historical fix log to track issues across iterations
         self.historical_fix_log = {}
@@ -410,137 +413,31 @@ class WorkflowManager:
             "evaluation_path": os.path.join(self.output_path, f"evaluation_iter_{self.current_iteration}.json")
         }
     
-    def _run_iteration(self):
-        """Run a single iteration of the workflow."""
-        # Determine whether to skip initial setup for code-fix iterations
-        skip_initial = self.current_iteration > 0 and self.state.get("simulation_results") is None
-        if not skip_initial:
-            # Step 1: Task Understanding
-            if self.task_data:
-                self.state["task_spec"] = self.agents["task_understanding"].process(
-                    task_description=self.task_description,
-                    task_data=self.task_data
-                )
-            else:
-                self.state["task_spec"] = self.agents["task_understanding"].process(
-                    task_description=self.task_description
-                )
-            self._save_artifact("task_spec", self.state["task_spec"])
-
-            # Step 2: Data Analysis (if data is provided)
-            if self.data_path:
-                try:
-                    self.state["data_analysis"] = self.agents["data_analysis"].process(
-                        data_path=self.data_path,
-                        task_spec=self.state["task_spec"]
-                    )
-                    self._save_artifact("data_analysis", self.state["data_analysis"])
-                except Exception as e:
-                    self.logger.error(f"Data analysis step failed: {e}. Aborting workflow.")
-                    sys.exit(1)
-
-            # Step 3: Model Planning
-            self.state["model_plan"] = self.agents["model_planning"].process(
-                task_spec=self.state["task_spec"],
-                data_analysis=self.state["data_analysis"]
-            )
-            self._save_artifact("model_plan", self.state["model_plan"])
-        else:
-            self.logger.info("Skipping task understanding, data analysis, and model planning due to previous code verification failure.")
-
-        # Step 4: Code Generation
-        # Load previous iteration code if exists
-        prev_code = None
-        if self.current_iteration > 0 and self.current_iteration - 1 in self.code_memory:
-            prev_code = self.code_memory[self.current_iteration - 1]
-        # Generate code using CodeGenerationAgent with previous code context
-        self.state["generated_code"] = self.agents["code_generation"].process(
-            task_spec=self.state["task_spec"],
-            data_analysis=self.state["data_analysis"],
-            model_plan=self.state["model_plan"],
-            feedback=self.state["feedback"],  # Will be None in first iteration
-            data_path=self.data_path,
-            previous_code=prev_code,
-            historical_fix_log=self.historical_fix_log  # Pass historical fix log to code generation agent
-        )
-        self._save_artifact("generated_code", self.state["generated_code"])
-        
-        # Record generated code in memory and save as file
-        gen_code_dict = self.state["generated_code"]["code"]
-        self.code_memory[self.current_iteration] = {f"simulation_code_iter_{self.current_iteration}.py": gen_code_dict}
-        code_file_path = os.path.join(self.output_path, f"simulation_code_iter_{self.current_iteration}.py")
-        with open(code_file_path, 'w') as f:
-            f.write(self.state["generated_code"]["code"])
-        
-        # Step 5: Code Verification
-        self.state["verification_results"] = self.agents["code_verification"].process(
-            code=self.state["generated_code"]["code"],
-            task_spec=self.state["task_spec"],
-            data_path=self.data_path
-        )
-        self._save_artifact("verification_results", self.state["verification_results"])
-        
-        # Log verification results clearly
-        if self.state["verification_results"]["passed"]:
-            self.logger.info(f"Iteration {self.current_iteration + 1}: Code verification PASSED")
-        else:
-            self.logger.warning(f"Iteration {self.current_iteration + 1}: Code verification FAILED")
-            if "critical_issues" in self.state["verification_results"]:
-                for issue in self.state["verification_results"]["critical_issues"]:
-                    self.logger.warning(f"Critical issue: {issue}")
-        
-        # If code verification failed, skip execution and evaluation
-        if not self.state["verification_results"]["passed"]:
-            self.logger.warning("Code verification failed, skipping execution and evaluation")
-            self.state["simulation_results"] = None
-            self.state["evaluation_results"] = None
-        else:
-            # Step 6: Simulation Execution
-            self.logger.info(f"Iteration {self.current_iteration + 1}: Starting simulation execution")
-            self.state["simulation_results"] = self.agents["simulation_execution"].process(
-                code_path=code_file_path,
-                task_spec=self.state["task_spec"],
-                data_path=self.data_path
-            )
-            self._save_artifact("simulation_results", self.state["simulation_results"])
-            
-            # Log simulation execution results
-            if self.state["simulation_results"] and self.state["simulation_results"].get("execution_status") == "success":
-                self.logger.info(f"Iteration {self.current_iteration + 1}: Simulation execution completed successfully")
-            else:
-                summary = "Unknown error"
-                if self.state["simulation_results"]:
-                    summary = self.state["simulation_results"].get('summary', 'Unknown error')
-                self.logger.warning(f"Iteration {self.current_iteration + 1}: Simulation execution failed: {summary}")
-            
-            # Step 7: Result Evaluation
-            self.state["evaluation_results"] = self.agents["result_evaluation"].process(
-                simulation_results=self.state["simulation_results"],
-                task_spec=self.state["task_spec"],
-                data_analysis=self.state["data_analysis"]
-            )
-            self._save_artifact("evaluation_results", self.state["evaluation_results"])
-        
-        # Step 8: Feedback Generation
-        previous_code = None
-        if self.current_iteration > 0 and self.current_iteration - 1 in self.code_memory:
-            # Get previous iteration's code
-            previous_code_dict = self.code_memory[self.current_iteration - 1]
-            previous_code_filename = f"simulation_code_iter_{self.current_iteration - 1}.py"
-            if previous_code_filename in previous_code_dict:
-                previous_code = previous_code_dict[previous_code_filename]
-        
-        # Current code from code_memory
+    def _generate_feedback_and_control_iteration(self):
+        """
+        Common method to generate feedback and make iteration control decisions.
+        Used by all workflow modes (lite, medium, full).
+        """
+        # Get current and previous code for feedback
         current_code_dict = self.code_memory[self.current_iteration]
         current_code_filename = f"simulation_code_iter_{self.current_iteration}.py"
         current_code = current_code_dict[current_code_filename]
         
+        previous_code = None
+        if self.current_iteration > 0 and self.current_iteration - 1 in self.code_memory:
+            prev_code_dict = self.code_memory[self.current_iteration - 1]
+            prev_code_filename = f"simulation_code_iter_{self.current_iteration - 1}.py"
+            if isinstance(prev_code_dict, dict) and prev_code_filename in prev_code_dict:
+                previous_code = prev_code_dict[prev_code_filename]
+            elif isinstance(prev_code_dict, str):
+                previous_code = prev_code_dict
+
         # Generate system feedback using the feedback agent
         if self.auto_mode:
             # In automatic mode, use system-generated feedback only
             self.state["feedback"] = self.agents["feedback_generation"].process(
                 task_spec=self.state["task_spec"],
-                model_plan=self.state["model_plan"],
+                model_plan=self.state["model_plan"],  # May be None in lite mode
                 generated_code=self.state["generated_code"],
                 verification_results=self.state["verification_results"],
                 simulation_results=self.state["simulation_results"],
@@ -548,7 +445,7 @@ class WorkflowManager:
                 current_code=current_code,
                 previous_code=previous_code,
                 iteration=self.current_iteration,
-                historical_fix_log=self.historical_fix_log  # Pass historical fix log to feedback agent
+                historical_fix_log=self.historical_fix_log
             )
         else:
             # In manual mode, get user feedback and combine with system feedback
@@ -557,7 +454,7 @@ class WorkflowManager:
             # Generate system feedback first
             system_feedback = self.agents["feedback_generation"].process(
                 task_spec=self.state["task_spec"],
-                model_plan=self.state["model_plan"],
+                model_plan=self.state["model_plan"],  # May be None in lite mode
                 generated_code=self.state["generated_code"],
                 verification_results=self.state["verification_results"],
                 simulation_results=self.state["simulation_results"],
@@ -616,7 +513,7 @@ class WorkflowManager:
         # Update historical fix log with new critical issues
         self._update_historical_fix_log()
         
-        # Step 9: Iteration Decision
+        # Iteration Decision
         # Extract user feedback if available for manual mode
         user_feedback_text = None
         if not self.auto_mode and self.state["feedback"]:
@@ -624,74 +521,243 @@ class WorkflowManager:
             feedback_sections = self.state["feedback"].get("feedback_sections", [])
             for section in feedback_sections:
                 if section.get("section") == "USER_FEEDBACK":
-                    user_feedback_data = section.get("feedback", {})
-                    user_feedback_text = user_feedback_data.get("content")
+                    user_feedback_text = section.get("feedback", {}).get("content", "")
                     break
         
         self.state["iteration_decision"] = self.agents["iteration_control"].process(
-            current_iteration=self.current_iteration,
-            max_iterations=self.soft_max_iterations,
-            task_spec=self.state["task_spec"],
+            feedback=self.state["feedback"],
             verification_results=self.state["verification_results"],
             evaluation_results=self.state["evaluation_results"],
-            feedback=self.state["feedback"],
-            auto_mode=self.auto_mode,
-            user_feedback=user_feedback_text
+            current_iteration=self.current_iteration,
+            max_iterations=self.soft_max_iterations,
+            auto_mode=self.auto_mode,  # Ensure manual mode is passed correctly so #STOP# works
+            user_feedback=user_feedback_text  # Pass user feedback for stop command check
         )
         self._save_artifact("iteration_decision", self.state["iteration_decision"])
-        
-        # Log iteration decision
-        continue_msg = "CONTINUE" if self.state["iteration_decision"]["continue"] else "STOP"
-        self.logger.info(f"Iteration {self.current_iteration + 1} decision: {continue_msg} - {self.state['iteration_decision'].get('reason', 'No reason provided')}")
-        # Persist agent interactions for this iteration
-        interactions = {
-            "iteration": self.current_iteration,
-            "interactions": {
-                "task_understanding": {
-                    "input": {"task_description": self.task_description, "task_data": self.task_data},
-                    "output": self.state["task_spec"]
-                },
-                "data_analysis": {
-                    "input": {"data_path": self.data_path, "task_spec": self.state["task_spec"]},
-                    "output": self.state["data_analysis"]
-                },
-                "model_planning": {
-                    "input": {"task_spec": self.state["task_spec"], "data_analysis": self.state["data_analysis"]},
-                    "output": self.state["model_plan"]
-                },
-                "code_generation": {
-                    "input": {"task_spec": self.state["task_spec"], "data_analysis": self.state["data_analysis"], "model_plan": self.state["model_plan"], "feedback": self.state["feedback"]},
-                    "output": self.state["generated_code"]
-                },
-                "code_verification": {
-                    "input": {"code": self.state["generated_code"]["code"], "task_spec": self.state["task_spec"]},
-                    "output": self.state["verification_results"]
-                },
-                "simulation_execution": {
-                    "input": {"code_path": code_file_path, "task_spec": self.state["task_spec"], "data_path": self.data_path},
-                    "output": self.state["simulation_results"]
-                },
-                "result_evaluation": {
-                    "input": {"simulation_results": self.state["simulation_results"], "task_spec": self.state["task_spec"], "data_analysis": self.state["data_analysis"]},
-                    "output": self.state["evaluation_results"]
-                },
-                "feedback_generation": {
-                    "input": {"task_spec": self.state["task_spec"], "model_plan": self.state["model_plan"], "generated_code": self.state["generated_code"], "verification_results": self.state["verification_results"], "simulation_results": self.state["simulation_results"], "evaluation_results": self.state["evaluation_results"], "code_file_path": code_file_path},
-                    "output": self.state["feedback"]
-                },
-                "iteration_control": {
-                    "input": {"current_iteration": self.current_iteration, "max_iterations": self.soft_max_iterations, "task_spec": self.state["task_spec"], "verification_results": self.state["verification_results"], "evaluation_results": self.state["evaluation_results"], "feedback": self.state["feedback"]},
-                    "output": self.state["iteration_decision"]
-                }
+
+    def _run_iteration(self):
+        """Run a single iteration of the workflow."""
+        if self.mode == 'full':
+            # Determine whether to skip initial setup for code-fix iterations
+            skip_initial = self.current_iteration > 0 and self.state.get("simulation_results") is None
+            if not skip_initial:
+                # Step 1: Task Understanding
+                if self.task_data:
+                    self.state["task_spec"] = self.agents["task_understanding"].process(
+                        task_description=self.task_description,
+                        task_data=self.task_data
+                    )
+                else:
+                    self.state["task_spec"] = self.agents["task_understanding"].process(
+                        task_description=self.task_description
+                    )
+                self._save_artifact("task_spec", self.state["task_spec"])
+
+                # Step 2: Data Analysis (if data is provided)
+                if self.data_path:
+                    try:
+                        self.state["data_analysis"] = self.agents["data_analysis"].process(
+                            data_path=self.data_path,
+                            task_spec=self.state["task_spec"]
+                        )
+                        self._save_artifact("data_analysis", self.state["data_analysis"])
+                    except Exception as e:
+                        self.logger.error(f"Data analysis step failed: {e}. Aborting workflow.")
+                        sys.exit(1)
+
+                # Step 3: Model Planning
+                self.state["model_plan"] = self.agents["model_planning"].process(
+                    task_spec=self.state["task_spec"],
+                    data_analysis=self.state["data_analysis"]
+                )
+                self._save_artifact("model_plan", self.state["model_plan"])
+            else:
+                self.logger.info("Skipping task understanding, data analysis, and model planning due to previous code verification failure.")
+
+            # Step 4: Code Generation
+            # Load previous iteration code if exists
+            prev_code = None
+            if self.current_iteration > 0 and self.current_iteration - 1 in self.code_memory:
+                prev_code = self.code_memory[self.current_iteration - 1]
+            # Generate code using CodeGenerationAgent with previous code context
+            self.state["generated_code"] = self.agents["code_generation"].process(
+                task_spec=self.state["task_spec"],
+                data_analysis=self.state["data_analysis"],
+                model_plan=self.state["model_plan"],
+                feedback=self.state["feedback"],  # Will be None in first iteration
+                data_path=self.data_path,
+                previous_code=prev_code,
+                historical_fix_log=self.historical_fix_log,  # Pass historical fix log to code generation agent
+                mode="full"  # Use full mode
+            )
+            self._save_artifact("generated_code", self.state["generated_code"])
+            
+            # Record generated code in memory and save as file
+            gen_code_dict = self.state["generated_code"]["code"]
+            self.code_memory[self.current_iteration] = {f"simulation_code_iter_{self.current_iteration}.py": gen_code_dict}
+            code_file_path = os.path.join(self.output_path, f"simulation_code_iter_{self.current_iteration}.py")
+            with open(code_file_path, 'w') as f:
+                f.write(self.state["generated_code"]["code"])
+            
+            # Step 5: Code Verification
+            self.state["verification_results"] = self.agents["code_verification"].process(
+                code=self.state["generated_code"]["code"],
+                task_spec=self.state["task_spec"],
+                data_path=self.data_path
+            )
+            self._save_artifact("verification_results", self.state["verification_results"])
+            
+            # Log verification results clearly
+            if self.state["verification_results"]["passed"]:
+                self.logger.info(f"Iteration {self.current_iteration + 1}: Code verification PASSED")
+            else:
+                self.logger.warning(f"Iteration {self.current_iteration + 1}: Code verification FAILED")
+                if "critical_issues" in self.state["verification_results"]:
+                    for issue in self.state["verification_results"]["critical_issues"]:
+                        self.logger.warning(f"Critical issue: {issue}")
+            
+            # If code verification failed, skip execution and evaluation
+            if not self.state["verification_results"]["passed"]:
+                self.logger.warning("Code verification failed, skipping execution and evaluation")
+                self.state["simulation_results"] = None
+                self.state["evaluation_results"] = None
+            else:
+                # Step 6: Simulation Execution
+                self.logger.info(f"Iteration {self.current_iteration + 1}: Starting simulation execution")
+                self.state["simulation_results"] = self.agents["simulation_execution"].process(
+                    code_path=code_file_path,
+                    task_spec=self.state["task_spec"],
+                    data_path=self.data_path
+                )
+                self._save_artifact("simulation_results", self.state["simulation_results"])
+                
+                # Log simulation execution results
+                if self.state["simulation_results"] and self.state["simulation_results"].get("execution_status") == "success":
+                    self.logger.info(f"Iteration {self.current_iteration + 1}: Simulation execution completed successfully")
+                else:
+                    summary = "Unknown error"
+                    if self.state["simulation_results"]:
+                        summary = self.state["simulation_results"].get('summary', 'Unknown error')
+                    self.logger.warning(f"Iteration {self.current_iteration + 1}: Simulation execution failed: {summary}")
+                
+                # Step 7: Result Evaluation
+                self.state["evaluation_results"] = self.agents["result_evaluation"].process(
+                    simulation_results=self.state["simulation_results"],
+                    task_spec=self.state["task_spec"],
+                    data_analysis=self.state["data_analysis"]
+                )
+                self._save_artifact("evaluation_results", self.state["evaluation_results"])
+            
+            # Step 8 & 9: Common feedback generation and iteration control
+            self._generate_feedback_and_control_iteration()
+
+        elif self.mode == 'medium':
+            self.logger.info("Medium mode is a placeholder and not yet implemented. Stopping workflow.")
+            self.state["iteration_decision"] = {"continue": False, "reason": "Medium mode not implemented."}
+            
+        elif self.mode == 'lite':
+            # Lite mode workflow: Skip task understanding, data analysis, and model planning
+            # Use task description directly as task spec for code generation
+            
+            # Step 1: Use task description directly as task spec
+            self.state["task_spec"] = {
+                "task_description": self.task_description,
+                "simulation_type": "lite_mode",
+                "objective": self.task_description
             }
-        }
-        interactions_file = os.path.join(self.output_path, f"interactions_iter_{self.current_iteration}.json")
-        with open(interactions_file, 'w') as f:
-            json.dump(interactions, f, indent=2)
+            self._save_artifact("task_spec", self.state["task_spec"])
+            
+            # Step 2: Skip data analysis and model planning - set to None
+            self.state["data_analysis"] = None
+            self.state["model_plan"] = None
+            
+            # Step 3: Code Generation using lite template
+            # Load previous iteration code if exists
+            prev_code = None
+            if self.current_iteration > 0 and self.current_iteration - 1 in self.code_memory:
+                prev_code_dict = self.code_memory[self.current_iteration - 1]
+                prev_code_filename = f"simulation_code_iter_{self.current_iteration - 1}.py"
+                if isinstance(prev_code_dict, dict) and prev_code_filename in prev_code_dict:
+                    prev_code = prev_code_dict[prev_code_filename]
+                elif isinstance(prev_code_dict, str):
+                    # Handle case where prev_code_dict is already a string
+                    prev_code = prev_code_dict
+            
+            # Generate code using CodeGenerationAgent with lite template
+            self.state["generated_code"] = self.agents["code_generation"].process(
+                task_spec=self.state["task_spec"],
+                data_analysis=None,  # Not used in lite mode
+                model_plan=None,     # Not used in lite mode
+                feedback=self.state["feedback"],  # Will be None in first iteration
+                data_path=self.data_path,
+                previous_code=prev_code,
+                historical_fix_log=self.historical_fix_log,
+                mode="lite"  # Use lite mode
+            )
+            self._save_artifact("generated_code", self.state["generated_code"])
+            
+            # Record generated code in memory and save as file
+            gen_code_dict = self.state["generated_code"]["code"]
+            self.code_memory[self.current_iteration] = {f"simulation_code_iter_{self.current_iteration}.py": gen_code_dict}
+            code_file_path = os.path.join(self.output_path, f"simulation_code_iter_{self.current_iteration}.py")
+            with open(code_file_path, 'w') as f:
+                f.write(self.state["generated_code"]["code"])
+            
+            # Step 4: Code Verification
+            self.state["verification_results"] = self.agents["code_verification"].process(
+                code=self.state["generated_code"]["code"],
+                task_spec=self.state["task_spec"],
+                data_path=self.data_path
+            )
+            self._save_artifact("verification_results", self.state["verification_results"])
+            
+            # Log verification results clearly
+            if self.state["verification_results"]["passed"]:
+                self.logger.info(f"Iteration {self.current_iteration + 1}: Code verification PASSED")
+            else:
+                self.logger.warning(f"Iteration {self.current_iteration + 1}: Code verification FAILED")
+                if "critical_issues" in self.state["verification_results"]:
+                    for issue in self.state["verification_results"]["critical_issues"]:
+                        self.logger.warning(f"Critical issue: {issue}")
+            
+            # If code verification failed, skip execution and evaluation
+            if not self.state["verification_results"]["passed"]:
+                self.logger.warning("Code verification failed, skipping execution and evaluation")
+                self.state["simulation_results"] = None
+                self.state["evaluation_results"] = None
+            else:
+                # Step 5: Simulation Execution
+                self.logger.info(f"Iteration {self.current_iteration + 1}: Starting simulation execution")
+                self.state["simulation_results"] = self.agents["simulation_execution"].process(
+                    code_path=code_file_path,
+                    task_spec=self.state["task_spec"],
+                    data_path=self.data_path
+                )
+                self._save_artifact("simulation_results", self.state["simulation_results"])
+                
+                # Log simulation execution results
+                if self.state["simulation_results"] and self.state["simulation_results"].get("execution_status") == "success":
+                    self.logger.info(f"Iteration {self.current_iteration + 1}: Simulation execution completed successfully")
+                else:
+                    summary = "Unknown error"
+                    if self.state["simulation_results"]:
+                        summary = self.state["simulation_results"].get('summary', 'Unknown error')
+                    self.logger.warning(f"Iteration {self.current_iteration + 1}: Simulation execution failed: {summary}")
+                
+                # Step 6: Result Evaluation (simplified for lite mode)
+                self.state["evaluation_results"] = self.agents["result_evaluation"].process(
+                    simulation_results=self.state["simulation_results"],
+                    task_spec=self.state["task_spec"],
+                    data_analysis=None  # Not available in lite mode
+                )
+                self._save_artifact("evaluation_results", self.state["evaluation_results"])
+            
+            # Step 7 & 8: Common feedback generation and iteration control
+            self._generate_feedback_and_control_iteration()
     
     def _save_artifact(self, name: str, data: Any):
-        """Save an artifact to the output directory."""
-        if data is None:
+        """Save an artifact to a JSON file."""
+        if not data:
             return
         
         filepath = os.path.join(self.output_path, f"{name}_iter_{self.current_iteration}.json")
