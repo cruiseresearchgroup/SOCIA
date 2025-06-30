@@ -24,32 +24,34 @@ class CodeGenerationAgent(BaseAgent):
     def process(
         self,
         task_spec: Dict[str, Any],
-        model_plan: Dict[str, Any],
+        model_plan: Optional[Dict[str, Any]] = None,
         data_analysis: Optional[Dict[str, Any]] = None,
         feedback: Optional[Dict[str, Any]] = None,
         data_path: Optional[str] = None,
         previous_code: Optional[Dict[str, str]] = None,
-        historical_fix_log: Optional[Dict[str, Any]] = None
+        historical_fix_log: Optional[Dict[str, Any]] = None,
+        mode: str = "full"
     ) -> Dict[str, Any]:
         """
         Generate simulation code based on the model plan.
         
         Args:
             task_spec: Task specification from the Task Understanding Agent
-            model_plan: Model plan from the Model Planning Agent
+            model_plan: Model plan from the Model Planning Agent (optional, not used in lite mode)
             data_analysis: Data analysis results from the Data Analysis Agent (optional)
             feedback: Feedback from previous iterations (optional)
             data_path: Original data directory path (optional)
             previous_code: Code from the previous iteration for context (optional)
             historical_fix_log: Log of historical issues and their fix status (optional)
+            mode: Workflow mode ('lite', 'medium', 'full'). Defaults to 'full'.
         
         Returns:
             Dictionary containing the generated code and metadata
         """
         self.logger.info("Generating simulation code")
         
-        # Override model_plan data_sources with processed file paths
-        if data_analysis and "file_references" in data_analysis:
+        # Override model_plan data_sources with processed file paths (skip in lite mode)
+        if mode != "lite" and model_plan and data_analysis and "file_references" in data_analysis:
             self.logger.info("Overriding model_plan data_sources with processed file paths")
             # Copy model_plan to avoid mutating original
             model_plan = dict(model_plan)
@@ -69,7 +71,8 @@ class CodeGenerationAgent(BaseAgent):
             data_analysis=data_analysis,
             feedback=feedback,
             data_path=data_path,
-            previous_code=previous_code
+            previous_code=previous_code,
+            mode=mode
         )
         
         # Call LLM to generate code
@@ -93,14 +96,16 @@ class CodeGenerationAgent(BaseAgent):
         code = self._fix_unclosed_docstrings(code)
         
         # Run self-checking loop to improve the code - always run, regardless of feedback or historical_fix_log
-        self.logger.info("Starting self-checking loop for code improvement")
-        code = self._run_self_checking_loop(
-            code=code,
-            task_spec=task_spec,
-            model_plan=model_plan,
-            feedback=feedback,
-            historical_fix_log=historical_fix_log
-        )
+        # Skip self-checking in lite mode for faster execution
+        if mode != "lite":
+            self.logger.info("Starting self-checking loop for code improvement")
+            code = self._run_self_checking_loop(
+                code=code,
+                task_spec=task_spec,
+                model_plan=model_plan,
+                feedback=feedback,
+                historical_fix_log=historical_fix_log
+            )
         
         # Generate a summary of the code
         code_summary = self._generate_code_summary(code)
@@ -109,9 +114,10 @@ class CodeGenerationAgent(BaseAgent):
             "code": code,
             "code_summary": code_summary,
             "metadata": {
-                "model_type": model_plan.get("model_type", "unknown"),
-                "entities": [e.get("name") for e in model_plan.get("entities", [])],
-                "behaviors": [b.get("name") for b in model_plan.get("behaviors", [])]
+                "model_type": model_plan.get("model_type", mode) if model_plan else mode,
+                "entities": [e.get("name") for e in model_plan.get("entities", [])] if model_plan else [],
+                "behaviors": [b.get("name") for b in model_plan.get("behaviors", [])] if model_plan else [],
+                "mode": mode
             }
         }
         
@@ -648,31 +654,39 @@ class CodeGenerationAgent(BaseAgent):
     def _build_prompt(
         self,
         task_spec: Dict[str, Any],
-        model_plan: Dict[str, Any],
+        model_plan: Optional[Dict[str, Any]] = None,
         data_analysis: Optional[Dict[str, Any]] = None,
         feedback: Optional[Dict[str, Any]] = None,
         data_path: Optional[str] = None,
-        previous_code: Optional[Dict[str, str]] = None
+        previous_code: Optional[Dict[str, str]] = None,
+        mode: str = "full"
     ) -> str:
         """
         Build a prompt for the LLM to generate code.
         
         Args:
             task_spec: Task specification from the Task Understanding Agent
-            model_plan: Model plan from the Model Planning Agent
+            model_plan: Model plan from the Model Planning Agent (optional)
             data_analysis: Data analysis results from the Data Analysis Agent (optional)
             feedback: Feedback from previous iterations (optional)
             data_path: Original data directory path (optional)
             previous_code: Code from the previous iteration for context (optional)
+            mode: Workflow mode ('lite', 'medium', 'full'). Defaults to 'full'.
             
         Returns:
             A prompt for the LLM to generate code
         """
-        # Load the code generation prompt template
+        # Load the appropriate code generation prompt template based on mode
+        if mode == "lite":
+            template_name = "code_generation_prompt_lite.txt"
+        elif mode == "medium":
+            template_name = "code_generation_prompt_medium.txt"
+        else:  # full
+            template_name = "code_generation_prompt.txt"
         prompt_template_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
             "templates",
-            "code_generation_prompt.txt"
+            template_name
         )
         
         try:
@@ -705,32 +719,60 @@ class CodeGenerationAgent(BaseAgent):
             Please generate Python code that implements the specified simulation model.
             """
         
-        # Format the task spec, model plan, and data analysis as strings for the prompt
-        task_spec_str = json.dumps(task_spec, indent=2) if task_spec else "No task specification provided"
-        model_plan_str = json.dumps(model_plan, indent=2) if model_plan else "No model plan provided"
-        data_analysis_str = json.dumps(data_analysis, indent=2) if data_analysis else "No data analysis provided"
-        
-        # Format the previous code as a string for the prompt
-        previous_code_str = ""
-        if previous_code:
-            for filename, code in previous_code.items():
-                previous_code_str += f"File: {filename}\n```python\n{code}\n```\n\n"
-        
-        # Format the feedback as a string for the prompt
-        feedback_str = json.dumps(feedback, indent=2) if feedback else "No feedback provided"
-        
-        # Data path string
-        data_path_str = f"Data directory: {data_path}" if data_path else "No data path provided"
-        
-        # Fill in the template
-        prompt = prompt_template.format(
-            task_spec=task_spec_str,
-            model_plan=model_plan_str,
-            data_analysis=data_analysis_str,
-            feedback=feedback_str,
-            previous_code=previous_code_str,
-            data_path=data_path_str
-        )
+        if mode == "lite":
+            # Format for lite template (uses fewer placeholders)
+            task_spec_str = json.dumps(task_spec, indent=2) if task_spec else "No task specification provided"
+            
+            # Format the previous code as a string for the prompt
+            previous_code_str = ""
+            if previous_code:
+                if isinstance(previous_code, dict):
+                    for filename, code in previous_code.items():
+                        previous_code_str += f"File: {filename}\n```python\n{code}\n```\n\n"
+                elif isinstance(previous_code, str):
+                    previous_code_str = f"```python\n{previous_code}\n```\n\n"
+            if not previous_code_str:
+                previous_code_str = "No previous code available"
+            
+            # Format the feedback as a string for the prompt
+            feedback_str = json.dumps(feedback, indent=2) if feedback else "No feedback provided"
+            
+            # Fill in the lite template
+            prompt = prompt_template.format(
+                task_spec=task_spec_str,
+                feedback=feedback_str,
+                previous_code=previous_code_str
+            )
+        else:
+            # Format for full template (uses all placeholders)
+            task_spec_str = json.dumps(task_spec, indent=2) if task_spec else "No task specification provided"
+            model_plan_str = json.dumps(model_plan, indent=2) if model_plan else "No model plan provided"
+            data_analysis_str = json.dumps(data_analysis, indent=2) if data_analysis else "No data analysis provided"
+            
+            # Format the previous code as a string for the prompt
+            previous_code_str = ""
+            if previous_code:
+                if isinstance(previous_code, dict):
+                    for filename, code in previous_code.items():
+                        previous_code_str += f"File: {filename}\n```python\n{code}\n```\n\n"
+                elif isinstance(previous_code, str):
+                    previous_code_str = f"```python\n{previous_code}\n```\n\n"
+            
+            # Format the feedback as a string for the prompt
+            feedback_str = json.dumps(feedback, indent=2) if feedback else "No feedback provided"
+            
+            # Data path string
+            data_path_str = f"Data directory: {data_path}" if data_path else "No data path provided"
+            
+            # Fill in the full template
+            prompt = prompt_template.format(
+                task_spec=task_spec_str,
+                model_plan=model_plan_str,
+                data_analysis=data_analysis_str,
+                feedback=feedback_str,
+                previous_code=previous_code_str,
+                data_path=data_path_str
+            )
         
         return prompt
     

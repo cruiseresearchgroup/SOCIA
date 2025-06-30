@@ -65,6 +65,7 @@ def parse_arguments():
     parser.add_argument('--run-example', action='store_true', help='Run the example epidemic simulation')
     parser.add_argument('--setup-api-key', action='store_true', help='Setup OpenAI API key')
     parser.add_argument('--auto', action='store_true', default=False, help='Enable automatic mode; when False, user will be prompted to input feedback manually in each iteration')
+    parser.add_argument('--mode', type=str, default='lite', choices=['lite', 'medium', 'full'], help='Workflow mode: lite, medium, or full.')
     
     args = parser.parse_args()
     
@@ -230,7 +231,8 @@ def run_workflow(
             config_path=args.config,
             max_iterations=args.iterations,
             auto_mode=args.auto,
-            agent_container=agent_container
+            agent_container=agent_container,
+            mode=args.mode
         )
         
         # Run the workflow

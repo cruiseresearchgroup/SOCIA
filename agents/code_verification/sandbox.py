@@ -139,6 +139,8 @@ class DockerSandbox:
         if self.data_path:
             host_data_dir = os.path.abspath(self.data_path)
             container_data_dir = os.path.join("/workspace", self.data_path)
+            # Ensure host directory exists
+            os.makedirs(host_data_dir, exist_ok=True)
             docker_cmd.extend(["-v", f"{host_data_dir}:{container_data_dir}"])
         
         # Add image and command to keep container running
