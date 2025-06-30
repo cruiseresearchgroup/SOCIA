@@ -260,6 +260,44 @@ Enter your feedback (press Enter twice to finish):
 --------------------------------------------------------------------------------
 ```
 
+To stop the iteration process at any time, simply enter `#STOP#` as your feedback.
+
+#### Lite Mode - Simplified Workflow
+
+SOCIA also provides a **Lite Mode** that offers a streamlined workflow for simpler simulation tasks. This mode is particularly useful when you want to:
+- Quickly prototype a simulation
+- Test simple models without complex data analysis
+- Get immediate results with minimal setup
+
+##### 🚀 Using Lite Mode with Human-in-the-Loop
+
+Here's an example command that combines Lite Mode with human-in-the-loop feedback:
+
+```bash
+export PROJECT_ROOT="/path/to/your/SOCIA" && \
+export DATA_PATH="output/test_result/" && \
+python main.py --task "Create a simple epidemic simulation with SIR model" \
+               --mode lite \
+               --output ./output/lite_test_fixed_hitl
+```
+
+This command:
+1. Sets up necessary environment variables:
+   - `PROJECT_ROOT`: Points to your SOCIA installation directory
+   - `DATA_PATH`: Specifies where simulation results will be saved
+2. Runs SOCIA in lite mode (`--mode lite`)
+3. Enables human-in-the-loop feedback by default
+4. Generates a simple SIR epidemic model
+
+In lite mode, you can still provide feedback after each iteration and use `#STOP#` to end the process when satisfied with the results.
+
+##### 💡 Key Features of Lite Mode
+- Simplified workflow with fewer agents
+- Faster iteration cycles
+- Focus on code generation and execution
+- Direct feedback loop with the system
+- Suitable for educational and prototyping purposes
+
 ##### 🛑 Controlling Iteration Termination
 
 You have **full control** over when to stop the iterative refinement process:
