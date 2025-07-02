@@ -4,35 +4,9 @@
 
 # 🌆 SOCIA: Simulation Orchestration for Cyber-Physical-Social Intelligence and Agents
 
-<p align="center"><i>The work is in rapid progress...</i></p>
+[//]: # (<p align="center"><i>The work is still in progress...</i></p>)
 
 An LLM-driven multi-agent Cyber-Physical-Social simulation generator that automatically creates simulation environments based on user requirements and data.
-
-For more details about SOCIA, please check out our [paper on arXiv](https://arxiv.org/abs/2505.12006).
-
-If you use SOCIA in your research, please cite:
-```bibtex
-@article{DBLP:journals/corr/abs-2505-12006,
-  author       = {Yuncheng Hua and
-                  Ji Miao and
-                  Mehdi Jafari and
-                  Jianxiang Xie and
-                  Hao Xue and
-                  Flora D. Salim},
-  title        = {{SOCIA:} An End-to-End Agentic Framework for Automated Cyber-Physical-Social
-                  Simulator Generation},
-  journal      = {CoRR},
-  volume       = {abs/2505.12006},
-  year         = {2025},
-  url          = {https://doi.org/10.48550/arXiv.2505.12006},
-  doi          = {10.48550/ARXIV.2505.12006},
-  eprinttype    = {arXiv},
-  eprint       = {2505.12006},
-  timestamp    = {Tue, 24 Jun 2025 07:37:11 +0200},
-  biburl       = {https://dblp.org/rec/journals/corr/abs-2505-12006.bib},
-  bibsource    = {dblp computer science bibliography, https://dblp.org}
-}
-```
 
 <!-- Illustration Image Placeholder -->
 <p align="center">
@@ -285,75 +259,6 @@ SPECIAL COMMANDS:
 Enter your feedback (press Enter twice to finish):
 --------------------------------------------------------------------------------
 ```
-
-To stop the iteration process at any time, simply enter `#STOP#` as your feedback.
-
-#### Lite Mode - Simplified Workflow
-
-SOCIA also provides a **Lite Mode** that offers a streamlined workflow for simpler simulation tasks. This mode is particularly useful when you want to:
-- Quickly prototype a simulation
-- Test simple models without complex data analysis
-- Get immediate results with minimal setup
-
-##### 🚀 Using Lite Mode with Human-in-the-Loop
-
-Here's an example command that combines Lite Mode with human-in-the-loop feedback:
-
-```bash
-export PROJECT_ROOT="/path/to/your/SOCIA" && \
-export DATA_PATH="output/test_result/" && \
-python main.py --task "Create a simple epidemic simulation with SIR model" \
-               --mode lite \
-               --output ./output/lite_test_fixed_hitl
-```
-
-This command:
-1. Sets up necessary environment variables:
-   - `PROJECT_ROOT`: Points to your SOCIA installation directory
-   - `DATA_PATH`: Specifies where simulation results will be saved
-2. Runs SOCIA in lite mode (`--mode lite`)
-3. Enables human-in-the-loop feedback by default
-4. Generates a simple SIR epidemic model
-
-In lite mode, you can still provide feedback after each iteration and use `#STOP#` to end the process when satisfied with the results.
-
-##### 💡 Key Features of Lite Mode
-- **Simplified workflow** with fewer agents (skips task understanding, data analysis, and model planning)
-- **Faster iteration cycles** with streamlined processing
-- **Direct code execution** using Python subprocess instead of Docker sandbox
-- **Real-time output capture** displaying stdout, stderr, and return codes
-- **Lightweight verification** without heavy Docker-based sandbox isolation
-- **Direct feedback loop** with the system for rapid iteration
-- **Suitable for educational and prototyping purposes**
-
-##### 🔧 Lite Mode Execution Details
-
-In Lite Mode, SOCIA now **executes the generated code directly** using Python's subprocess module instead of skipping execution entirely. This provides:
-
-1. **Direct Code Execution**: Generated simulation code runs immediately in the host environment
-2. **Real-time Output**: Complete stdout and stderr output is captured and displayed
-3. **Performance Metrics**: Execution time and return codes are recorded
-4. **Error Handling**: Runtime errors are captured and reported for debugging
-
-**Example Execution Output:**
-```
-standard output（stdout）:
-Starting sample simulation...
-Project root: /Users/username/SOCIA
-Data path: data/sample
-Step 0: Simulation value = 0.123
-Step 1: Simulation value = 0.456
-...
-Simulation completed successfully!
-
-error info（stderr）:
-[Any error messages appear here]
-
-return code（returncode）:
-0
-```
-
-This approach allows for rapid testing and iteration while maintaining the lightweight nature of Lite Mode, making it ideal for development and educational scenarios where Docker isolation is not required.
 
 ##### 🛑 Controlling Iteration Termination
 
