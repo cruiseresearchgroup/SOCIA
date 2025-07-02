@@ -13,6 +13,72 @@ from typing import Dict, Any, Optional, List
 from agents.base_agent import BaseAgent
 from agents.code_verification.sandbox import DockerSandbox
 
+
+def run_python_script(script_file: str, data_path: Optional[str] = None, timeout: int = 300) -> Dict[str, Any]:
+    """
+    Execute a Python script using subprocess and return detailed results.
+    
+    Args:
+        script_file: Path to the Python script to execute
+        data_path: Path to input data (optional)
+        timeout: Timeout in seconds (default: 5 minutes)
+    
+    Returns:
+        Dictionary containing stdout, stderr, returncode, and execution time
+    """
+    # Set up environment variables
+    env = os.environ.copy()
+    env["PROJECT_ROOT"] = os.getcwd()
+    # Respect existing DATA_PATH if provided via environment, override only if data_path argument is given
+    if data_path is not None:
+        env["DATA_PATH"] = data_path
+    elif "DATA_PATH" not in env or not env["DATA_PATH"]:
+        env["DATA_PATH"] = "data"
+    
+    # Record start time
+    start_time = time.time()
+    
+    try:
+        # Execute the Python script
+        result = subprocess.run(
+            ["python", script_file],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env
+        )
+        
+        # Record execution time
+        execution_time = time.time() - start_time
+        
+        return {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode,
+            "execution_time": execution_time,
+            "success": result.returncode == 0
+        }
+        
+    except subprocess.TimeoutExpired:
+        execution_time = time.time() - start_time
+        return {
+            "stdout": "",
+            "stderr": f"Execution timed out after {timeout} seconds",
+            "returncode": -1,
+            "execution_time": execution_time,
+            "success": False
+        }
+    except Exception as e:
+        execution_time = time.time() - start_time
+        return {
+            "stdout": "",
+            "stderr": str(e),
+            "returncode": -1,
+            "execution_time": execution_time,
+            "success": False
+        }
+
+
 class SimulationExecutionAgent(BaseAgent):
     """
     Simulation Execution Agent runs the generated simulation code in a controlled
@@ -23,7 +89,8 @@ class SimulationExecutionAgent(BaseAgent):
     2. Running the simulation with appropriate parameters
     3. Collecting metrics and outputs
     4. Handling any runtime errors
-    5. Executing code in an isolated Docker container for security
+    5. Executing code in an isolated Docker container for security (full mode)
+    6. Executing code directly with subprocess for lightweight execution (lite mode)
     """
     
     def __init__(self, output_dir: str, config: Dict[str, Any] = None):
@@ -55,16 +122,17 @@ class SimulationExecutionAgent(BaseAgent):
             )
             self.docker_available = result.returncode == 0
             if not self.docker_available:
-                self.logger.warning("Docker is not available. Falling back to LLM simulation.")
+                self.logger.warning("Docker is not available. Falling back to subprocess execution.")
         except FileNotFoundError:
             self.docker_available = False
-            self.logger.warning("Docker is not installed. Falling back to LLM simulation.")
+            self.logger.warning("Docker is not installed. Falling back to subprocess execution.")
     
     def process(
         self,
         code_path: str,
         task_spec: Dict[str, Any],
-        data_path: Optional[str] = None
+        data_path: Optional[str] = None,
+        mode: str = "full"
     ) -> Dict[str, Any]:
         """
         Execute the simulation code and collect results.
@@ -73,13 +141,12 @@ class SimulationExecutionAgent(BaseAgent):
             code_path: Path to the simulation code file
             task_spec: Task specification from the Task Understanding Agent
             data_path: Path to input data (optional)
+            mode: Execution mode ("full" or "lite")
         
         Returns:
             Dictionary containing simulation results
         """
-        self.logger.info("Executing simulation code")
-        
-        # Data will be loaded directly from data_path
+        self.logger.info(f"Executing simulation code in {mode} mode")
         
         # Read the code file
         try:
@@ -97,13 +164,20 @@ class SimulationExecutionAgent(BaseAgent):
                 "summary": "Failed to read simulation code file"
             }
         
-        # Try to execute the code in a Docker sandbox if available
-        if self.docker_available:
-            execution_result = self._execute_code_in_sandbox(code, data_path)
+        # Choose execution method based on mode
+        if mode == "lite":
+            # Use direct subprocess execution for lite mode
+            execution_result = self._execute_code_with_subprocess(code_path, data_path)
             if execution_result:
                 return execution_result
+        else:
+            # Try to execute the code in a Docker sandbox if available (full mode)
+            if self.docker_available:
+                execution_result = self._execute_code_in_sandbox(code, data_path)
+                if execution_result:
+                    return execution_result
         
-        # Fall back to LLM simulation if Docker execution fails or is unavailable
+        # Fall back to LLM simulation if execution fails or is unavailable
         self.logger.info("Using LLM to simulate execution")
         
         # Build prompt for LLM simulation, include file references if available
@@ -154,6 +228,133 @@ class SimulationExecutionAgent(BaseAgent):
         
         self.logger.info("Simulation execution completed")
         return execution_result
+    
+    def _execute_code_with_subprocess(
+        self,
+        script_file: str,
+        data_path: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Execute Python script using subprocess for lite mode.
+        
+        Args:
+            script_file: Path to the Python script to execute
+            data_path: Path to input data (optional)
+        
+        Returns:
+            Dictionary containing execution results or None if execution failed
+        """
+        try:
+            self.logger.info("Executing code with subprocess")
+            
+            # Create output directory for this execution
+            execution_output_dir = os.path.join(self.output_dir, "execution")
+            os.makedirs(execution_output_dir, exist_ok=True)
+            
+            # Execute the Python script using the helper function
+            result = run_python_script(script_file, data_path, timeout=300)
+            execution_time = result["execution_time"]
+            
+            # Print results as requested
+            print("standard output（stdout）:")
+            print(result["stdout"])
+            print("error info（stderr）:")
+            print(result["stderr"])
+            print("return code（returncode）:")
+            print(result["returncode"])
+            
+            # Determine execution status
+            execution_status = "success" if result["success"] else "failed"
+            
+            # Parse runtime errors
+            runtime_errors = []
+            if result["stderr"]:
+                # Only treat non-INFO logs as errors
+                for line in result["stderr"].splitlines():
+                    if line.strip() and not line.startswith("INFO:"):
+                        runtime_errors.append(line)
+            if result["returncode"] != 0:
+                runtime_errors.append(f"Process exited with code {result['returncode']}")
+            
+            # Create execution result
+            execution_result = {
+                "execution_status": execution_status,
+                "runtime_errors": runtime_errors,
+                "performance_metrics": {
+                    "execution_time": execution_time,
+                    "memory_usage": "unknown"  # subprocess doesn't easily provide memory usage
+                },
+                "simulation_metrics": {},
+                "time_series_data": [],
+                "visualizations": [],
+                "stdout": result["stdout"],
+                "stderr": result["stderr"],
+                "returncode": result["returncode"],
+                "summary": f"Executed with subprocess in {execution_time:.2f} seconds, exit code: {result['returncode']}"
+            }
+            
+            # Try to extract simulation metrics from stdout if possible
+            if result["stdout"]:
+                # Look for common patterns in output that might indicate simulation results
+                lines = result["stdout"].split('\n')
+                for line in lines:
+                    if 'simulation completed' in line.lower() or 'results:' in line.lower():
+                        # Basic parsing - could be enhanced based on specific output formats
+                        try:
+                            # Look for numbers that might be metrics
+                            import re
+                            numbers = re.findall(r'\d+\.?\d*', line)
+                            if numbers:
+                                execution_result["simulation_metrics"]["extracted_value"] = float(numbers[0])
+                        except:
+                            pass
+            
+            # Save execution results
+            results_file = os.path.join(execution_output_dir, "execution_results.json")
+            with open(results_file, 'w') as f:
+                json.dump(execution_result, f, indent=2)
+            
+            # Log execution results
+            self.logger.info(f"Subprocess execution completed with status: {execution_status}")
+            self.logger.info(f"Execution time: {execution_time:.2f} seconds")
+            self.logger.info(f"Return code: {result['returncode']}")
+            if runtime_errors:
+                self.logger.warning(f"Runtime errors detected: {runtime_errors}")
+            if result["stdout"]:
+                self.logger.debug(f"Stdout (first 500 chars): {result['stdout'][:500]}")
+            if result["stderr"]:
+                self.logger.debug(f"Stderr (first 500 chars): {result['stderr'][:500]}")
+            
+            return execution_result
+            
+        except subprocess.TimeoutExpired:
+            self.logger.error("Subprocess execution timed out after 5 minutes")
+            return {
+                "execution_status": "failed",
+                "runtime_errors": ["Execution timed out after 5 minutes"],
+                "performance_metrics": {"execution_time": 300},
+                "simulation_metrics": {},
+                "time_series_data": [],
+                "visualizations": [],
+                "stdout": "",
+                "stderr": "Execution timed out",
+                "returncode": -1,
+                "summary": "Execution failed due to timeout"
+            }
+        except Exception as e:
+            self.logger.error(f"Error executing code with subprocess: {str(e)}")
+            return {
+                "execution_status": "failed", 
+                "runtime_errors": [f"Subprocess execution error: {str(e)}"],
+                "performance_metrics": {},
+                "simulation_metrics": {},
+                "time_series_data": [],
+                "visualizations": [],
+                "stdout": "",
+                "stderr": str(e),
+                "returncode": -1,
+                "summary": f"Execution failed with error: {str(e)}"
+            }
     
     def _execute_code_in_sandbox(
         self,

@@ -269,14 +269,13 @@ class FeedbackGenerationAgent(BaseAgent):
             # 3. 恢复示例中的双花括号
             prompt = prompt.replace("‡‡", "{{").replace("††", "}}")
             
-            # 安全检查，确保没有未替换的占位符
-            if "{" in prompt and "}" in prompt:
-                placeholders = re.findall(r'{(.*?)}', prompt)
-                if placeholders:
-                    self.logger.warning(f"Found unused placeholders in prompt: {placeholders}")
-                    # 尝试移除未使用的占位符
-                    for ph in placeholders:
-                        prompt = prompt.replace(f"{{{ph}}}", "")
+            # Detect any unescaped single-brace placeholders that were not filled
+            # Ignore double-brace literals (e.g., '{{"key": "value"}}') that are part of example JSON
+            unmatched_placeholders = re.findall(r'(?<!{){([^{}]+)}(?!})', prompt)
+            if unmatched_placeholders:
+                self.logger.warning(f"Found unused placeholders in prompt: {unmatched_placeholders}")
+                for ph in unmatched_placeholders:
+                    prompt = prompt.replace(f"{{{ph}}}", "")
             
             return prompt
         except Exception as e:

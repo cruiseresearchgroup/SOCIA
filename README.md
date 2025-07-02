@@ -292,11 +292,42 @@ This command:
 In lite mode, you can still provide feedback after each iteration and use `#STOP#` to end the process when satisfied with the results.
 
 ##### 💡 Key Features of Lite Mode
-- Simplified workflow with fewer agents
-- Faster iteration cycles
-- Focus on code generation and execution
-- Direct feedback loop with the system
-- Suitable for educational and prototyping purposes
+- **Simplified workflow** with fewer agents (skips task understanding, data analysis, and model planning)
+- **Faster iteration cycles** with streamlined processing
+- **Direct code execution** using Python subprocess instead of Docker sandbox
+- **Real-time output capture** displaying stdout, stderr, and return codes
+- **Lightweight verification** without heavy Docker-based sandbox isolation
+- **Direct feedback loop** with the system for rapid iteration
+- **Suitable for educational and prototyping purposes**
+
+##### 🔧 Lite Mode Execution Details
+
+In Lite Mode, SOCIA now **executes the generated code directly** using Python's subprocess module instead of skipping execution entirely. This provides:
+
+1. **Direct Code Execution**: Generated simulation code runs immediately in the host environment
+2. **Real-time Output**: Complete stdout and stderr output is captured and displayed
+3. **Performance Metrics**: Execution time and return codes are recorded
+4. **Error Handling**: Runtime errors are captured and reported for debugging
+
+**Example Execution Output:**
+```
+standard output（stdout）:
+Starting sample simulation...
+Project root: /Users/username/SOCIA
+Data path: data/sample
+Step 0: Simulation value = 0.123
+Step 1: Simulation value = 0.456
+...
+Simulation completed successfully!
+
+error info（stderr）:
+[Any error messages appear here]
+
+return code（returncode）:
+0
+```
+
+This approach allows for rapid testing and iteration while maintaining the lightweight nature of Lite Mode, making it ideal for development and educational scenarios where Docker isolation is not required.
 
 ##### 🛑 Controlling Iteration Termination
 

@@ -32,7 +32,8 @@ class WorkflowManager:
         max_iterations: int = 3,
         auto_mode: bool = False,
         mode: str = "full",
-        agent_container: AgentContainer = Provide[AgentContainer]
+        agent_container: AgentContainer = Provide[AgentContainer],
+        selfloop: int = 0
     ):
         """
         Initialize the WorkflowManager.
@@ -46,6 +47,7 @@ class WorkflowManager:
             auto_mode: If True, uses automatic feedback generation; if False, prompts user for manual feedback
             mode: Workflow mode (e.g., 'lite', 'medium', 'full')
             agent_container: Dependency injection container for agents
+            selfloop: Self-check loop configuration for code generation
         """
         self.logger = logging.getLogger("SOCIA.WorkflowManager")
         self.task_description = task_description
@@ -63,6 +65,8 @@ class WorkflowManager:
             self.soft_max_iterations = 3  # Start with soft limit of 3, can expand
         self.auto_mode = auto_mode
         self.mode = mode
+        # Self-check loop configuration for code generation
+        self.selfloop = selfloop
         
         # Initialize historical fix log to track issues across iterations
         self.historical_fix_log = {}
@@ -321,7 +325,7 @@ class WorkflowManager:
                 score = evaluation_results["overall_score"]
                 print(f"   📈 Overall Score: {score}")
             
-            if "metrics" in evaluation_results:
+            if self.mode != 'lite' and "metrics" in evaluation_results:
                 metrics = evaluation_results["metrics"]
                 print("   📋 Evaluation Metrics:")
                 if isinstance(metrics, dict):
@@ -409,8 +413,8 @@ class WorkflowManager:
         self._save_state()
         
         return {
-            "code_path": os.path.join(self.output_path, f"simulation_code_iter_{self.current_iteration}.py"),
-            "evaluation_path": os.path.join(self.output_path, f"evaluation_iter_{self.current_iteration}.json")
+            "code_path": os.path.join(self.output_path, f"simulation_code_iter_{self.current_iteration + 1}.py"),
+            "evaluation_path": os.path.join(self.output_path, f"evaluation_iter_{self.current_iteration + 1}.json")
         }
     
     def _generate_feedback_and_control_iteration(self):
@@ -420,17 +424,21 @@ class WorkflowManager:
         """
         # Get current and previous code for feedback
         current_code_dict = self.code_memory[self.current_iteration]
-        current_code_filename = f"simulation_code_iter_{self.current_iteration}.py"
+        current_code_filename = f"simulation_code_iter_{self.current_iteration + 1}.py"
         current_code = current_code_dict[current_code_filename]
         
         previous_code = None
         if self.current_iteration > 0 and self.current_iteration - 1 in self.code_memory:
             prev_code_dict = self.code_memory[self.current_iteration - 1]
-            prev_code_filename = f"simulation_code_iter_{self.current_iteration - 1}.py"
+            prev_code_filename = f"simulation_code_iter_{self.current_iteration}.py"
             if isinstance(prev_code_dict, dict) and prev_code_filename in prev_code_dict:
                 previous_code = prev_code_dict[prev_code_filename]
             elif isinstance(prev_code_dict, str):
                 previous_code = prev_code_dict
+
+        # Determine which results to include in feedback (include them for all modes now that lite executes simulations)
+        simulation_results_param = self.state["simulation_results"]
+        evaluation_results_param = self.state["evaluation_results"]
 
         # Generate system feedback using the feedback agent
         if self.auto_mode:
@@ -440,8 +448,8 @@ class WorkflowManager:
                 model_plan=self.state["model_plan"],  # May be None in lite mode
                 generated_code=self.state["generated_code"],
                 verification_results=self.state["verification_results"],
-                simulation_results=self.state["simulation_results"],
-                evaluation_results=self.state["evaluation_results"],
+                simulation_results=simulation_results_param,
+                evaluation_results=evaluation_results_param,
                 current_code=current_code,
                 previous_code=previous_code,
                 iteration=self.current_iteration,
@@ -451,14 +459,13 @@ class WorkflowManager:
             # In manual mode, get user feedback and combine with system feedback
             self.logger.info("Manual feedback mode enabled - prompting user for feedback")
             
-            # Generate system feedback first
             system_feedback = self.agents["feedback_generation"].process(
                 task_spec=self.state["task_spec"],
                 model_plan=self.state["model_plan"],  # May be None in lite mode
                 generated_code=self.state["generated_code"],
                 verification_results=self.state["verification_results"],
-                simulation_results=self.state["simulation_results"],
-                evaluation_results=self.state["evaluation_results"],
+                simulation_results=simulation_results_param,
+                evaluation_results=evaluation_results_param,
                 current_code=current_code,
                 previous_code=previous_code,
                 iteration=self.current_iteration,
@@ -468,8 +475,8 @@ class WorkflowManager:
             # Get user feedback with current iteration status
             user_feedback_text = self._get_user_feedback(
                 verification_results=self.state["verification_results"],
-                simulation_results=self.state["simulation_results"],
-                evaluation_results=self.state["evaluation_results"],
+                simulation_results=simulation_results_param,
+                evaluation_results=evaluation_results_param,
                 generated_code=self.state["generated_code"]
             )
             
@@ -527,7 +534,7 @@ class WorkflowManager:
         self.state["iteration_decision"] = self.agents["iteration_control"].process(
             feedback=self.state["feedback"],
             verification_results=self.state["verification_results"],
-            evaluation_results=self.state["evaluation_results"],
+            evaluation_results=evaluation_results_param,
             current_iteration=self.current_iteration,
             max_iterations=self.soft_max_iterations,
             auto_mode=self.auto_mode,  # Ensure manual mode is passed correctly so #STOP# works
@@ -578,7 +585,14 @@ class WorkflowManager:
             # Load previous iteration code if exists
             prev_code = None
             if self.current_iteration > 0 and self.current_iteration - 1 in self.code_memory:
-                prev_code = self.code_memory[self.current_iteration - 1]
+                prev_code_dict = self.code_memory[self.current_iteration - 1]
+                prev_code_filename = f"simulation_code_iter_{self.current_iteration}.py"
+                if isinstance(prev_code_dict, dict) and prev_code_filename in prev_code_dict:
+                    prev_code = prev_code_dict[prev_code_filename]
+                elif isinstance(prev_code_dict, str):
+                    # Handle case where prev_code_dict is already a string
+                    prev_code = prev_code_dict
+            
             # Generate code using CodeGenerationAgent with previous code context
             self.state["generated_code"] = self.agents["code_generation"].process(
                 task_spec=self.state["task_spec"],
@@ -588,14 +602,15 @@ class WorkflowManager:
                 data_path=self.data_path,
                 previous_code=prev_code,
                 historical_fix_log=self.historical_fix_log,  # Pass historical fix log to code generation agent
-                mode="full"  # Use full mode
+                mode="full",  # Use full mode
+                selfloop=self.selfloop
             )
             self._save_artifact("generated_code", self.state["generated_code"])
             
             # Record generated code in memory and save as file
             gen_code_dict = self.state["generated_code"]["code"]
-            self.code_memory[self.current_iteration] = {f"simulation_code_iter_{self.current_iteration}.py": gen_code_dict}
-            code_file_path = os.path.join(self.output_path, f"simulation_code_iter_{self.current_iteration}.py")
+            self.code_memory[self.current_iteration] = {f"simulation_code_iter_{self.current_iteration + 1}.py": gen_code_dict}
+            code_file_path = os.path.join(self.output_path, f"simulation_code_iter_{self.current_iteration + 1}.py")
             with open(code_file_path, 'w') as f:
                 f.write(self.state["generated_code"]["code"])
             
@@ -676,7 +691,7 @@ class WorkflowManager:
             prev_code = None
             if self.current_iteration > 0 and self.current_iteration - 1 in self.code_memory:
                 prev_code_dict = self.code_memory[self.current_iteration - 1]
-                prev_code_filename = f"simulation_code_iter_{self.current_iteration - 1}.py"
+                prev_code_filename = f"simulation_code_iter_{self.current_iteration}.py"
                 if isinstance(prev_code_dict, dict) and prev_code_filename in prev_code_dict:
                     prev_code = prev_code_dict[prev_code_filename]
                 elif isinstance(prev_code_dict, str):
@@ -692,22 +707,24 @@ class WorkflowManager:
                 data_path=self.data_path,
                 previous_code=prev_code,
                 historical_fix_log=self.historical_fix_log,
-                mode="lite"  # Use lite mode
+                mode="lite",  # Use lite mode
+                selfloop=self.selfloop
             )
             self._save_artifact("generated_code", self.state["generated_code"])
             
             # Record generated code in memory and save as file
             gen_code_dict = self.state["generated_code"]["code"]
-            self.code_memory[self.current_iteration] = {f"simulation_code_iter_{self.current_iteration}.py": gen_code_dict}
-            code_file_path = os.path.join(self.output_path, f"simulation_code_iter_{self.current_iteration}.py")
+            self.code_memory[self.current_iteration] = {f"simulation_code_iter_{self.current_iteration + 1}.py": gen_code_dict}
+            code_file_path = os.path.join(self.output_path, f"simulation_code_iter_{self.current_iteration + 1}.py")
             with open(code_file_path, 'w') as f:
                 f.write(self.state["generated_code"]["code"])
             
-            # Step 4: Code Verification
+            # Step 4: Code Verification (lightweight in lite mode)
             self.state["verification_results"] = self.agents["code_verification"].process(
                 code=self.state["generated_code"]["code"],
                 task_spec=self.state["task_spec"],
-                data_path=self.data_path
+                data_path=self.data_path,
+                use_sandbox=False  # Skip heavy Docker-based verification in lite mode
             )
             self._save_artifact("verification_results", self.state["verification_results"])
             
@@ -726,12 +743,13 @@ class WorkflowManager:
                 self.state["simulation_results"] = None
                 self.state["evaluation_results"] = None
             else:
-                # Step 5: Simulation Execution
-                self.logger.info(f"Iteration {self.current_iteration + 1}: Starting simulation execution")
+                # Step 5: Simulation Execution using subprocess in lite mode
+                self.logger.info(f"Iteration {self.current_iteration + 1}: Starting simulation execution with subprocess")
                 self.state["simulation_results"] = self.agents["simulation_execution"].process(
                     code_path=code_file_path,
                     task_spec=self.state["task_spec"],
-                    data_path=self.data_path
+                    data_path=self.data_path,
+                    mode="lite"  # Use lite mode for subprocess execution
                 )
                 self._save_artifact("simulation_results", self.state["simulation_results"])
                 
@@ -744,11 +762,11 @@ class WorkflowManager:
                         summary = self.state["simulation_results"].get('summary', 'Unknown error')
                     self.logger.warning(f"Iteration {self.current_iteration + 1}: Simulation execution failed: {summary}")
                 
-                # Step 6: Result Evaluation (simplified for lite mode)
+                # Step 6: Result Evaluation (lightweight in lite mode, no comparison with ground truth)
                 self.state["evaluation_results"] = self.agents["result_evaluation"].process(
                     simulation_results=self.state["simulation_results"],
                     task_spec=self.state["task_spec"],
-                    data_analysis=None  # Not available in lite mode
+                    data_analysis=None  # No data analysis in lite mode
                 )
                 self._save_artifact("evaluation_results", self.state["evaluation_results"])
             
@@ -757,21 +775,16 @@ class WorkflowManager:
     
     def _save_artifact(self, name: str, data: Any):
         """Save an artifact to a JSON file."""
-        if not data:
-            return
-        
-        filepath = os.path.join(self.output_path, f"{name}_iter_{self.current_iteration}.json")
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=2)
+        if data is not None:
+            filepath = os.path.join(self.output_path, f"{name}_iter_{self.current_iteration + 1}.json")
+            with open(filepath, 'w') as f:
+                json.dump(data, f, indent=2)
     
     def _save_state(self):
-        """Save the current state to the output directory."""
-        filepath = os.path.join(self.output_path, f"state_iter_{self.current_iteration}.json")
+        """Save the current state to a JSON file."""
+        filepath = os.path.join(self.output_path, f"state_iter_{self.current_iteration + 1}.json")
         with open(filepath, 'w') as f:
-            # Convert state to a serializable format
-            serializable_state = {k: str(v) if not isinstance(v, (dict, list, str, int, float, bool, type(None))) else v
-                                for k, v in self.state.items()}
-            json.dump(serializable_state, f, indent=2)
+            json.dump(self.state, f, indent=2)
     
     def _update_historical_fix_log(self):
         """Update the historical fix log with critical issues from the current iteration."""
