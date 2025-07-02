@@ -66,42 +66,19 @@ class ResultEvaluationAgent(BaseAgent):
     
     def _create_placeholder_evaluation(self) -> Dict[str, Any]:
         """Create a placeholder evaluation result."""
+        # Flag the evaluation as a placeholder so that the workflow manager can suppress verbose output.
         return {
+            "placeholder": True,
             "overall_evaluation": {
-                "score": 0.7,
-                "description": "The simulation provides a reasonable approximation of the real-world system"
+                "score": 0.0,
+                "description": "No real-world data available; placeholder evaluation returned."
             },
-            "metrics": [
-                {
-                    "name": "entity_count",
-                    "description": "Number of entities in the simulation",
-                    "simulation_value": 100,
-                    "real_world_value": 120,
-                    "difference": 20,
-                    "assessment": "The simulation has slightly fewer entities than the real system"
-                }
-            ],
-            "strengths": [
-                "The simulation correctly models the basic interactions between entities",
-                "The overall patterns of behavior match real-world observations"
-            ],
-            "weaknesses": [
-                "The simulation lacks detail in some specific behaviors",
-                "The temporal dynamics could be more accurate"
-            ],
-            "detailed_comparisons": [
-                {
-                    "aspect": "Entity distribution",
-                    "simulation_behavior": "Uniform distribution across the environment",
-                    "real_world_behavior": "Clustering in certain areas",
-                    "match_quality": "moderate"
-                }
-            ],
-            "recommendations": [
-                "Add more detailed behavior models for agents",
-                "Improve the spatial distribution mechanism",
-                "Add more validation metrics to track simulation accuracy"
-            ]
+            # Keep keys but provide minimal information to avoid clutter.
+            "metrics": [],
+            "strengths": [],
+            "weaknesses": [],
+            "detailed_comparisons": [],
+            "recommendations": []
         }
     
     def _calculate_metrics(

@@ -83,7 +83,16 @@ class FeedbackGenerationAgent(BaseAgent):
         """
         self.logger.info("Generating feedback for improvement")
         
-        # Generate code diff if both previous and current code are available
+        # Detect lite mode via generated_code metadata
+        is_lite_mode = False
+        try:
+            if generated_code and isinstance(generated_code, dict):
+                meta_mode = generated_code.get("metadata", {}).get("mode")
+                is_lite_mode = (meta_mode == "lite")
+        except Exception:
+            pass
+        
+        # 1) Generate diff if possible (common for both modes)
         code_diff = None
         if previous_code and current_code:
             self.logger.info(f"Generating code diff between iterations {iteration-1} and {iteration}")
@@ -95,18 +104,46 @@ class FeedbackGenerationAgent(BaseAgent):
                 curr_lines,
                 fromfile=f"simulation_code_iter_{iteration-1}.py",
                 tofile=f"simulation_code_iter_{iteration}.py",
-                n=3  # Context lines
+                n=3
             )
             code_diff = "".join(diff)
             self.logger.info(f"Generated code diff with {len(code_diff)} characters")
         else:
             self.logger.info("No previous code available for diff generation")
         
-        # First check if we need to update the historical fix log with fixed issues
-        if iteration > 0 and historical_fix_log and current_code:
+        # In non-lite mode, still update historical fix log status
+        if not is_lite_mode and iteration > 0 and historical_fix_log and current_code:
             self._check_fixed_issues(historical_fix_log, current_code, iteration)
         
-        # Build prompt for LLM to generate feedback
+        # ---------------- Lite mode branch ----------------
+        if is_lite_mode:
+            # Build a minimal prompt for lite feedback
+            prompt = self._build_lite_prompt(
+                task_spec=task_spec,
+                verification_results=verification_results,
+                evaluation_results=evaluation_results,
+                code_diff=code_diff
+            )
+            
+            llm_response = self._call_llm(prompt)
+            parsed = self._parse_llm_response(llm_response)
+            
+            if not isinstance(parsed, dict):
+                self.logger.warning("Invalid LLM response for lite feedback; falling back to placeholder structure")
+                parsed = {}
+            
+            # Ensure only required keys
+            feedback = {
+                "summary": parsed.get("summary", "Placeholder summary – LLM response invalid or empty"),
+                "critical_issues": parsed.get("critical_issues", []),
+                "code_patches": parsed.get("code_patches", [])
+            }
+            
+            self.logger.info("Lite mode feedback generation completed")
+            return feedback
+        
+        # ---------------- Full / default branch ----------------
+        # Build prompt for LLM to generate full feedback
         prompt = self._build_prompt(
             task_spec=task_spec,
             verification_results=verification_results,
@@ -123,7 +160,7 @@ class FeedbackGenerationAgent(BaseAgent):
         
         # Parse the LLM response and validate required schema fields
         parsed = self._parse_llm_response(llm_response)
-        # Fallback to placeholder if feedback is missing or invalid
+        
         if not isinstance(parsed, dict) or "summary" not in parsed:
             self.logger.warning("LLM feedback format is invalid, using placeholder feedback")
             feedback = self._create_placeholder_feedback()
@@ -261,9 +298,12 @@ class FeedbackGenerationAgent(BaseAgent):
             prompt_template = prompt_template.replace("{{", "‡‡").replace("}}", "††")
                 
             # 2. 格式化实际变量
+            # 转义当前代码中的单层花括号，防止被 str.format 誤識為佔位符
+            escaped_code = current_code.replace("{", "{{").replace("}", "}}")
+
             prompt = prompt_template.format(
                 historical_issues=historical_issues_str,
-                code_content=current_code
+                code_content=escaped_code
             )
             
             # 3. 恢复示例中的双花括号
@@ -506,4 +546,45 @@ class FeedbackGenerationAgent(BaseAgent):
                             "solution": "Revise the model to better match real-world behavior"
                         })
         
-        return critical_issues 
+        return critical_issues
+    
+    # ------------------------------------------------------------------
+    # Lite mode prompt builder
+    # ------------------------------------------------------------------
+    def _build_lite_prompt(
+        self,
+        task_spec: Dict[str, Any],
+        verification_results: Optional[Dict[str, Any]] = None,
+        evaluation_results: Optional[Dict[str, Any]] = None,
+        code_diff: Optional[str] = None
+    ) -> str:
+        """Construct a compact prompt instructing the LLM to output lite-mode feedback.
+
+        The expected JSON keys are: summary, critical_issues, code_patches.
+        """
+        prompt_parts = [
+            "You are the Feedback Generation Agent working in *lite mode*.",
+            "Provide concise feedback focusing ONLY on critical issues and minimal patches.",
+            "STRICT RESPONSE FORMAT: Return a **single-line** JSON with keys `summary`, `critical_issues`, `code_patches`.",
+            "• `summary`: one short sentence summarising the state of the code.",
+            "• `critical_issues`: array of objects {\"issue\": str, \"location\": str, \"recommendation\": str}.",
+            "• `code_patches`: array of objects {\"target\": str, \"replacement\": str} (may be empty).",
+            "Do NOT include markdown, comments or extra keys."
+        ]
+
+        prompt_parts.append("\nTask spec:\n" + json.dumps(task_spec, indent=2))
+
+        if verification_results:
+            prompt_parts.append("\nCode verification results:\n" + json.dumps(verification_results, indent=2))
+
+        if evaluation_results:
+            prompt_parts.append("\nEvaluation results:\n" + json.dumps(evaluation_results, indent=2))
+
+        if code_diff:
+            # Limit diff length to avoid huge prompts
+            truncated_diff = code_diff if len(code_diff) < 4000 else code_diff[:4000] + "\n... (truncated)"
+            prompt_parts.append("\nCode diff between iterations:\n" + truncated_diff)
+
+        prompt_parts.append("\nRespond with the JSON object now:")
+
+        return "\n".join(prompt_parts) 

@@ -689,7 +689,7 @@ class CodeGenerationAgent(BaseAgent):
         """
         # Load the appropriate code generation prompt template based on mode
         if mode == "lite":
-            template_name = "code_generation_prompt_lite.txt"
+            template_name = "code_generation_prompt_litefeedback.txt"
         elif mode == "medium":
             template_name = "code_generation_prompt_medium.txt"
         else:  # full
