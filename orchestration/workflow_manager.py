@@ -321,35 +321,38 @@ class WorkflowManager:
         # Result Evaluation Summary
         print("\n📊 RESULT EVALUATION:")
         if evaluation_results:
-            if "overall_score" in evaluation_results:
-                score = evaluation_results["overall_score"]
-                print(f"   📈 Overall Score: {score}")
-            
-            if self.mode != 'lite' and "metrics" in evaluation_results:
-                metrics = evaluation_results["metrics"]
-                print("   📋 Evaluation Metrics:")
-                if isinstance(metrics, dict):
-                    for metric_name, metric_value in metrics.items():
-                        if isinstance(metric_value, (int, float)):
-                            print(f"      • {metric_name}: {metric_value:.4f}")
-                        else:
-                            print(f"      • {metric_name}: {metric_value}")
-                elif isinstance(metrics, list):
-                    for i, metric in enumerate(metrics):
-                        if isinstance(metric, dict):
-                            for key, value in metric.items():
-                                print(f"      • {key}: {value}")
-                        else:
-                            print(f"      • Metric {i+1}: {metric}")
-                else:
-                    print(f"      • {metrics}")
-            
-            if "recommendations" in evaluation_results:
-                recommendations = evaluation_results["recommendations"]
-                if recommendations:
-                    print("   💡 Recommendations:")
-                    for rec in recommendations[:3]:  # Show only first 3 recommendations
-                        print(f"      • {rec}")
+            if evaluation_results.get("placeholder"):
+                print("   ⚠️  No real evaluation data available (placeholder).")
+            else:
+                if "overall_score" in evaluation_results:
+                    score = evaluation_results["overall_score"]
+                    print(f"   📈 Overall Score: {score}")
+
+                if self.mode != 'lite' and "metrics" in evaluation_results:
+                    metrics = evaluation_results["metrics"]
+                    print("   📋 Evaluation Metrics:")
+                    if isinstance(metrics, dict):
+                        for metric_name, metric_value in metrics.items():
+                            if isinstance(metric_value, (int, float)):
+                                print(f"      • {metric_name}: {metric_value:.4f}")
+                            else:
+                                print(f"      • {metric_name}: {metric_value}")
+                    elif isinstance(metrics, list):
+                        for i, metric in enumerate(metrics):
+                            if isinstance(metric, dict):
+                                for key, value in metric.items():
+                                    print(f"      • {key}: {value}")
+                            else:
+                                print(f"      • Metric {i+1}: {metric}")
+                    else:
+                        print(f"      • {metrics}")
+
+                if "recommendations" in evaluation_results:
+                    recommendations = evaluation_results["recommendations"]
+                    if recommendations:
+                        print("   💡 Recommendations:")
+                        for rec in recommendations[:3]:  # Show only first 3 recommendations
+                            print(f"      • {rec}")
         else:
             print("   ❓ No evaluation results available")
         
