@@ -30,7 +30,8 @@ class CodeGenerationAgent(BaseAgent):
         data_path: Optional[str] = None,
         previous_code: Optional[Dict[str, str]] = None,
         historical_fix_log: Optional[Dict[str, Any]] = None,
-        mode: str = "full"
+        mode: str = "full",
+        selfloop: int = 3
     ) -> Dict[str, Any]:
         """
         Generate simulation code based on the model plan.
@@ -44,6 +45,7 @@ class CodeGenerationAgent(BaseAgent):
             previous_code: Code from the previous iteration for context (optional)
             historical_fix_log: Log of historical issues and their fix status (optional)
             mode: Workflow mode ('lite', 'medium', 'full'). Defaults to 'full'.
+            selfloop: Number of self-checking loop attempts
         
         Returns:
             Dictionary containing the generated code and metadata
@@ -95,17 +97,22 @@ class CodeGenerationAgent(BaseAgent):
         # Automatically fix unclosed triple-quoted strings
         code = self._fix_unclosed_docstrings(code)
         
-        # Run self-checking loop to improve the code - always run, regardless of feedback or historical_fix_log
-        # Skip self-checking in lite mode for faster execution
-        if mode != "lite":
-            self.logger.info("Starting self-checking loop for code improvement")
-            code = self._run_self_checking_loop(
-                code=code,
-                task_spec=task_spec,
-                model_plan=model_plan,
-                feedback=feedback,
-                historical_fix_log=historical_fix_log
-            )
+        # Ensure model_plan is a dictionary (lite mode may pass None)
+        if model_plan is None:
+            model_plan = {}
+        
+        # Run self-checking loop to improve the code. Previously this was skipped in lite mode, but
+        # we now enable it to keep consistency across modes while still keeping the workflow lightweight
+        # by avoiding expensive simulation execution.
+        self.logger.info("Starting self-checking loop for code improvement (mode=%s)", mode)
+        code = self._run_self_checking_loop(
+            code=code,
+            task_spec=task_spec,
+            model_plan=model_plan,
+            feedback=feedback,
+            historical_fix_log=historical_fix_log,
+            max_attempts=selfloop
+        )
         
         # Generate a summary of the code
         code_summary = self._generate_code_summary(code)
@@ -153,7 +160,8 @@ class CodeGenerationAgent(BaseAgent):
         task_spec: Dict[str, Any],
         model_plan: Dict[str, Any],
         feedback: Optional[Dict[str, Any]] = None,
-        historical_fix_log: Optional[Dict[str, Any]] = None
+        historical_fix_log: Optional[Dict[str, Any]] = None,
+        max_attempts: int = 3
     ) -> str:
         """
         Run a self-checking loop to improve the generated code.
@@ -172,12 +180,15 @@ class CodeGenerationAgent(BaseAgent):
             model_plan: Model plan from the Model Planning Agent
             feedback: Feedback from previous iterations (optional)
             historical_fix_log: Log of historical issues and their fix status (optional)
+            max_attempts: Number of self-checking loop attempts
             
         Returns:
             Improved code after self-checking loop
         """
         improved_code = code
-        max_attempts = 3
+        if max_attempts <= 0:
+            self.logger.info("Self-checking loop disabled (max_attempts <= 0)")
+            return improved_code
         
         for attempt in range(max_attempts):
             self.logger.info(f"Self-checking loop - Attempt {attempt + 1}/{max_attempts}")

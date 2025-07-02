@@ -63,7 +63,8 @@ class CodeVerificationAgent(BaseAgent):
         self,
         code: str,
         task_spec: Dict[str, Any],
-        data_path: Optional[str] = None
+        data_path: Optional[str] = None,
+        use_sandbox: bool = True
     ) -> Dict[str, Any]:
         """
         Verify the generated simulation code.
@@ -72,14 +73,15 @@ class CodeVerificationAgent(BaseAgent):
             code: The generated simulation code
             task_spec: Task specification from the Task Understanding Agent
             data_path: Original data directory path (optional)
+            use_sandbox: Whether to use the sandbox for verification
         
         Returns:
             Dictionary containing verification results
         """
         self.logger.info("Verifying simulation code")
         
-        # Try to use the sandbox for comprehensive verification if available
-        if self.sandbox_available:
+        # Try to use the sandbox for comprehensive verification if available and allowed
+        if use_sandbox and self.sandbox_available:
             try:
                 # Update sandbox with data_path if provided
                 if data_path and hasattr(self.sandbox, 'data_path'):
