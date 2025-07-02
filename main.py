@@ -212,17 +212,10 @@ def run_workflow(
     logger,
     agent_container: AgentContainer = Provide[AgentContainer]
 ):
-    """
-    Run the workflow with dependency injection.
+    """Run the SOCIA workflow."""
+    # Log the current mode
+    logger.info(f"Starting SOCIA in {args.mode.upper()} mode")
     
-    Args:
-        args: Command line arguments
-        logger: Application logger
-        agent_container: Dependency injection container
-    
-    Returns:
-        Exit code (0 for success, 1 for failure)
-    """
     try:
         # Initialize workflow manager with the container
         workflow_manager = WorkflowManager(
