@@ -34,6 +34,12 @@ If you use SOCIA in your research, please cite:
 }
 ```
 
+## ⚠️ Disclaimer  
+SOCIA generates simulator code using backbone LLMs. By using this software, you agree that:  
+- **No Liability**: The developers of SOCIA are **not responsible** for any consequences arising from the use of generated simulators (e.g., financial decisions like stock investments, medical diagnoses, or legal applications).  
+- **No Warranty**: Simulators are provided "as-is" without guarantees of accuracy, safety, or fitness for any purpose.  
+- **Third-Party Dependencies**: Generated code may inherit limitations or biases from the underlying LLMs. Consult the respective LLM providers' terms.  
+
 <!-- Illustration Image Placeholder -->
 <p align="center">
   <img src="docs/images/SOCIA_FRAMEWORK.png" alt="SOCIA System Architecture" width="100%" />
