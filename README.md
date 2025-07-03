@@ -8,7 +8,7 @@
 
 An LLM-driven multi-agent Cyber-Physical-Social simulation generator that automatically creates simulation environments based on user requirements and data.
 
-For more details about SOCIA, please check out our [paper on arXiv](https://arxiv.org/abs/2505.12006).
+For more details about SOCIA, please check out our [paper](https://arxiv.org/abs/2505.12006).
 
 If you use SOCIA in your research, please cite:
 ```bibtex
