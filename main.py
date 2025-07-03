@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # SOCIA: Simulation Orchestration for City Intelligence and Agents
 
+# todo: Add a Header to Generated Simulator Code
+
 import argparse
 import logging
 import os
@@ -215,7 +217,7 @@ def run_workflow(
     """Run the SOCIA workflow."""
     # Log the current mode
     logger.info(f"Starting SOCIA in {args.mode.upper()} mode")
-    
+
     try:
         # Initialize workflow manager with the container
         workflow_manager = WorkflowManager(
