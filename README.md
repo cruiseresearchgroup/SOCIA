@@ -41,12 +41,18 @@ SOCIA generates simulator code using backbone LLMs. By using this software, you 
 - **Third-Party Dependencies**: Generated code may inherit limitations or biases from the underlying LLMs. Consult the respective LLM providers' terms.  
 
 <!-- Illustration Image Placeholder -->
+
 <p align="center">
-  <img src="docs/images/SOCIA_FRAMEWORK.png" alt="SOCIA System Architecture" width="100%" />
+  <img src="docs/images/illustration.png" alt="Illustration of SOCIA." width="100%" />
 </p>
+
 <!-- Replace this with your actual architecture diagram -->
 
 ## 🏗️ Architecture
+
+<p align="center">
+  <img src="docs/images/SOCIA_FRAMEWORK.png" alt="SOCIA System Architecture" width="100%" />
+</p>
 
 The system implements a distributed multi-agent architecture where each agent performs specialized tasks:
 
