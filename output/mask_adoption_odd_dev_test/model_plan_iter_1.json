@@ -1,0 +1,553 @@
+{
+  "model_type": "agent_based",
+  "description": "Multiplex network-based agent simulation of mask-wearing behavior with information diffusion, social influence, and policy effects. Calibrated on days 0-29, predicts days 30-39.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "occupation",
+        "socio_group",
+        "income_level",
+        "risk_perception",
+        "trust_in_authorities",
+        "propensity_to_comply",
+        "mask_status",
+        "mask_quality",
+        "health_state",
+        "inventory_masks",
+        "neighbors_by_layer",
+        "received_info",
+        "adoption_probability",
+        "group_multipliers"
+      ],
+      "behaviors": [
+        "decide_mask_use",
+        "update_risk_perception",
+        "interact_with_neighbors",
+        "purchase_masks",
+        "comply_with_policy",
+        "share_information"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "agent_attributes_file": "data_fitting/mask_adoption_data/agent_attributes.csv",
+          "train_panel_file": "data_fitting/mask_adoption_data/train_data.csv",
+          "network_file": "data_fitting/mask_adoption_data/social_network.json",
+          "initial_mask_adoption_rate": 0.2,
+          "initial_seeding_rule": "use day 0 wearing_mask from train_data if present; else Bernoulli(p = 0.2 * risk_perception_clipped)"
+        }
+      }
+    },
+    {
+      "name": "Location",
+      "attributes": [
+        "id",
+        "type",
+        "capacity",
+        "baseline_contact_rate",
+        "mask_requirement",
+        "enforcement_level",
+        "current_occupancy",
+        "risk_level"
+      ],
+      "behaviors": [
+        "host_interactions",
+        "enforce_policy",
+        "update_risk_level"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "types": [
+            "household",
+            "workplace",
+            "school",
+            "public_transport",
+            "retail",
+            "outdoor"
+          ],
+          "contact_rate_by_location": {
+            "household": 4.0,
+            "workplace": 6.0,
+            "school": 8.0,
+            "public_transport": 10.0,
+            "retail": 3.0,
+            "outdoor": 2.0
+          },
+          "mask_requirement_by_location": {
+            "household": false,
+            "workplace": false,
+            "school": false,
+            "public_transport": true,
+            "retail": true,
+            "outdoor": false
+          }
+        }
+      }
+    },
+    {
+      "name": "PublicHealthAuthority",
+      "attributes": [
+        "id",
+        "policy_state",
+        "messaging_intensity",
+        "credibility",
+        "enforcement_budget",
+        "fine_amount",
+        "subsidy_budget",
+        "policy_start_day",
+        "policy_type"
+      ],
+      "behaviors": [
+        "set_policy",
+        "broadcast_message",
+        "deploy_enforcement",
+        "distribute_subsidies_or_masks"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_start_day": 10,
+          "policy_type": "recommendation",
+          "messaging_intensity": 0.5,
+          "credibility": 0.6,
+          "enforcement_budget": 1.0,
+          "fine_amount": 50.0,
+          "subsidy_budget": 0.0
+        }
+      }
+    },
+    {
+      "name": "Retailer",
+      "attributes": [
+        "id",
+        "stock_level",
+        "restock_rate",
+        "price_per_mask",
+        "supply_reliability"
+      ],
+      "behaviors": [
+        "sell_masks",
+        "restock",
+        "update_price"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "initial_stock": 2000,
+          "restock_rate_per_day": 200,
+          "price_per_mask": 1.0,
+          "supply_reliability": 0.9
+        }
+      }
+    },
+    {
+      "name": "InformationChannel",
+      "attributes": [
+        "id",
+        "reach",
+        "message_bias",
+        "misinformation_rate"
+      ],
+      "behaviors": [
+        "broadcast_content",
+        "target_audience"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "reach": 0.5,
+          "message_bias": 1.0,
+          "misinformation_rate": 0.0
+        }
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "decide_mask_use",
+      "description": "Agent updates mask_status based on persistence, peers, info, risk, and policy/enforcement; constrained by mask availability.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "baseline_adoption_intercept": "alpha0 (to be calibrated)",
+        "beta_risk": "beta_risk",
+        "beta_info": "beta_info",
+        "beta_peer_by_layer": {
+          "family": "beta_peer_family",
+          "work_school": "beta_peer_work",
+          "community": "beta_peer_community"
+        },
+        "retention_probability": "rho",
+        "policy_effect_strength": "beta_policy",
+        "group_multipliers": "odds multipliers by age_group and occupation"
+      },
+      "algorithm": "If wearing_mask_{t-1}=1: stay masked with probability rho (possibly modulated by info and policy). Else: compute logit p = alpha0 + beta_risk*risk_perception_t + beta_info*received_info_{t-1} + sum_L beta_peer_L * neighbor_mask_share_{t-1,L} + beta_policy * policy_active_t * trust_in_authorities * propensity_to_comply + group_offsets. Convert p via logistic to adoption_prob. If inventory_masks>0 and Bernoulli(adoption_prob)=1 then mask_status_t=1 else 0. If inventory_masks==0, attempt purchase_masks before finalizing."
+    },
+    {
+      "name": "share_information",
+      "description": "Information diffusion across network layers plus external media.",
+      "applicable_to": [
+        "Person",
+        "InformationChannel"
+      ],
+      "parameters": {
+        "theta0": "info intercept",
+        "theta_L_by_layer": {
+          "family": "theta_family",
+          "work_school": "theta_work",
+          "community": "theta_community"
+        },
+        "theta_msg": "effect of authority messaging (intensity * credibility)",
+        "info_decay_rate": "delta_info",
+        "external_info_rate": "epsilon_info"
+      },
+      "algorithm": "For each agent: compute neighbor_info_share_{t-1,L}. Compute logit p_info = theta0 + sum_L theta_L * neighbor_info_share_{t-1,L} + theta_msg * (messaging_intensity_t * credibility). With probability p_info (logistic), set received_info_t=1; else if received_info_{t-1}=1, apply decay: received_info_t remains 1 with prob (1 - delta_info). Additionally, with probability epsilon_info, set received_info_t=1."
+    },
+    {
+      "name": "purchase_masks",
+      "description": "Acquire masks subject to stock and income constraints.",
+      "applicable_to": [
+        "Person",
+        "Retailer"
+      ],
+      "parameters": {
+        "price_per_mask": 1.0,
+        "mask_usage_rate_per_wearer_per_day": 0.1,
+        "mask_inventory_capacity_per_capita": 2.0
+      },
+      "algorithm": "If adoption_prob_t is high or policy_active and inventory_masks==0: request q=1 mask. If retailer.stock_level>=q and random()<supply_reliability then complete purchase, decrement stock_level by q, increment inventory_masks. Else, purchase fails; record stockout."
+    },
+    {
+      "name": "comply_with_policy",
+      "description": "Translate policy announcements and enforcement into higher adoption odds and lower noncompliance.",
+      "applicable_to": [
+        "Person",
+        "PublicHealthAuthority",
+        "Location"
+      ],
+      "parameters": {
+        "enforcement_probability": 0.3,
+        "enforcement_strength": 0.8,
+        "noncompliance_noise": 0.1,
+        "fine_amount": 50.0
+      },
+      "algorithm": "When policy_active_t=1: scale adoption odds by exp(beta_policy * trust_in_authorities * propensity_to_comply). For mandated locations, with probability enforcement_probability*enforcement_strength, set instantaneous compliance=1 for the period; noncompliance_rate cannot fall below noncompliance_noise."
+    },
+    {
+      "name": "update_risk_perception",
+      "description": "Adjust perceived risk based on cases and information.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "risk_update_weight_from_cases": 0.5,
+        "message_effect_strength": 0.3,
+        "misinformation_effect_strength": -0.25,
+        "risk_bounds": [
+          0.0,
+          1.0
+        ]
+      },
+      "algorithm": "risk_perception_t = clip( (1 - w)*risk_perception_{t-1} + w * normalized_daily_cases_t + message_effect_strength * received_info_t + misinformation_effect_strength * misinformation_exposure_t, 0, 1 ) where w=risk_update_weight_from_cases and misinformation_exposure_t can come from channels with message_bias<0."
+    },
+    {
+      "name": "host_interactions",
+      "description": "Generate effective contacts per layer/day used for influence and noncompliance metrics.",
+      "applicable_to": [
+        "Location",
+        "Person"
+      ],
+      "parameters": {
+        "activation_schedule": {
+          "family": "7d/week",
+          "work_school": "5d/week",
+          "community": "3d/week"
+        },
+        "layer_influence_weights": {
+          "family": 1.0,
+          "work_school": 0.6,
+          "community": 0.3
+        }
+      },
+      "algorithm": "On active days for each layer, compute neighbor shares among currently interacting ties (all layer edges scaled by activation weight). Use these shares in decide_mask_use and share_information; compute noncompliance_rate where requirements apply."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "social_influence",
+      "description": "Neighbor mask use by layer shifts adoption probability via logistic terms.",
+      "entities_involved": [
+        "Person",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Increases adoption propensity proportional to neighbor_mask_share_{t-1,L} with layer-specific betas."
+    },
+    {
+      "name": "policy_compliance",
+      "description": "Authority signals and enforcement increase adoption odds and reduce noncompliance in mandated layers.",
+      "entities_involved": [
+        "PublicHealthAuthority",
+        "Person",
+        "Location"
+      ],
+      "trigger": "time",
+      "effect": "Odds multiplier on adoption; stochastic enforcement per contact."
+    },
+    {
+      "name": "media_exposure",
+      "description": "Information channels raise perceived risk and info state; misinformation can reduce it.",
+      "entities_involved": [
+        "InformationChannel",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Updates received_info and risk_perception."
+    },
+    {
+      "name": "retail_purchase",
+      "description": "Agents buy masks from retailers if stock and budget allow.",
+      "entities_involved": [
+        "Person",
+        "Retailer"
+      ],
+      "trigger": "state",
+      "effect": "Sets inventory_masks; drives mask_availability metric."
+    },
+    {
+      "name": "location_interaction",
+      "description": "Layer-specific interactions determine exposure to peers and enforcement context.",
+      "entities_involved": [
+        "Person",
+        "Location",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Generates effective contacts; used to compute neighbor shares and noncompliance."
+    },
+    {
+      "name": "risk_feedback",
+      "description": "Case incidence and messaging impact perceived risk.",
+      "entities_involved": [
+        "Person",
+        "PublicHealthAuthority",
+        "InformationChannel"
+      ],
+      "trigger": "time",
+      "effect": "Risk updates feed into adoption decisions."
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days",
+    "network_layers": [
+      "family",
+      "work_school",
+      "community"
+    ],
+    "edge_directionality": "symmetrized undirected"
+  },
+  "parameters": {
+    "population_size": 1000,
+    "time_horizon_days": 40,
+    "random_seed": 42,
+    "network_topology": "multiplex_from_data",
+    "avg_degree": null,
+    "rewiring_prob": null,
+    "initial_mask_adoption_rate": 0.2,
+    "initial_risk_perception_mean": 0.3,
+    "initial_risk_perception_std": 0.1,
+    "layer_influence_weights": {
+      "family": 1.0,
+      "work_school": 0.6,
+      "community": 0.3
+    },
+    "activation_schedule": {
+      "family": "7d/week",
+      "work_school": "5d/week",
+      "community": "3d/week"
+    },
+    "risk_update_weight_from_cases": 0.5,
+    "message_effect_strength": 0.3,
+    "misinformation_effect_strength": -0.25,
+    "trust_in_authorities_mean": 0.5,
+    "trust_in_authorities_std": 0.15,
+    "propensity_to_comply_mean": 0.5,
+    "propensity_to_comply_std": 0.2,
+    "mask_efficacy_mean": 0.5,
+    "mask_efficacy_std": 0.1,
+    "mask_quality_levels": [
+      "cloth",
+      "surgical",
+      "respirator"
+    ],
+    "mask_price": 1.0,
+    "subsidy_per_person": 0.0,
+    "retailer_initial_stock": 2000,
+    "retailer_restock_rate_per_day": 200,
+    "supply_reliability": 0.9,
+    "policy_start_day": 10,
+    "policy_type": "recommendation",
+    "enforcement_probability": 0.3,
+    "fine_amount": 50.0,
+    "messaging_intensity": 0.5,
+    "authority_credibility": 0.6,
+    "daily_cases_time_series": [],
+    "adoption_target_threshold": 0.7,
+    "group_multipliers_age": {
+      "Youth": 0.8,
+      "Young Adult": 1.0,
+      "Middle Age": 1.1,
+      "Senior": 1.2
+    },
+    "group_multipliers_occupation": {
+      "Student": 0.9,
+      "Blue Collar": 0.85,
+      "White Collar": 1.05,
+      "Healthcare": 1.3
+    },
+    "calibrated_coefficients": {
+      "alpha0": null,
+      "beta_risk": null,
+      "beta_info": null,
+      "beta_peer_family": null,
+      "beta_peer_work": null,
+      "beta_peer_community": null,
+      "rho_retention": null,
+      "theta0": null,
+      "theta_family": null,
+      "theta_work": null,
+      "theta_community": null,
+      "theta_msg": null,
+      "delta_info": null,
+      "epsilon_info": null,
+      "beta_policy": null
+    }
+  },
+  "initialization": {
+    "population_size": 1000,
+    "random_seed": 42,
+    "steps": [
+      "Load agent_attributes.csv, social_network.json, train_data.csv",
+      "Validate agent_id keys and symmetrize adjacency per layer; remove self-loops; deduplicate neighbors",
+      "Construct neighbors_by_layer for each agent",
+      "Set initial states at day 0 from train_data if available: wearing_mask_0, received_info_0; else seed via probability proportional to risk_perception",
+      "Assign trust_in_authorities and propensity_to_comply from normals, clipped to [0,1], mean/std as parameters",
+      "Initialize inventory_masks via Bernoulli(wearing_mask_0) with 1 unit if masked, else 0",
+      "Set mask_quality by sampling weighted by mask_efficacy_mean/std or based on income proxy",
+      "Calibrate coefficients using days 0-29 (see algorithms.calibration) and store in parameters.calibrated_coefficients",
+      "Set authority policy schedule: policy_active from day >= policy_start_day",
+      "Initialize retailer stock and info channels"
+    ]
+  },
+  "algorithms": {
+    "calibration": "Two-stage logistic MLE with hierarchical pooling. Stage 1 (information): Fit received_info_t ~ logit(theta0 + \u03a3_L theta_L * neighbor_info_share_{t-1,L} + theta_msg * (messaging_intensity * credibility) + group fixed effects + agent mask state lag if needed). Stage 2 (adoption): Fit wearing_mask_t ~ logit(alpha0 + beta_risk*risk_perception_t + beta_info*received_info_{t-1} + \u03a3_L beta_peer_L * neighbor_mask_share_{t-1,L} + gamma*wearing_mask_{t-1} + beta_policy*policy_active_t * trust * comply + group dummies). Translate gamma into retention rho. Use rolling-origin or day 0-29 for fit. Store coefficients in parameters.calibrated_coefficients.",
+    "simulation_step": "For each day t: 1) Authority.set_policy(t) and broadcast_message; 2) Information diffusion: for all persons, compute neighbor_info_share per layer and update received_info_t using share_information; 3) Risk update for all persons using update_risk_perception; 4) Compute neighbor_mask_share_{t-1,L}; 5) For each person, attempt purchase_masks if needed; 6) Decide adoption with decide_mask_use using calibrated coefficients and constraints; 7) Retailer.restock; 8) Compute metrics: overall adoption, noncompliance by mandated layers, mask availability, group disparities, estimated transmission reduction.",
+    "neighbor_shares": "For each agent i and layer L, neighbor_mask_share_{t-1,L} = mean(mask_status_{t-1} of neighbors in L) if degree>0 else 0. Similarly for neighbor_info_share.",
+    "policy_enforcement": "If layer has requirement and agent is in that layer today, with probability enforcement_probability*enforcement_strength, override to masked during that contact; record noncompliance if unmasked without enforcement.",
+    "retailer_restock": "Daily add Poisson(restock_rate_per_day * supply_reliability) to stock_level; cap if desired.",
+    "estimated_transmission_reduction": "For each layer L, A_L = adoption share in layer at day t. Reduction_L = 1 - (1 - e_sc*A_L) * (1 - e_wp*A_L). Aggregate with weights proportional to baseline contact rates."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agent demographics and risk perception; group effects",
+      "fields_used": [
+        "agent_id",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "income_level"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Build multiplex adjacency lists by layer",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibrate information and adoption dynamics on days 0-29; initialize day-0 states",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.py",
+        "description": "Holds parameters, toggles, file paths, and prediction_period"
+      },
+      {
+        "name": "data_loader.py",
+        "description": "Load and validate CSV/JSON; build multiplex network; create panel features"
+      },
+      {
+        "name": "entities.py",
+        "description": "Dataclasses for Person, Location, PublicHealthAuthority, Retailer, InformationChannel"
+      },
+      {
+        "name": "calibration.py",
+        "description": "Fit logistic models for information diffusion and adoption; store coefficients"
+      },
+      {
+        "name": "simulation.py",
+        "description": "Main simulation loop implementing behaviors and interactions per day"
+      },
+      {
+        "name": "metrics.py",
+        "description": "Compute overall adoption, inequality, noncompliance, stockouts, transmission reduction, and RMSE"
+      },
+      {
+        "name": "evaluation.py",
+        "description": "Run prediction for days 30-39; compare to ground truth if available; output RMSE and trajectory plots"
+      },
+      {
+        "name": "run.py",
+        "description": "Entry point; orchestrates data loading, calibration, simulation, and evaluation"
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "statsmodels",
+      "scikit-learn",
+      "tqdm",
+      "pydantic",
+      "matplotlib"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "overall_mask_adoption_rate",
+    "time_to_target_adoption",
+    "peak_adoption_rate",
+    "sustained_adoption_rate",
+    "adoption_inequality_index",
+    "noncompliance_rate",
+    "mask_availability",
+    "estimated_transmission_reduction"
+  ]
+}
