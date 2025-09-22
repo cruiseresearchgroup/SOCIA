@@ -184,6 +184,21 @@ class BaseAgent(ABC):
                     return {"error": "Could not extract JSON from response"}
             except json.JSONDecodeError as e:
                 self.logger.error(f"Error parsing JSON response: {e}")
+                # Save the raw response for debugging
+                import os
+                from datetime import datetime
+                debug_dir = "debug_output"
+                os.makedirs(debug_dir, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                debug_file = os.path.join(debug_dir, f"llm_response_{self.__class__.__name__}_{timestamp}.txt")
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write(f"Error: {e}\n")
+                    f.write(f"Response length: {len(response)} characters\n")
+                    f.write("="*50 + "\n")
+                    f.write("RAW LLM RESPONSE:\n")
+                    f.write("="*50 + "\n")
+                    f.write(response)
+                self.logger.info(f"Saved raw LLM response to {debug_file}")
                 return {"error": f"Error parsing JSON response: {e}"}
         else:
             return response

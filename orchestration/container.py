@@ -94,9 +94,19 @@ class AgentContainer(containers.DeclarativeContainer):
         config=config.agents.model_planning
     )
     
+    model_planning_calibrasim_agent = providers.Factory(
+        ModelPlanningAgent,
+        config=config.agents.model_planning_calibrasim
+    )
+    
     code_generation_agent = providers.Factory(
         CodeGenerationAgent,
         config=config.agents.code_generation
+    )
+    
+    code_generation_calibrasim_agent = providers.Factory(
+        CodeGenerationAgent,
+        config=config.agents.code_generation_calibrasim
     )
     
     code_generation_odd_agent = providers.Factory(
@@ -139,7 +149,9 @@ class AgentContainer(containers.DeclarativeContainer):
             "data_analysis": data_analysis_agent,
             "data_analysis_odd": data_analysis_odd_agent,
             "model_planning": model_planning_agent,
+            "model_planning_calibrasim": model_planning_calibrasim_agent,
             "code_generation": code_generation_agent,
+            "code_generation_calibrasim": code_generation_calibrasim_agent,
             "code_generation_odd": code_generation_odd_agent,
             "code_verification": code_verification_agent,
             "simulation_execution": simulation_execution_agent,

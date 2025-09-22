@@ -67,7 +67,7 @@ def parse_arguments():
     parser.add_argument('--run-example', action='store_true', help='Run the example epidemic simulation')
     parser.add_argument('--setup-api-key', action='store_true', help='Setup OpenAI API key')
     parser.add_argument('--auto', action='store_true', default=False, help='Enable automatic mode; when False, user will be prompted to input feedback manually in each iteration')
-    parser.add_argument('--mode', type=str, default='lite', choices=['lite', 'medium', 'full', 'blueprint'], help='Workflow mode: lite, medium, full, or blueprint.')
+    parser.add_argument('--mode', type=str, default='lite', choices=['lite', 'medium', 'full', 'blueprint', 'calibrasim'], help='Workflow mode: lite, medium, full, blueprint, or calibrasim.')
     parser.add_argument('--selfloop', type=int, default=0, help='Number of self-checking iterations for code generation; 0 disables self-checking.')
     
     args = parser.parse_args()
