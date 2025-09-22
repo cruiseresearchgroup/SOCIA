@@ -33,17 +33,17 @@
 
 ### 1.1 任务理解与模型规划
 - [ ] 完善 task_understanding agent，解析数据与目标
-- [ ] 生成 model_plan.json，包含模块定义、接口规范、参数范围
+- [x] 生成 model_plan.json，包含模块定义、接口规范、参数范围
 - [ ] 支持有/无中间真实值 z 的两种模式识别
 
 ### 1.2 代码生成与参数化
-- [ ] 更新 code_generation prompt，确保生成参数显式化、模块化的模拟器代码
-- [ ] 自动生成 parameters.json，包含统一 schema（dtype、bounds、default、scope、owner_module、frozen）
+- [x] 更新 code_generation prompt，确保生成参数显式化、模块化的模拟器代码
+- [x] 自动生成 parameters.json，包含统一 schema（dtype、bounds、default、scope、owner_module、frozen）
 - [ ] 实现模块间接口标准化（输入/输出格式、z 传递机制）
 
 ### 1.3 参数文件管理系统
-- [ ] CLI 支持 --param-file & --set key=value，冻结参数不可覆盖
-- [ ] 参数验证与边界检查
+- [x] CLI 支持 --param-file & --set key=value，冻结参数不可覆盖
+- [x] 参数验证与边界检查
 - [ ] 参数版本管理与回滚机制
 
 ### 1.4 Simulation 核心功能
@@ -97,7 +97,7 @@
 - [ ] 数据特征分析：agent profile + 社交网络 + 前30天行为
 - [ ] 目标定义：后10天 mask adoption 预测
 - [ ] 中间量识别：info_rate（信息扩散轨迹）
-- [ ] 完成全流程 CalibraSim 实验
+ - [ ] 完成全流程 CalibraSim 实验（包含 SBI 环节）
 
 ### 3.2 新 CPS 数据集要求
 - [ ] 个体/区域级 agent（带行为/状态）
@@ -205,7 +205,7 @@
 
 ## 🚀 最紧急的 3 步（优先级排序）
 
-1. [ ] **完善代码生成 + 参数文件机制** → 拿到稳定可运行 baseline
+1. [x] **完善代码生成 + 参数文件机制** → 拿到稳定可运行 baseline
 2. [ ] **跑通 IDF+SBI 在口罩数据集上的闭环实验** → 验证核心方法
 3. [ ] **开始并行找/清理第二个 CPS 数据集**（交通 or 能源）→ 扩展验证
 
@@ -213,10 +213,20 @@
 
 ## 📊 进度统计
 
-- **总任务数**: 52
-- **已完成**: 0
-- **进行中**: 0
-- **待开始**: 52
+ - **总任务数**: 52
+ - **已完成**: 6
+ - **进行中**: 0
+ - **待开始**: 46
+
+---
+
+## ✅ 已额外完成（未在原 TODO 中明确列出）
+
+- [x] 新增 `calibrasim` 模式至 `orchestration/workflow_manager.py`，集成参数文件生成流程
+- [x] 依赖注入与配置扩展：`config.yaml` 与 `orchestration/container.py` 注册 Calibrasim 专用 agents
+- [x] 主入口 `main.py` 增加 `--mode calibrasim`
+- [x] 模型规划模板（Calibrasim）格式安全加固：布尔与占位示例统一为字符串表达，降低 JSON 解析风险
+- [x] 解析失败可观测性增强：落盘原始 LLM 响应至 `debug_output/`
 
 ### 各阶段任务分布
 - 基础架构完善: 15 个任务
