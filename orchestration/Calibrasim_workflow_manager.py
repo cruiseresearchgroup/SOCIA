@@ -574,6 +574,9 @@ class WorkflowManager:
                     except Exception as e:
                         self.logger.error(f"Data analysis step failed: {e}. Aborting workflow.")
                         sys.exit(1)
+                else:
+                    # No data path provided, set data_analysis to None
+                    self.state["data_analysis"] = None
 
                 # Step 3: Model Planning
                 self.state["model_plan"] = self.agents["model_planning"].process(
@@ -596,8 +599,8 @@ class WorkflowManager:
                     # Handle case where prev_code_dict is already a string
                     prev_code = prev_code_dict
             
-            # Generate code using CodeGenerationAgent with previous code context
-            self.state["generated_code"] = self.agents["code_generation"].process(
+            # Generate code using CodeGenerationCalibrasimAgent with previous code context
+            self.state["generated_code"] = self.agents["code_generation_calibrasim"].process(
                 task_spec=self.state["task_spec"],
                 data_analysis=self.state["data_analysis"],
                 model_plan=self.state["model_plan"],

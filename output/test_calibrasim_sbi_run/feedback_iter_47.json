@@ -1,0 +1,224 @@
+{
+  "summary": "The current iteration has regressed to a trivial stub: main() is a no-op and the simulation logic is either missing or truncated. Even if the Docker smoke test is bypassed, nothing runs or outputs metrics. Recent changes attempted to add a comprehensive simulation, but the file appears truncated mid-function and is not invoked. Priority actions are to restore and wire up the simulation, finish incomplete functions, implement the required metrics and spec mappings, and provide a pure-Python execution path for smoke tests. Keep the direct call to main() at the end as required by this system.",
+  "critical_issues": [
+    {
+      "issue": "main() is a no-op and prints no metrics",
+      "impact": "The harness receives no outputs even if execution proceeds; metrics remain None and verification cannot pass.",
+      "solution": "Implement main() to parse parameters (or use defaults), run the simulation for observation_period_days, and print a JSON with required metrics to stdout. Keep the direct call to main() at the end.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Simulation implementation is missing/truncated and not wired",
+      "impact": "Core classes and loop are absent in the current file; even if present, a truncated method (_host_contacts_and_transmissions) would crash at runtime.",
+      "solution": "Restore the complete Simulation, Person, PolicyAuthority/HealthAuthority, MediaOutlet, Retailer classes and finish all methods. Ensure _host_contacts_and_transmissions returns adoption by location and optionally infections without accessing undefined variables.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Spec mismatch in entities and metrics",
+      "impact": "Metrics requested by the spec (both_masked_contact_share, adoption_churn_rate, policy_effect_size, etc.) are missing or differently named; entities\u2019 attributes diverge from the spec, complicating integration and evaluation.",
+      "solution": "Align data model and metric names to the spec or add an adapter layer to map existing attributes to spec-compatible names. Compute all required metrics over time.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Risk signal not integrated",
+      "impact": "Risk perception dynamics lack the exogenous contextual exposure signal, reducing face validity and making campaign/policy effects unrealistic.",
+      "solution": "Implement a daily risk signal curve (baseline to peak at risk_signal_peak_day) and update agents\u2019 risk_perception via smoothing; feed into adoption decisions.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Enforcement and location policies incomplete",
+      "impact": "Mandates do not reliably alter compliance; enforcement actions are not computed across locations; adoption_by_location_type remains trivial or zero.",
+      "solution": "For each attended location, apply mask_requirement and enforcement_strength to adjust compliance and record enforcement_actions_per_day. Compute adoption_by_location_type from actual attendees.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "both_masked_contact_share not computed",
+      "impact": "A key risk-reduction proxy is missing, limiting evaluation of public health effectiveness.",
+      "solution": "Sample O(N) random pairs per location per day and compute the share where both agents are masked; aggregate across locations.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Adoption churn not computed",
+      "impact": "We can\u2019t assess stability of behavior; churn is important for understanding persistence post-policy.",
+      "solution": "Track daily state flips vs previous day and compute adoption_churn_rate per day and overall.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "External smoke test expects Docker",
+      "impact": "Verification fails early when Docker is unavailable, masking code regressions and blocking progress.",
+      "solution": "Provide a pure-Python smoke path that runs a 2\u20133 day small-population simulation and returns 0. In CI/test scripts, guard Docker usage with a presence check.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Social influence and conformity",
+      "current_approach": "Partial: person.decide_wear_mask mixes peer_w, media_w, authority_w with a conformity_threshold, but this logic is currently unreachable as the simulation loop is absent.",
+      "suggested_approach": "Restore the decision model and call it daily using yesterday\u2019s neighbor norms and household norms; clamp probabilities; ensure habit formation and fatigue dynamics are updated.",
+      "expected_benefit": "More realistic diffusion dynamics with thresholds and peer pressure effects."
+    },
+    {
+      "aspect": "Policy compliance and enforcement",
+      "current_approach": "PolicyAuthority exists but is not invoked in a loop; enforcement at locations is incomplete.",
+      "suggested_approach": "On each day, get policy signals, set location.mask_requirement, simulate enforcement actions for non-compliant attendees with probability proportional to enforcement_strength; optionally force compliance at the location or apply a fine that increases future compliance.",
+      "expected_benefit": "Improved representation of mandates\u2019 effects and measurable enforcement_actions_per_day."
+    },
+    {
+      "aspect": "Information dissemination",
+      "current_approach": "MediaOutlet.broadcast adjusts risk_perception and trust, but is not called from a daily loop.",
+      "suggested_approach": "Integrate broadcast calls from campaign_start_day using communication_strategy_intensity and message_bias; weight updates by person.trust_in_authorities and trust_in_media.",
+      "expected_benefit": "Captures campaign effects and heterogeneity in response to messaging."
+    },
+    {
+      "aspect": "Economic access",
+      "current_approach": "Retailer exists; agents can purchase, but no daily purchase/replace flow is called.",
+      "suggested_approach": "Each day (or when mask_owned_count <= threshold), attempt purchase based on income and price; decrement retailer stock; adjust prices via demand pressure.",
+      "expected_benefit": "Reveals inequities in access and price dynamics, enabling adoption_inequality_index."
+    },
+    {
+      "aspect": "Contextual exposure signal",
+      "current_approach": "Config contains risk_signal fields but not used.",
+      "suggested_approach": "Implement a time-varying risk signal curve and update agents\u2019 risk_perception with exponential smoothing (gain parameter).",
+      "expected_benefit": "Better temporal variation in adoption consistent with perceived prevalence."
+    },
+    {
+      "aspect": "Metrics completeness",
+      "current_approach": "Some internal series exist (adoption, gini), but required metrics are not produced or named per spec.",
+      "suggested_approach": "Compute and expose all required metrics: overall_adoption_rate_over_time, final_adoption_rate, time_to_reach_50_percent, sustained_adoption_duration_above_threshold, adoption_by_location_type, adoption_inequality_index (Gini), policy_effect_size (DiD), both_masked_contact_share, adoption_churn_rate, enforcement_actions_per_day.",
+      "expected_benefit": "Full evaluation capabilities and spec compliance."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Implement main() to run the simulation and print metrics; keep direct main() call at end.",
+      "reason": "Without a functioning entrypoint, nothing executes and no metrics are produced.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Finish and wire the Simulation class: add a run() loop that calls policy, media, social influence, decisions, purchases, enforcement, and metric collection each day.",
+      "reason": "The core loop is missing; without it the model cannot evolve over time or compute metrics.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Complete _host_contacts_and_transmissions and return adoption_by_location_type along with infections; compute both_masked_contact_share.",
+      "reason": "Method currently truncated; needs to compute location-wise adoption and both-masked contact share.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Map spec key include_disease_dynamics to with_disease and adopt observation_period_days as simulation_days if provided.",
+      "reason": "Align simulation control flags and duration with the task spec.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add churn calculation based on daily states; compute time_to_reach_50_percent and sustained_adoption_duration_above_threshold.",
+      "reason": "Spec requires these metrics; improves behavioral insights.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add adapter layer to expose spec-named entities (HealthAuthority vs PolicyAuthority; attribute names like trust_in_authorities, mask_adoption_state).",
+      "reason": "Improves clarity and consistency with the spec; aids downstream tooling.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "scripts/smoke_test.py (or CI config)",
+      "modification": "Add pure-Python smoke path guarded by Docker availability check using shutil.which('docker'). If Docker absent, run a short simulation and exit 0 on success.",
+      "reason": "Avoids failing verification when Docker is not installed; makes tests robust.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_inequality_index",
+      "current_gap": "No stratified adoption outputs; absence of purchasing constraints underestimates inequality.",
+      "suggestion": "Compute Gini over income deciles of adoption; enforce affordability via cost_sensitivity and retailer prices; seed income distribution from lognormal with realistic parameters."
+    },
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "No DiD estimation due to missing pre/post tracking around mandate_start_day and campaign_start_day.",
+      "suggestion": "Compute average adoption in a pre-window vs post-window and subtract trends from a comparable group (e.g., locations without enforcement) or pre-trend."
+    },
+    {
+      "metric": "both_masked_contact_share",
+      "current_gap": "Missing; risk reductions cannot be inferred.",
+      "suggestion": "Sample contacts per location daily; estimate share of contacts where both parties are masked; report over time."
+    },
+    {
+      "metric": "time_to_reach_50_percent & sustained_adoption_duration_above_threshold",
+      "current_gap": "Not computed.",
+      "suggestion": "Find first day crossing 0.5; count days above 0.7; handle None if never crossed."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement a functional main() that runs the simulation and prints required metrics JSON; keep the direct main() call at the end.",
+    "Restore/wire the Simulation class and complete truncated functions (_host_contacts_and_transmissions).",
+    "Integrate daily policy, media, social influence, purchase, and decision updates in a run() loop.",
+    "Implement all required metrics including both_masked_contact_share and adoption_churn_rate.",
+    "Align config keys with the spec (include_disease_dynamics, observation_period_days, network parameters).",
+    "Add a pure-Python smoke test path that does not depend on Docker.",
+    "Validate and clamp inputs and probabilities; ensure network average_degree is even and <= n-1."
+  ],
+  "additional_comments": "Several methods in the previously introduced classes start with a pass statement but then contain implemented logic. While syntactically harmless, this is confusing\u2014remove these stray pass lines to improve readability. Also, consider adding lightweight logging (or counters) instead of heavy logging to maintain performance for 5000 agents.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n",
+      "after": "import json, sys, random\nimport numpy as np\n\n\ndef main():\n    try:\n        # Defaults aligned with task spec\n        params = {\n            \"population_size\": 5000,\n            \"network_type\": \"small_world\",\n            \"average_degree\": 8,\n            \"rewire_prob\": 0.05,\n            \"initial_adoption_rate\": 0.15,\n            \"social_influence_weight\": 0.5,\n            \"personal_risk_weight\": 0.3,\n            \"policy_weight\": 0.2,\n            \"mandate_start_day\": 20,\n            \"mandate_strictness\": 0.7,\n            \"enforcement_strength\": 0.5,\n            \"campaign_start_day\": 10,\n            \"campaign_intensity\": 0.6,\n            \"message_bias\": 0.6,\n            \"mask_price\": 2.0,\n            \"income_mean\": 50000,\n            \"income_std\": 20000,\n            \"trust_mean\": 0.5,\n            \"trust_std\": 0.2,\n            \"compliance_decay_rate\": 0.01,\n            \"risk_signal_baseline\": 0.3,\n            \"risk_signal_peak_day\": 30,\n            \"risk_signal_peak_value\": 0.8,\n            \"observation_period_days\": 100,\n            \"include_disease_dynamics\": False,\n            \"random_seed\": 42,\n        }\n        # Determinism\n        random.seed(params[\"random_seed\"])\n        np.random.seed(params[\"random_seed\"])\n\n        # Build and run the simulation (assumes Simulation class exists)\n        sim_cfg = {\n            \"population_size\": params[\"population_size\"],\n            \"network_topology\": params[\"network_type\"],\n            \"average_degree\": params[\"average_degree\"],\n            \"rewiring_prob_small_world\": params[\"rewire_prob\"],\n            \"initial_adoption_rate\": params[\"initial_adoption_rate\"],\n            \"simulation_days\": params[\"observation_period_days\"],\n            \"random_seed\": params[\"random_seed\"],\n            # Map policy\n            \"policy_schedule\": [{\n                \"start_day\": params[\"mandate_start_day\"],\n                \"end_day\": params[\"observation_period_days\"] - 1,\n                \"level\": \"mandate\" if params[\"mandate_strictness\"] > 0 else \"advisory\",\n                \"enforcement_probability\": params[\"enforcement_strength\"],\n                \"penalty_cost\": 50.0\n            }],\n            # Media\n            \"media_outlets\": [{\n                \"id\": 1, \"message_bias\": params[\"message_bias\"],\n                \"misinformation_rate\": 0.0,\n                \"reach\": params[\"campaign_intensity\"],\n                \"credibility\": 0.7,\n                \"schedule\": [{\"start_day\": params[\"campaign_start_day\"], \"end_day\": params[\"observation_period_days\"] - 1, \"intensity\": 1.0}]\n            }],\n            # Risk signal\n            \"risk_signal_mode\": \"exogenous\",\n            \"risk_signal_time_series\": [],\n            \"risk_signal_to_perception_gain\": 0.6,\n            # Weights\n            \"peer_influence_strength\": params[\"social_influence_weight\"],\n            \"media_influence_strength\": params[\"personal_risk_weight\"],\n            \"authority_influence_strength\": params[\"policy_weight\"],\n            # Disease flag\n            \"with_disease\": bool(params.get(\"include_disease_dynamics\", False)),\n        }\n\n        sim = Simulation(sim_cfg)\n        results = sim.run()\n        print(json.dumps(results))\n        return 0\n    except Exception as e:\n        print(json.dumps({\"error\": str(e)}))\n        return 1\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _normalize_config(self) -> None:\n    pass  # NOTE: pass retained per instruction to guarantee syntactic correctness\n    cfg = self.cfg\n    # Map legacy keys\n    if \"n_agents\" in cfg and \"population_size\" not in cfg:\n        cfg[\"population_size\"] = cfg[\"n_agents\"]\n    ...\n    cfg.setdefault(\"risk_signal_time_series\", [])\n    cfg.setdefault(\"risk_signal_to_perception_gain\", 0.6)\n",
+      "after": "def _normalize_config(self) -> None:\n    cfg = self.cfg\n    # Map legacy keys\n    if \"n_agents\" in cfg and \"population_size\" not in cfg:\n        cfg[\"population_size\"] = cfg[\"n_agents\"]\n    if \"network_type\" in cfg and \"network_topology\" not in cfg:\n        nt = str(cfg[\"network_type\"])\n        cfg[\"network_topology\"] = \"small_world\" if \"watt\" in nt else nt\n    if \"avg_degree\" in cfg and \"average_degree\" not in cfg:\n        cfg[\"average_degree\"] = cfg[\"avg_degree\"]\n    if \"mandate_start_day\" in cfg and \"mandate_day\" not in cfg:\n        cfg[\"mandate_day\"] = cfg[\"mandate_start_day\"]\n    # Spec mappings\n    if \"observation_period_days\" in cfg and \"simulation_days\" not in cfg:\n        cfg[\"simulation_days\"] = cfg[\"observation_period_days\"]\n    if \"include_disease_dynamics\" in cfg:\n        cfg[\"with_disease\"] = bool(cfg[\"include_disease_dynamics\"])\n    # Defaults\n    cfg.setdefault(\"time_step_days\", 1)\n    cfg.setdefault(\"peer_influence_strength\", 0.5)\n    cfg.setdefault(\"media_influence_strength\", 0.3)\n    cfg.setdefault(\"authority_influence_strength\", 0.4)\n    cfg.setdefault(\"risk_signal_mode\", \"exogenous\")\n    cfg.setdefault(\"risk_signal_time_series\", [])\n    cfg.setdefault(\"risk_signal_to_perception_gain\", 0.6)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _host_contacts_and_transmissions(self, attendance: Dict[str, Dict[int, List[int]]], mandate_active: bool) -> Tuple[int, Dict[str, float]]:\n    pass  # NOTE: pass retained per instruction to guarantee syntactic correctness\n    if not self.with_disease or self.disease is None:\n        # Compute adoption by location type even if no disease\n        adoption_loc: Dict[str, float] = {}\n        states = [p.is_wearing_mask for p in self.people]\n        for ltype, locs in attendance.items():\n            attendees = [pid for _, lst in locs.items() for pid in lst]\n            if attendees:\n                rate = sum(1 for pid in attendees if states[pid]) / float(len(attendees))\n            else:\n                rate = 0.0\n            adoption_loc[ltype] = float(rate)\n        return 0, adoption_loc\n\n    contact_rates = self.cfg.get(\"contact_rate_by_location\", {\"home\": 3.0, \"workplace\": 6.0, \"school\": 8.0, \"public_space\": 4.0})\n    adoption_loc: Dict[str, float] = {}\n    states_mask = [p.is_wearing_mask for p in self.people]\n    new_infections_set: set = set()\n    # For deny-entry logic, we simulate minimal effect: if location requires mask and person not wearing, with probability enforcement deny entry\n    for ltype, locs in attendance.items():\n        # Adoption among allowed attendees\n        allowed_attendees_by_loc: Dict[int, List[int]] = {}\n        for loc_id, attendees in locs.items():\n            allowed = []\n            # get location object enforcement level\n            loc_obj = self.loc_index.get",
+      "after": "def _host_contacts_and_transmissions(self, attendance: Dict[str, Dict[int, List[int]]], mandate_active: bool) -> Tuple[int, Dict[str, float], float]:\n    # Return (new_infections_today, adoption_by_loc_type, both_masked_contact_share)\n    states_mask = [p.is_wearing_mask for p in self.people]\n    adoption_loc: Dict[str, float] = {}\n    both_masked_total = 0\n    contacts_total = 0\n\n    if not self.with_disease or self.disease is None:\n        for ltype, locs in attendance.items():\n            attendees = [pid for _, lst in locs.items() for pid in lst]\n            adoption_loc[ltype] = (sum(1 for pid in attendees if states_mask[pid]) / float(len(attendees))) if attendees else 0.0\n            # Sample contacts to estimate both-masked share\n            for loc_id, lst in locs.items():\n                m = len(lst)\n                if m < 2:\n                    continue\n                samples = min(m, 10)\n                for _ in range(samples):\n                    a, b = self.rng.sample(lst, 2)\n                    contacts_total += 1\n                    both_masked_total += 1 if (states_mask[a] and states_mask[b]) else 0\n        bm_share = (both_masked_total / float(max(1, contacts_total)))\n        return 0, adoption_loc, bm_share\n\n    contact_rates = self.cfg.get(\"contact_rate_by_location\", {\"home\": 3.0, \"workplace\": 6.0, \"school\": 8.0, \"public_space\": 4.0})\n    new_infections_set: set = set()\n    for ltype, locs in attendance.items():\n        # mask adoption among actual attendees (post-allow/deny)\n        allow_map: Dict[int, List[int]] = {}\n        for loc_id, lst in locs.items():\n            loc_obj = self.loc_index.get(ltype, {}).get(loc_id)\n            enforced = getattr(loc_obj, \"enforcement_level\", 0.0) if loc_obj else 0.0\n            allowed = []\n            for pid in lst:\n                if mandate_active and loc_obj and getattr(loc_obj, \"mask_requirement\", False):\n                    if not states_mask[pid] and (self.rng.random() < enforced):\n                        # denied entry; also record enforcement event\n                        self._today_enforcement_events += 1\n                        continue\n                allowed.append(pid)\n            allow_map[loc_id] = allowed\n        attendees = [pid for _, lst in allow_map.items() for pid in lst]\n        adoption_loc[ltype] = (sum(1 for pid in attendees if states_mask[pid]) / float(len(attendees))) if attendees else 0.0\n\n        # Sample contacts within each location\n        for loc_id, lst in allow_map.items():\n            m = len(lst)\n            if m < 2:\n                continue\n            loc_contacts = int(contact_rates.get(ltype, 2.0))\n            for _ in range(loc_contacts):\n                a, b = self.rng.sample(lst, 2)\n                contacts_total += 1\n                both_masked_total += 1 if (states_mask[a] and states_mask[b]) else 0\n                # Disease transmission\n                ia, ib = self.disease.state[a] == \"I\", self.disease.state[b] == \"I\"\n                if ia != ib:  # one infectious, one susceptible\n                    src = a if ia else b\n                    dst = b if ia else a\n                    if self.disease.state[dst] == \"S\":\n                        p_tx = self.disease.transmit_given_contact(states_mask[src], states_mask[dst], ltype)\n                        if self.rng.random() < p_tx:\n                            new_infections_set.add(dst)\n\n    new_infections = self.disease.apply_infections(list(new_infections_set))\n    bm_share = (both_masked_total / float(max(1, contacts_total)))\n    return int(new_infections), adoption_loc, bm_share\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _init_series(self) -> None:\n    pass  # NOTE: pass retained per instruction to guarantee syntactic correctness\n    states0 = [p.is_wearing_mask for p in self.people]\n    adoption0 = (sum(1 for s in states0 if s) / float(len(states0) or 1))\n    self.series[\"adoption_rate_over_time\"].append(adoption0)\n    ...\n",
+      "after": "def _init_series(self) -> None:\n    states0 = [p.is_wearing_mask for p in self.people]\n    adoption0 = (sum(1 for s in states0 if s) / float(len(states0) or 1))\n    self.series[\"overall_adoption_rate_over_time\"].append(adoption0)\n    self.series[\"enforcement_actions_per_day\"].append(0)\n    self.series[\"both_masked_contact_share\"].append(0.0)\n    for ltype in (\"home\", \"workplace\", \"school\", \"public_space\"):\n        self.series[f\"adoption_by_location_type_{ltype}\"].append(0.0)\n    self.series[\"adoption_inequality_index\"].append(self._mask_gini_by_income_deciles(states0))\n    # other initial series as needed\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# In Simulation.run() (missing)\n",
+      "after": "def run(self) -> dict:\n    days = int(self.cfg.get(\"simulation_days\", 100))\n    self._states_history = [[p.is_wearing_mask for p in self.people]]\n    time_to_50 = None\n    sustained_above = 0\n    threshold = 0.7\n    for t in range(days):\n        self._today_enforcement_events = 0\n        policy = self.policy.step(t)\n        mandate_active = bool(policy.get(\"mandate_active\", False))\n        # Apply media\n        for m in self.media_outlets:\n            m.broadcast(self.people, self.cfg.get(\"media_effect_weight\", 0.2), self.rng, t)\n        # Risk signal update\n        self._update_risk_signal(t)\n        # Decide wearing based on social norms\n        prev = self._states_history[-1]\n        for p in self.people:\n            social_norm = self._neighbor_mask_norm(p.id, prev)\n            household_norm = self._household_mask_norm(p.id, prev)\n            p.decide_wear_mask(\n                social_norm=social_norm,\n                mandate_active=mandate_active,\n                enforcement_level=float(policy.get(\"enforcement_level\", 0.0)),\n                household_norm=household_norm,\n                household_weight=float(self.cfg.get(\"household_norm_weight\", 0.3)),\n                rng=self.rng,\n                peer_w=float(self.cfg.get(\"peer_influence_strength\", 0.5)),\n                media_w=float(self.cfg.get(\"media_influence_strength\", 0.3)),\n                authority_w=float(self.cfg.get(\"authority_influence_strength\", 0.4)),\n                conformity_threshold=float(self.cfg.get(\"conformity_threshold\", 0.1)),\n            )\n        # Purchases and replacement\n        for p in self.people:\n            p.replace_mask(t, int(self.cfg.get(\"mask_replacement_interval_days\", 7)))\n            p.purchase_mask(self.retailers if self.with_supply else [], int(self.cfg.get(\"purchase_threshold\", 1)), self.rng)\n        # Retailer updates\n        if self.with_supply:\n            for r in self.retailers:\n                r.restock_daily(); r.adjust_price()\n        # Attendance and contacts\n        attendance = self._attend_locations_today()\n        # Mark location mask requirements\n        for ltype, locs in self.locations_by_type.items():\n            for loc in locs:\n                loc.mask_requirement = mandate_active\n        new_inf, adoption_by_loc, bm_share = self._host_contacts_and_transmissions(attendance, mandate_active)\n        # Disease bookkeeping\n        if self.with_disease and self.disease is not None:\n            I_prev = sum(1 for s in self.disease.state if s == \"I\")\n            self.disease.record_daily_metrics(I_prev, new_inf)\n        # Metrics\n        today_states = [p.is_wearing_mask for p in self.people]\n        adoption = sum(1 for s in today_states if s) / float(len(today_states) or 1)\n        self.series.setdefault(\"overall_adoption_rate_over_time\", []).append(adoption)\n        self.series.setdefault(\"both_masked_contact_share\", []).append(bm_share)\n        self.series.setdefault(\"enforcement_actions_per_day\", []).append(self._today_enforcement_events)\n        for ltype, rate in adoption_by_loc.items():\n            self.series.setdefault(f\"adoption_by_location_type_{ltype}\", []).append(rate)\n        self.series.setdefault(\"adoption_inequality_index\", []).append(self._mask_gini_by_income_deciles(today_states))\n        # Churn\n        prev_states = self._states_history[-1]\n        flips = sum(1 for i in range(len(today_states)) if today_states[i] != prev_states[i])\n        self.series.setdefault(\"adoption_churn_rate\", []).append(flips / float(len(today_states) or 1))\n        self._states_history.append(today_states)\n        # Derived targets\n        if time_to_50 is None and adoption >= 0.5:\n            time_to_50 = t\n        sustained_above += 1 if adoption >= threshold else 0\n    # Final metrics\n    results = {\n        \"overall_adoption_rate_over_time\": self.series.get(\"overall_adoption_rate_over_time\", []),\n        \"final_adoption_rate\": self.series.get(\"overall_adoption_rate_over_time\", [0])[-1],\n        \"time_to_reach_50_percent\": time_to_50,\n        \"sustained_adoption_duration_above_threshold\": sustained_above,\n        \"adoption_by_location_type\": {\n            \"home\": self.series.get(\"adoption_by_location_type_home\", []),\n            \"workplace\": self.series.get(\"adoption_by_location_type_workplace\", []),\n            \"school\": self.series.get(\"adoption_by_location_type_school\", []),\n            \"transport\": [],\n            \"stores\": []\n        },\n        \"adoption_inequality_index\": self.series.get(\"adoption_inequality_index\", []),\n        \"policy_effect_size\": self._compute_policy_effect_size(),\n        \"both_masked_contact_share\": self.series.get(\"both_masked_contact_share\", []),\n        \"adoption_churn_rate\": self.series.get(\"adoption_churn_rate\", []),\n        \"enforcement_actions_per_day\": self.series.get(\"enforcement_actions_per_day\", []),\n    }\n    return results\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Risk signal placeholders in config; no method\n",
+      "after": "def _update_risk_signal(self, t: int) -> None:\n    mode = str(self.cfg.get(\"risk_signal_mode\", \"exogenous\"))\n    gain = float(self.cfg.get(\"risk_signal_to_perception_gain\", 0.6))\n    if mode == \"exogenous\":\n        base = float(self.cfg.get(\"risk_signal_baseline\", 0.3))\n        peak_day = int(self.cfg.get(\"risk_signal_peak_day\", 30))\n        peak_val = float(self.cfg.get(\"risk_signal_peak_value\", 0.8))\n        # Smooth bump using Gaussian kernel around peak_day\n        width = max(1.0, 10.0)\n        val = base + (peak_val - base) * np.exp(-0.5 * ((t - peak_day) / width) ** 2)\n    else:\n        # Fallback constant\n        val = float(self.cfg.get(\"risk_signal_baseline\", 0.3))\n    for p in self.people:\n        p.risk_perception = clip01(p.risk_perception + gain * (val - p.risk_perception))\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The diff suggests a large, more complete simulation was introduced, but the current file in the environment only contains a stub main(). The introduced code also appears truncated mid-function and is not connected to an entrypoint. Many functions start with a pass then include logic, which is confusing but not fatal. Several important features were added (media schedule, policy schedule, retailers, disease process, network generator), but without a run loop and main(), they are inert.",
+    "positive_impacts": [
+      "Richer model elements: media campaigns with targeting, policy schedule, retailers with price dynamics, disease process placeholders.",
+      "Improved RNG seeding consistency and neighbor caching.",
+      "Gini computation and income deciles utility present."
+    ],
+    "negative_impacts": [
+      "File regression to a no-op main() and truncated function breaking execution.",
+      "Metrics not aligned with spec naming; missing both_masked_contact_share and churn.",
+      "Policy enforcement logic unfinished and may reference undefined variables if executed."
+    ],
+    "suggestions": [
+      "Restore the full simulation code and complete the truncated methods before wiring main().",
+      "Add a Simulation.run() loop and expose a simulate(params) facade for easier testing.",
+      "Map spec keys to internal config in _normalize_config and output metrics with spec names.",
+      "Implement a pure-Python smoke path and avoid depending on Docker presence in tests."
+    ]
+  }
+}

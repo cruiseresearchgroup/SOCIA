@@ -1,0 +1,1306 @@
+{
+  "model_type": "agent_based",
+  "description": "A multiplex network-based, agent-centered simulation of mask-wearing adoption that couples information diffusion and social influence with policy and messaging effects. The model is calibrated on the first 30 days of time series data and predicts days 30\u201339.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age",
+        "age_group",
+        "occupation",
+        "household_id",
+        "workplace_id",
+        "mask_adoption_state",
+        "received_info_state",
+        "trust_in_authority",
+        "risk_perception",
+        "compliance_trait",
+        "social_influence_susceptibility",
+        "perceived_cost_discomfort",
+        "information_exposure_level"
+      ],
+      "behaviors": [
+        "decide_adopt_or_abandon_mask",
+        "interact_with_social_neighbors",
+        "update_risk_perception_from_context",
+        "respond_to_policy_and_enforcement",
+        "observe_and_internalize_local_norms",
+        "share_opinion_or_influence_peers"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "agent_attributes_source": "agent_attributes.csv",
+          "time_series_source": "train_data.csv",
+          "network_source": "social_network.json",
+          "initialize_states_from_day0": true,
+          "derive_household_id_from_family_components": true,
+          "derive_workplace_id_from_work_school_components": true
+        }
+      }
+    },
+    {
+      "name": "Household",
+      "attributes": [
+        "id",
+        "size",
+        "socioeconomic_status",
+        "norm_strength"
+      ],
+      "behaviors": [
+        "intra_household_influence"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "construct_from_family_components": true,
+          "default_socioeconomic_status": "medium",
+          "default_norm_strength": 0.7
+        }
+      }
+    },
+    {
+      "name": "WorkplaceSchool",
+      "attributes": [
+        "id",
+        "size",
+        "sector",
+        "policy_stringency"
+      ],
+      "behaviors": [
+        "enforce_mask_policy",
+        "broadcast_local_norms"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "construct_from_work_school_components": true,
+          "default_policy_stringency": 0.5
+        }
+      }
+    },
+    {
+      "name": "PublicLocation",
+      "attributes": [
+        "id",
+        "type",
+        "average_density",
+        "enforcement_level",
+        "signage_messaging"
+      ],
+      "behaviors": [
+        "apply_enforcement",
+        "provide_normative_cues"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "count": 5,
+          "types": [
+            "grocery",
+            "transport",
+            "park",
+            "mall",
+            "clinic"
+          ],
+          "average_density_defaults": [
+            0.6,
+            0.8,
+            0.3,
+            0.7,
+            0.9
+          ],
+          "enforcement_level_default": 0.3,
+          "signage_messaging_default": 0.5
+        }
+      }
+    },
+    {
+      "name": "PublicHealthAuthority",
+      "attributes": [
+        "policy_level",
+        "messaging_intensity",
+        "campaign_strategy"
+      ],
+      "behaviors": [
+        "issue_or_update_policy",
+        "run_communication_campaign"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "initial_policy_level": 0.0,
+          "initial_messaging_intensity": 0.2,
+          "campaign_strategy": "mandate_on_day_10_then_steady"
+        }
+      }
+    },
+    {
+      "name": "InformationChannel",
+      "attributes": [
+        "reach",
+        "misinformation_level",
+        "message_valence"
+      ],
+      "behaviors": [
+        "broadcast_information"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "reach": 0.8,
+          "misinformation_level": 0.2,
+          "message_valence": 0.5
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkLayerEngine",
+      "description": "Builds multiplex adjacency (family, work_school, community), symmetrizes edges if specified, caps extreme degrees, and derives household/workplace components.",
+      "inputs": [
+        "data.social_network.json",
+        "data.agent_attributes.csv"
+      ],
+      "outputs": [
+        "network.family_adj",
+        "network.work_school_adj",
+        "network.community_adj",
+        "mapping.household_id",
+        "mapping.workplace_id",
+        "diagnostics.degree_stats"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "on_init:\n  Gf, Gws, Gc <- parse social_network.json layer lists\n  if params.symmetrize_edges:\n    symmetrize Gf, Gws, Gc by making edges undirected\n  cap_degree(Gc, percentile=params.degree_cap_percentile)\n  compute_connected_components(Gf) -> household_id per node\n  compute_connected_components(Gws) -> workplace_id per node\n  compute and store degree distributions and stats\n  expose adjacency structures and mappings for downstream modules",
+        "notes": [
+          "Tick rate 0 means it only runs at initialization.",
+          "Degree capping only applied to community layer to control heavy tails."
+        ]
+      },
+      "sbi_calibration": "false",
+      "sbi_target_signals": [],
+      "calibration_notes": "No direct calibration targets; sensitivity of symmetrization can be tested via scenario toggles.",
+      "requirements": [
+        "social_network.json",
+        "agent_attributes.csv"
+      ],
+      "module_parameters": [
+        "symmetrize_edges",
+        "degree_cap_percentile"
+      ]
+    },
+    {
+      "name": "PolicyAndMessaging",
+      "description": "Controls government intervention from Day 10 and onward, sets messaging intensity, enforcement probability, and modulates broadcast rates according to policy and misinformation.",
+      "inputs": [
+        "time.day",
+        "state.global_misinformation_prevalence"
+      ],
+      "outputs": [
+        "policy.messaging_intensity",
+        "policy.policy_level",
+        "policy.enforcement_probability",
+        "policy.broadcast_multiplier"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "each_day:\n  if day < params.policy_mandate_day:\n    policy_level <- 0.0\n    messaging_intensity <- params.base_messaging_intensity\n  else:\n    policy_level <- min(1.0, params.base_policy_level * params.policy_mandate_effect_multiplier)\n    messaging_intensity <- min(1.0, params.base_messaging_intensity * params.policy_mandate_effect_multiplier)\n  enforcement_probability <- params.enforcement_probability\n  misinformation <- params.misinformation_prevalence\n  broadcast_multiplier <- clamp( (1 + params.messaging_effect_size * messaging_intensity) * (1 - params.misinformation_effect_size * misinformation), 0.0, 2.0 )\n  emit(policy_level, messaging_intensity, enforcement_probability, broadcast_multiplier)",
+        "notes": [
+          "Government intervention begins on Day 10 by task requirement.",
+          "Broadcast multiplier increases with messaging and decreases with misinformation."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.info_rate_daily",
+        "observable.adoption_rate_daily"
+      ],
+      "calibration_notes": "Effects identifiable via change in info and adoption hazard post-Day 10; aligns with observed change-points.",
+      "requirements": [
+        "train_data.csv (for calibration)",
+        "policy_schedule implicit: mandate at day=10"
+      ],
+      "module_parameters": [
+        "policy_mandate_day",
+        "policy_mandate_effect_multiplier",
+        "enforcement_probability",
+        "messaging_effect_size",
+        "misinformation_prevalence",
+        "misinformation_effect_size",
+        "base_messaging_intensity",
+        "base_policy_level"
+      ]
+    },
+    {
+      "name": "InformationDiffusion",
+      "description": "Simulates information arrival via broadcast and peer-to-peer transmission along active edges per layer.",
+      "inputs": [
+        "network.family_adj",
+        "network.work_school_adj",
+        "network.community_adj",
+        "policy.broadcast_multiplier",
+        "policy.messaging_intensity"
+      ],
+      "outputs": [
+        "state.received_info_state",
+        "signal.neighbor_mask_fraction.family",
+        "signal.neighbor_mask_fraction.work_school",
+        "signal.neighbor_mask_fraction.community",
+        "observable.info_rate_daily"
+      ],
+      "dependencies": [
+        "NetworkLayerEngine",
+        "PolicyAndMessaging"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "each_day:\n  p_broadcast <- params.info_broadcast_rate_per_day * policy.broadcast_multiplier\n  for each agent i not yet info:\n    p_peer = 1 - \u03a0_L [ \u03a0_{j in N_L(i) active} (1 - params.peer_info_transmission_prob_L)^{I_j} ]\n      where L in {family, work_school, community}, I_j = 1 if agent j has info\n      and edge activation occurs with prob params.edge_activation_rate_per_day_L\n    p_total = 1 - (1 - p_broadcast) * (1 - p_peer)\n    draw Bernoulli(p_total) to update received_info_state[i]\n  compute neighbor_mask_fraction per layer for each i using active edges and current mask states\n  emit info_rate_daily = mean(received_info_state)",
+        "notes": [
+          "Active edges are sampled independently per day per layer.",
+          "Peer info transmission uses complement-of-product to combine multiple neighbor exposures."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.info_rate_daily"
+      ],
+      "calibration_notes": "Directly targets received_info prevalence which is observable in train_data.csv.",
+      "requirements": [
+        "train_data.csv (received_info)"
+      ],
+      "module_parameters": [
+        "info_broadcast_rate_per_day",
+        "peer_info_transmission_prob_family",
+        "peer_info_transmission_prob_work_school",
+        "peer_info_transmission_prob_community",
+        "edge_activation_rate_per_day_family",
+        "edge_activation_rate_per_day_work_school",
+        "edge_activation_rate_per_day_community"
+      ]
+    },
+    {
+      "name": "SocialInfluenceAdoption",
+      "description": "Implements a logistic-threshold hybrid adoption decision using information state, neighbor mask fractions by layer, risk perception, costs, and enforcement.",
+      "inputs": [
+        "state.received_info_state",
+        "signal.neighbor_mask_fraction.family",
+        "signal.neighbor_mask_fraction.work_school",
+        "signal.neighbor_mask_fraction.community",
+        "policy.policy_level",
+        "policy.enforcement_probability"
+      ],
+      "outputs": [
+        "state.mask_adoption_state",
+        "observable.adoption_rate_daily"
+      ],
+      "dependencies": [
+        "InformationDiffusion",
+        "PolicyAndMessaging"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "each_day:\n  for each agent i:\n    if mask_adoption_state[i] == 1:\n      # Persistence vs abandonment\n      p_stay = clamp(params.habit_persistence - params.perceived_cost_weight * perceived_cost_i, 0.0, 1.0)\n      if Bernoulli(1 - p_stay) == 1:\n        mask_adoption_state[i] <- 0\n      continue\n    # Eligible to adopt\n    info_term = params.beta_info * received_info_state[i]\n    peer_term = params.beta_family * f_family[i] + params.beta_work_school * f_work_school[i] + params.beta_community * f_community[i]\n    risk_term = params.beta_risk_perception * risk_perception_i\n    policy_term = params.policy_effect_weight * policy.policy_level * trust_in_authority_i\n    enforcement_term = params.enforcement_elasticity * policy.enforcement_probability\n    threshold = params.risk_threshold_gamma * (1 - risk_perception_i)\n    linear_score = params.logit_intercept_adoption + info_term + peer_term + risk_term + policy_term + enforcement_term - threshold - params.perceived_cost_weight * perceived_cost_i\n    noise = Normal(0, params.social_noise_sigma)\n    p_adopt = sigmoid(linear_score + noise)\n    if Bernoulli(max(p_adopt, params.base_adoption_rate)) == 1:\n      if time_since_first_info[i] >= params.info_to_adoption_min_lag_days or received_info_state[i] == 0:\n        mask_adoption_state[i] <- 1\n  emit adoption_rate_daily = mean(mask_adoption_state)",
+        "notes": [
+          "Adoption allowed without info only via base_adoption_rate (accounts for exogenous factors).",
+          "Time-since-info constraint enforces observed lag between info and adoption."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily"
+      ],
+      "calibration_notes": "Targets aggregate adoption rate which is the primary observable and evaluation metric.",
+      "requirements": [
+        "train_data.csv (wearing_mask)"
+      ],
+      "module_parameters": [
+        "base_adoption_rate",
+        "beta_family",
+        "beta_work_school",
+        "beta_community",
+        "beta_info",
+        "beta_risk_perception",
+        "policy_effect_weight",
+        "enforcement_elasticity",
+        "risk_threshold_gamma",
+        "perceived_cost_weight",
+        "social_noise_sigma",
+        "habit_persistence",
+        "abandonment_probability_per_day",
+        "logit_intercept_adoption",
+        "info_to_adoption_min_lag_days"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily and subgroup adoption and info series; computes intermediate signals for calibration and metrics.",
+      "inputs": [
+        "state.mask_adoption_state",
+        "state.received_info_state",
+        "agent.age_group",
+        "agent.occupation"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.info_rate_daily",
+        "observable.adoption_rate_by_age",
+        "observable.adoption_rate_by_occupation"
+      ],
+      "dependencies": [
+        "InformationDiffusion",
+        "SocialInfluenceAdoption"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "each_day:\n  adoption_rate_daily <- mean(mask_adoption_state)\n  info_rate_daily <- mean(received_info_state)\n  adoption_rate_by_age <- group_mean(mask_adoption_state by age_group)\n  adoption_rate_by_occupation <- group_mean(mask_adoption_state by occupation)\n  emit all observables",
+        "notes": [
+          "Provides direct bindings to train_data.csv via aggregations."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily",
+        "observable.info_rate_daily"
+      ],
+      "calibration_notes": "Direct mapping to observables from train_data.csv aggregated by day.",
+      "requirements": [
+        "train_data.csv",
+        "agent_attributes.csv"
+      ],
+      "module_parameters": []
+    }
+  ],
+  "parameters": [
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 40,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 40,
+          "high": 180
+        }
+      },
+      "bounds": {
+        "low": 40,
+        "high": 180
+      },
+      "owner_module": "global",
+      "description": "Total number of simulation days; set to 40 to cover days 0\u201339 per task.",
+      "frozen": "true"
+    },
+    {
+      "key": "timestep_days",
+      "dtype": "int",
+      "default": 1,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            1
+          ]
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 1
+      },
+      "owner_module": "global",
+      "description": "Discrete time step size in days.",
+      "frozen": "true"
+    },
+    {
+      "key": "seed",
+      "dtype": "int",
+      "default": 42,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 1,
+          "high": 1000000
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Random seed for reproducibility.",
+      "frozen": "true"
+    },
+    {
+      "key": "symmetrize_edges",
+      "dtype": "bool",
+      "default": true,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            true,
+            false
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "NetworkLayerEngine",
+      "description": "Whether to treat edges as undirected for influence.",
+      "frozen": "true"
+    },
+    {
+      "key": "degree_cap_percentile",
+      "dtype": "float",
+      "default": 0.99,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 9,
+          "beta": 1
+        }
+      },
+      "bounds": {
+        "low": 0.9,
+        "high": 1.0
+      },
+      "owner_module": "NetworkLayerEngine",
+      "description": "Percentile cap for community degree to limit heavy-tail influence.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_mandate_day",
+      "dtype": "int",
+      "default": 10,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 5,
+          "high": 15
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 39
+      },
+      "owner_module": "PolicyAndMessaging",
+      "description": "Day when government intervention begins.",
+      "frozen": "true"
+    },
+    {
+      "key": "policy_mandate_effect_multiplier",
+      "dtype": "float",
+      "default": 1.5,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.5,
+          "sd": 0.3
+        }
+      },
+      "bounds": {
+        "low": 1.0,
+        "high": 2.5
+      },
+      "owner_module": "PolicyAndMessaging",
+      "description": "Multiplier applied to policy level and messaging intensity after mandate.",
+      "frozen": "false"
+    },
+    {
+      "key": "enforcement_probability",
+      "dtype": "float",
+      "default": 0.1,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2,
+          "beta": 8
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyAndMessaging",
+      "description": "Probability of encountering enforcement at a daily level.",
+      "frozen": "false"
+    },
+    {
+      "key": "messaging_effect_size",
+      "dtype": "float",
+      "default": 0.15,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2,
+          "beta": 8
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyAndMessaging",
+      "description": "Effect size of messaging on broadcast multiplier.",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation_prevalence",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2,
+          "beta": 8
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "PolicyAndMessaging",
+      "description": "Background share of misinformation in information channels.",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation_effect_size",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3,
+          "beta": 7
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndMessaging",
+      "description": "How strongly misinformation dampens broadcast effectiveness.",
+      "frozen": "false"
+    },
+    {
+      "key": "base_messaging_intensity",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2,
+          "beta": 8
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndMessaging",
+      "description": "Baseline messaging intensity before mandate.",
+      "frozen": "false"
+    },
+    {
+      "key": "base_policy_level",
+      "dtype": "float",
+      "default": 0.4,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 4,
+          "beta": 6
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndMessaging",
+      "description": "Baseline policy level which is multiplied after mandate.",
+      "frozen": "false"
+    },
+    {
+      "key": "info_broadcast_rate_per_day",
+      "dtype": "float",
+      "default": 0.02,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2,
+          "beta": 98
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Per-day probability of receiving info from broadcast sources before policy multipliers.",
+      "frozen": "false"
+    },
+    {
+      "key": "peer_info_transmission_prob_family",
+      "dtype": "float",
+      "default": 0.25,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3,
+          "beta": 9
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Per active edge per day info transmission probability in family layer.",
+      "frozen": "false"
+    },
+    {
+      "key": "peer_info_transmission_prob_work_school",
+      "dtype": "float",
+      "default": 0.15,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3,
+          "beta": 12
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.6
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Per active edge per day info transmission probability in work/school layer.",
+      "frozen": "false"
+    },
+    {
+      "key": "peer_info_transmission_prob_community",
+      "dtype": "float",
+      "default": 0.07,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2,
+          "beta": 26
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.4
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Per active edge per day info transmission probability in community layer.",
+      "frozen": "false"
+    },
+    {
+      "key": "edge_activation_rate_per_day_family",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 10,
+          "beta": 1
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Daily probability that a family tie is active (contact occurs).",
+      "frozen": "false"
+    },
+    {
+      "key": "edge_activation_rate_per_day_work_school",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 5,
+          "beta": 5
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Daily probability that a work/school tie is active.",
+      "frozen": "false"
+    },
+    {
+      "key": "edge_activation_rate_per_day_community",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2,
+          "beta": 8
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Daily probability that a community tie is active.",
+      "frozen": "false"
+    },
+    {
+      "key": "base_adoption_rate",
+      "dtype": "float",
+      "default": 0.005,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.5,
+          "beta": 300
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Minimum per-day probability of adoption absent other drivers.",
+      "frozen": "false"
+    },
+    {
+      "key": "beta_family",
+      "dtype": "float",
+      "default": 1.2,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.2,
+          "sd": 0.4
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Effect weight of family neighbor mask fraction on adoption log-odds.",
+      "frozen": "false"
+    },
+    {
+      "key": "beta_work_school",
+      "dtype": "float",
+      "default": 0.8,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.8,
+          "sd": 0.3
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Effect weight of work/school neighbor mask fraction on adoption log-odds.",
+      "frozen": "false"
+    },
+    {
+      "key": "beta_community",
+      "dtype": "float",
+      "default": 0.4,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.4,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Effect weight of community neighbor mask fraction on adoption log-odds.",
+      "frozen": "false"
+    },
+    {
+      "key": "beta_info",
+      "dtype": "float",
+      "default": 2.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 2.0,
+          "sd": 0.5
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Effect of having received information on adoption log-odds.",
+      "frozen": "false"
+    },
+    {
+      "key": "beta_risk_perception",
+      "dtype": "float",
+      "default": 0.8,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.8,
+          "sd": 0.3
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Effect of an agent's risk perception on adoption log-odds.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_effect_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3,
+          "beta": 7
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Weight of policy level on adoption log-odds, scaled by trust.",
+      "frozen": "false"
+    },
+    {
+      "key": "enforcement_elasticity",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.5,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Net elasticity of enforcement exposure on adoption log-odds (positive increases adoption).",
+      "frozen": "false"
+    },
+    {
+      "key": "risk_threshold_gamma",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.0,
+          "sd": 0.3
+        }
+      },
+      "bounds": {
+        "low": 0.2,
+        "high": 2.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Scales intrinsic threshold derived from risk perception (threshold = gamma * (1 - risk_perception)).",
+      "frozen": "false"
+    },
+    {
+      "key": "perceived_cost_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3,
+          "beta": 7
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Weight of discomfort/cost on adoption and persistence decisions.",
+      "frozen": "false"
+    },
+    {
+      "key": "social_noise_sigma",
+      "dtype": "float",
+      "default": 0.15,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.15,
+          "sd": 0.05
+        }
+      },
+      "bounds": {
+        "low": 0.05,
+        "high": 0.4
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Standard deviation of decision noise on the adoption log-odds.",
+      "frozen": "false"
+    },
+    {
+      "key": "habit_persistence",
+      "dtype": "float",
+      "default": 0.92,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 15,
+          "beta": 2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Daily probability to maintain mask-wearing absent costs.",
+      "frozen": "false"
+    },
+    {
+      "key": "abandonment_probability_per_day",
+      "dtype": "float",
+      "default": 0.005,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.5,
+          "beta": 298.5
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Baseline probability to abandon independent of costs (applied if persistence not used).",
+      "frozen": "false"
+    },
+    {
+      "key": "logit_intercept_adoption",
+      "dtype": "float",
+      "default": -3.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": -3.0,
+          "sd": 0.8
+        }
+      },
+      "bounds": {
+        "low": -6.0,
+        "high": 0.0
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Baseline intercept for adoption log-odds.",
+      "frozen": "false"
+    },
+    {
+      "key": "info_to_adoption_min_lag_days",
+      "dtype": "int",
+      "default": 1,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            0,
+            1,
+            2,
+            3
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 3
+      },
+      "owner_module": "SocialInfluenceAdoption",
+      "description": "Minimum lag between receiving info and first possible adoption (days).",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.mask_adoption_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:wearing_mask (agg:mean_by_day)"
+    },
+    {
+      "id": "observable.info_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.received_info_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:received_info (agg:mean_by_day)"
+    },
+    {
+      "id": "observable.adoption_rate_by_age",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean_by_group(Person.mask_adoption_state, group=age_group)",
+      "frequency": "daily",
+      "aggregation": "by_group(age_group)",
+      "target_data_field": "train_data.csv:wearing_mask (agg:mean_by_day_by_age_group via agent_attributes.csv join)"
+    },
+    {
+      "id": "observable.adoption_rate_by_occupation",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean_by_group(Person.mask_adoption_state, group=occupation)",
+      "frequency": "daily",
+      "aggregation": "by_group(occupation)",
+      "target_data_field": "train_data.csv:wearing_mask (agg:mean_by_day_by_occupation via agent_attributes.csv join)"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "R_squared",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "R2",
+        "config": {}
+      }
+    },
+    {
+      "name": "PeakAdoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "Peak",
+        "config": {
+          "return_day": true
+        }
+      }
+    },
+    {
+      "name": "TimeToThresholds",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToThreshold",
+        "config": {
+          "thresholds": [
+            0.4,
+            0.6,
+            0.8
+          ]
+        }
+      }
+    },
+    {
+      "name": "AdoptionInequalityByAge",
+      "inputs": [
+        "observable.adoption_rate_by_age"
+      ],
+      "definition": {
+        "type": "VarianceAcrossGroups",
+        "config": {}
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 10000,
+    "random_seed": 42,
+    "data_folder": "data_fitting/mask_adoption_data/",
+    "load": {
+      "agent_attributes": "agent_attributes.csv",
+      "social_network": "social_network.json",
+      "time_series": "train_data.csv"
+    },
+    "states_from_day0": true,
+    "assign_households_from_family_components": true,
+    "assign_workplaces_from_work_school_components": true
+  },
+  "algorithms": {
+    "EdgeActivationSampling": "For each layer and day, independently activate each edge with layer-specific probability; used to compute daily exposures.",
+    "ComplementOfProductTransmission": "Information peer transmission probability computed as 1 - product(1 - p) over potential independent exposures.",
+    "LogisticThresholdHybridAdoption": "Adoption probability computed via logistic function of linear score that includes info, peer fractions by layer, risk, policy, enforcement, and cost minus a risk-derived threshold; includes decision noise.",
+    "CMAESCalibration": "Calibrate selected parameters by minimizing RMSE between simulated and observed adoption series over train days."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agent demographics and risk perception; subgroup aggregation keys.",
+      "fields_used": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Construct multiplex social layers and derive household/workplace components.",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Initialize day 0 states and provide observed time series for calibration and evaluation.",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point to configure, run simulation, and output observables/metrics."
+      },
+      {
+        "name": "model/core.py",
+        "description": "Core simulation engine, scheduler, random utilities, and state containers."
+      },
+      {
+        "name": "model/entities.py",
+        "description": "Entity classes for Person, Household, WorkplaceSchool, PublicLocation, Authority."
+      },
+      {
+        "name": "model/modules/network_layer_engine.py",
+        "description": "Implements NetworkLayerEngine module."
+      },
+      {
+        "name": "model/modules/policy_and_messaging.py",
+        "description": "Implements PolicyAndMessaging module."
+      },
+      {
+        "name": "model/modules/information_diffusion.py",
+        "description": "Implements InformationDiffusion module."
+      },
+      {
+        "name": "model/modules/social_influence_adoption.py",
+        "description": "Implements SocialInfluenceAdoption module."
+      },
+      {
+        "name": "model/modules/aggregation.py",
+        "description": "Implements AdoptionAggregator module."
+      },
+      {
+        "name": "calibration/cmaes.py",
+        "description": "CMA-ES or Bayesian optimization routines for parameter calibration."
+      },
+      {
+        "name": "io/data_loader.py",
+        "description": "Load and validate CSV/JSON data; construct indices and joins."
+      },
+      {
+        "name": "metrics/evaluation.py",
+        "description": "Implement RMSE, MAE, R2, Peak, TimeToThreshold, and inequality metrics."
+      },
+      {
+        "name": "config/schema.py",
+        "description": "Parameter schema, bounds, priors, and validation."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "scipy",
+      "networkx",
+      "numba",
+      "sklearn",
+      "cma",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "MAE",
+    "R_squared",
+    "PeakAdoption",
+    "TimeToThresholds",
+    "AdoptionInequalityByAge"
+  ]
+}

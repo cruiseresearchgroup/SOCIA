@@ -1,0 +1,190 @@
+{
+  "summary": "The simulation is largely well-structured and implements a modular architecture with calibration. However, there are critical JSON serialization issues (NaN/Infinity and set objects), a calibration methodology flaw (reusing a mutable simulator without resetting), and minor robustness gaps (CLI parsing, type clamping, __file__ fallback). Fixing these will prevent parsing errors, make calibration results comparable, and improve portability. Additional model improvements can better leverage exposures and incentives for alignment with real data.",
+  "critical_issues": [
+    {
+      "issue": "Non-standard JSON values (NaN/Infinity) and non-serializable types (sets) are written to JSON artifacts.",
+      "impact": "Downstream parsers reject files like metrics.json and calibration artifacts, causing errors such as \"Expecting ',' delimiter\". This breaks verification and analysis pipelines.",
+      "solution": "Introduce a json sanitization helper that recursively converts NaN/Infinity to None and transforms sets to lists. Use it before all json.dump calls with allow_nan=False.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Calibration reuses a mutable Simulation instance across trials without resetting state.",
+      "impact": "Trial evaluations become path-dependent (adjacency/agent memories/adoption flags carry over), making scores non-comparable and potentially selecting suboptimal parameters.",
+      "solution": "Add Simulation.reset(reseed=None) to rebuild agents and state, and call it at the start of each evaluator run (evaluate_params) with a consistent seed for comparability.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Module I/O traces include sets (adjacency), which are not JSON-serializable.",
+      "impact": "save_module_io will raise TypeError or produce invalid JSON, breaking diagnostics.",
+      "solution": "Convert sets to lists during recording or sanitize before dumping via a json-safe transformer.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Incorporate exposures into adoption decision",
+      "current_approach": "BehaviorAdoption ignores exposures_today/memory in utility (only peers, marketing contacts, policy flag).",
+      "suggested_approach": "Add an 'adoption_exposure_weight' parameter and include a term using exposures_memory or exposures_today (e.g., log(1+exposures_memory)).",
+      "expected_benefit": "Better mapping of information diffusion to adoption likelihood, improving fit to real adoption curves."
+    },
+    {
+      "aspect": "Use incentive magnitude, not just policy flag",
+      "current_approach": "PolicyIntervention computes incentive_amount but BehaviorAdoption only uses policy_active boolean.",
+      "suggested_approach": "Feed incentive_amount into utility via a new weight or scale policy_signal by incentive magnitude.",
+      "expected_benefit": "Captures strength of interventions, enabling better calibration to observed policy effects."
+    },
+    {
+      "aspect": "Resettable graph initialization across runs",
+      "current_approach": "Graph only re-initializes when t == 0; calibrator runs may start at t>0 or carry previous adjacency.",
+      "suggested_approach": "Ensure Simulation.reset() clears adjacency so calibration runs get a clean start.",
+      "expected_benefit": "Deterministic and comparable runs across trials, improved calibration stability."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation_code_iter_12.py",
+      "modification": "Add a json sanitization helper and apply it to all json.dump calls with allow_nan=False.",
+      "reason": "Prevents non-standard JSON (NaN/Infinity) and handles sets in module IO.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "modification": "Add Simulation.reset(reseed=None) and call it in evaluate_params() before running each trial.",
+      "reason": "Ensures clean, comparable calibration trials.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "modification": "Fix ParameterRegistry.set to cast clamped numeric values to int/float respecting dtype.",
+      "reason": "Avoids int parameters being stored as floats after bounds enforcement.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "modification": "Make parse_cli robust to unknown args via parse_known_args() and guard against SystemExit.",
+      "reason": "Sandbox environments may pass extra args; avoid premature exit.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "modification": "Make PROJECT_ROOT robust if __file__ is undefined.",
+      "reason": "Improves portability in environments where __file__ is not set.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "modification": "Optionally avoid Python 3.10 '|' union types if targeting older interpreters.",
+      "reason": "Improves compatibility for Python < 3.10.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "modification": "Use incentive_amount and exposures in BehaviorAdoption utility.",
+      "reason": "Enhances model realism and provides parameters that can be calibrated to data.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "RMSE_adoption_rate",
+      "current_gap": "Simulated adoption may ramp too quickly/slowly due to simplistic utility.",
+      "suggestion": "Calibrate adoption_base_rate, adoption_peer_weight, adoption_exposure_weight, and adoption_temperature jointly; include incentive magnitude in utility."
+    },
+    {
+      "metric": "TimeToPeak_adoption_rate",
+      "current_gap": "Peak timing may not match data due to static communications decay.",
+      "suggestion": "Calibrate comm_message_half_life_days and network_ws_p_rewire; consider time-varying marketing_budget_daily from data."
+    },
+    {
+      "metric": "Exposure rate trajectory",
+      "current_gap": "Exposure smoothing window might distort short-term dynamics.",
+      "suggestion": "Calibrate agg_smoothing_window_days or provide exponential smoothing with tunable alpha."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement JSON sanitization and fix all json.dump calls to prevent NaN/Infinity and set serialization issues.",
+    "Add Simulation.reset() and call it in evaluate_params() for each calibration trial.",
+    "Harden parse_cli() using parse_known_args() to avoid SystemExit on unknown args.",
+    "Fix ParameterRegistry.set() type casting after clamping.",
+    "Extend BehaviorAdoption to use exposures and incentive magnitude in utility.",
+    "Add __file__ fallback for PROJECT_ROOT for better portability."
+  ],
+  "additional_comments": "The architecture is solid and modular. The added calibrators are helpful, but correctness and reproducibility require simulator reset per trial. The I/O recording is valuable\u2014ensure its JSON-compatibility to keep diagnostics usable. Consider writing adjacency to module IO in a compressed form (degree histogram) to reduce file size.",
+  "code_snippets": [
+    {
+      "file": "simulation_code_iter_12.py",
+      "before": "with open(out_path, \"w\", encoding=\"utf-8\") as f:\n    json.dump(metrics, f)",
+      "after": "def _json_clean(obj):\n    if isinstance(obj, float):\n        return obj if math.isfinite(obj) else None\n    if isinstance(obj, dict):\n        return {k: _json_clean(v) for k, v in obj.items()}\n    if isinstance(obj, (list, tuple, set)):\n        return [_json_clean(v) for v in obj]\n    return obj\n\nwith open(out_path, \"w\", encoding=\"utf-8\") as f:\n    json.dump(_json_clean(metrics), f, allow_nan=False)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "before": "with open(str(path), \"w\", encoding=\"utf-8\") as f:\n    json.dump(data, f)",
+      "after": "with open(str(path), \"w\", encoding=\"utf-8\") as f:\n    json.dump(_json_clean(data), f, allow_nan=False)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "before": "class Simulation:\n    ...\n    def run(self, start_day: int, end_day: int) -> None:\n        ...",
+      "after": "class Simulation:\n    ...\n    def reset(self, reseed: int | None = None) -> None:\n        if reseed is not None:\n            seed_all(int(reseed))\n        # Re-init state and agents; keep modules\n        self.state = {\n            \"agents\": [],\n            \"adjacency\": None,\n            \"adopted_flags\": [],\n            \"cumulative_adopters\": 0,\n            \"adoption_rate_history\": [],\n            \"exposure_rate_history\": [],\n            \"exposure_rate_smoothed_history\": [],\n            \"time\": 0,\n        }\n        self._build_agents()\n\n    def run(self, start_day: int, end_day: int) -> None:\n        ...",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "before": "def evaluate_params(simulator: Simulation, params: FittedParams, window) -> dict:\n    adapter = ParamsAdapter()\n    adapter.apply(simulator, params)\n    simulator.state[\"adoption_rate_history\"] = []\n    ...\n    simulator.run(start, end)",
+      "after": "def evaluate_params(simulator: Simulation, params: FittedParams, window) -> dict:\n    adapter = ParamsAdapter()\n    adapter.apply(simulator, params)\n    # Reset simulator for a clean, comparable trial\n    simulator.reset(reseed=int(simulator.params.get(\"random_seed\", 42)))\n    start, end = window\n    simulator.run(start, end)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "before": "def parse_cli(argv: _t.List[str]) -> dict:\n    ...\n    args = parser.parse_args(argv)",
+      "after": "def parse_cli(argv: _t.List[str]) -> dict:\n    ...\n    try:\n        args, _ = parser.parse_known_args(argv)\n    except SystemExit:\n        # Graceful fallback with defaults\n        class _Obj: pass\n        args = _Obj(); args.param_file = os.path.join(PROJECT_ROOT, \"parameters.json\"); args.param_defs_file = os.path.join(PROJECT_ROOT, \"parameter_definitions.json\"); args.overrides = []; args.calibrator = \"random_search\"; args.budget = 10; args.calib_window = None; args.artifacts_dir = ARTIFACTS_DIR; args.quick_test = False",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "before": "def set(self, key: str, value: _t.Any) -> None:\n    ...\n    if dtype in {\"int\", \"float\"} and (lo is not None or hi is not None):\n        v = float(coerced)\n        if lo is not None and v < float(lo):\n            coerced = lo\n        if hi is not None and v > float(hi):\n            coerced = hi\n    ...\n    self.params[key] = coerced",
+      "after": "def set(self, key: str, value: _t.Any) -> None:\n    ...\n    if dtype in {\"int\", \"float\"} and (lo is not None or hi is not None):\n        v = float(coerced)\n        if lo is not None and v < float(lo):\n            v = float(lo)\n        if hi is not None and v > float(hi):\n            v = float(hi)\n        coerced = int(round(v)) if dtype == \"int\" else float(v)\n    ...\n    self.params[key] = coerced",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "before": "PROJECT_ROOT = os.environ.get(\"PROJECT_ROOT\") or str(Path(__file__).resolve().parent)",
+      "after": "try:\n    PROJECT_ROOT = os.environ.get(\"PROJECT_ROOT\") or str(Path(__file__).resolve().parent)\nexcept NameError:\n    PROJECT_ROOT = os.environ.get(\"PROJECT_ROOT\") or os.getcwd()",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "before": "policy_signal = 1.0 if policy_active else 0.0\n# utility += ...",
+      "after": "exposure_w = float(params.get(\"adoption_exposure_weight\", 0.2))\nexp_signal = math.log1p(state[\"agents\"][i].exposures_memory)\npolicy_strength = incentive_amount if policy_active else 0.0\n...\nutility += exposure_w * exp_signal\nutility += w_policy * policy_strength",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_12.py",
+      "before": "report = {\n    \"budget\": budget,\n    \"best_score\": best_score,\n    \"calibrator\": \"random_search\",\n    \"timestamp\": time.time(),\n}\nwith open(os.path.join(artifacts_dir, \"calibration_report.json\"), \"w\", encoding=\"utf-8\") as f:\n    json.dump(report, f)",
+      "after": "safe_best = best_score if math.isfinite(best_score) else None\nreport = {\n    \"budget\": int(budget),\n    \"best_score\": safe_best,\n    \"calibrator\": \"random_search\",\n    \"timestamp\": float(time.time()),\n}\nwith open(os.path.join(artifacts_dir, \"calibration_report.json\"), \"w\", encoding=\"utf-8\") as f:\n    json.dump(_json_clean(report), f, allow_nan=False)",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration significantly expands functionality (pluggable calibrators, robust loaders, modular pipeline) but introduces JSON serialization issues and calibration trial comparability problems due to state reuse.",
+    "positive_impacts": [
+      "Modular architecture with clear module interfaces",
+      "Robust file loaders with defaults and graceful degradation",
+      "Calibration framework with multiple strategies and artifact persistence",
+      "Environment-controlled data/artifact paths"
+    ],
+    "negative_impacts": [
+      "JSON serialization of NaN/Infinity and sets causing parsing errors",
+      "Calibration path-dependence by reusing mutable simulator state",
+      "CLI parsing can abort in some environments",
+      "Potential portability issues with __file__ and Python 3.10 type syntax"
+    ],
+    "suggestions": [
+      "Sanitize JSON outputs globally and enforce allow_nan=False",
+      "Add Simulation.reset and call it in evaluator before each trial",
+      "Use parse_known_args in CLI parsing and handle SystemExit",
+      "Add __file__ fallback to os.getcwd(), and consider replacing '|' unions for wider compatibility"
+    ]
+  }
+}

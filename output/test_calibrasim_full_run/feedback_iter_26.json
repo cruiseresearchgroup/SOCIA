@@ -1,0 +1,241 @@
+{
+  "summary": "The simulation is functionally rich and runs end-to-end, but several specification-critical metrics are missing or misnamed, parameter keys deviate from the spec, and calibration always runs at startup causing performance concerns. Disease transmission is network-based only and does not incorporate location occupancy as per spec. Implementing metric coverage, parameter aliasing, optional calibration, and minor refactors would substantially improve correctness, alignment, and performance.",
+  "critical_issues": [
+    {
+      "issue": "Missing required metrics and naming mismatches (time_to_70_percent, mask_supply_shortage_days, enforcement_cost, misinformation_prevalence; adoption_rate_over_time/effective_Rt aliases)",
+      "impact": "Downstream evaluation and validation cannot be performed per the specification; consumers relying on spec names will not find metrics and may misinterpret outputs.",
+      "solution": "Add computation and storage for the missing metrics in _commit_buffers and evaluate(); add series aliases for adoption_rate_over_time, effective_Rt, and inequity_index. Track retailer stock per capita and enforcement costs daily; compute misinformation prevalence daily.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Parameter key divergence from spec (e.g., simulation_days vs. simulation_duration_days, avg_degree vs. network_avg_degree; enforcement_strength vs enforcement_probability; price_per_mask vs mask_price)",
+      "impact": "External configurations following the Task Specification will not correctly control the simulator, leading to unintended behavior.",
+      "solution": "Support spec-compliant keys with fallbacks to current internal names across Simulation.__init__, _init_entities, PolicyAndEnforcementModule, and load_params.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Calibration is always executed at startup with a non-trivial budget",
+      "impact": "Significant performance overhead in sandboxed/CI environments and in typical usage when calibration is not needed.",
+      "solution": "Introduce a --no-calib flag (default true) or respect an env SKIP_CALIB=1; only run calibration when explicitly requested.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "DiseaseTransmissionModule uses only social network contacts, ignoring location-based contact modulation and occupancy",
+      "impact": "Transmission dynamics deviate from the spec (location-based contact), potentially misestimating the effect of mask use by venue and occupancy.",
+      "solution": "In a next iteration, record per-person visit events in MobilityAndLocationModule, reorder modules so Mobility runs before Disease, and incorporate location-based hazards in DiseaseTransmissionModule.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Enforcement cost not tracked; fines collected vs administrative costs not accounted",
+      "impact": "Cannot produce enforcement_cost metric and evaluate policy trade-offs.",
+      "solution": "Track per-day fines collected (bounded by agents\u2019 budgets) and administrative cost per enforcement incident; store net enforcement_cost_daily and cumulative.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Location-based transmission",
+      "current_approach": "Transmission via social network only (hazard from infectious neighbors) with mask effects.",
+      "suggested_approach": "Record venue visit events (pid, venue_id) and per-venue occupancy; compute additional location-based hazard weighted by baseline_transmission_risk and occupancy, modulated by masks and enforcement.",
+      "expected_benefit": "Closer adherence to the specification; more realistic effect of venues, capacity, and policy enforcement on disease spread."
+    },
+    {
+      "aspect": "Misinformation dynamics",
+      "current_approach": "Person has a fixed misinformation_belief; MessagingAndRiskModule computes a misinformation_bump but does not update state.",
+      "suggested_approach": "Add gradual updates to misinformation_belief (increase with exposure to negative sentiment misinfo, decay otherwise) and compute daily misinformation_prevalence.",
+      "expected_benefit": "Captures feedback between information environment and adoption, enabling experiments with campaigns and misinformation shocks."
+    },
+    {
+      "aspect": "Supply shortage definition",
+      "current_approach": "Binary stockout indicator only; does not align with per-capita threshold shortage metric.",
+      "suggested_approach": "Track retailer_stock_per_capita daily; define shortage when stock_per_capita < shortage_threshold_per_capita; aggregate mask_supply_shortage_days.",
+      "expected_benefit": "Metric aligns with spec and supports sensitivity to supply constraints."
+    },
+    {
+      "aspect": "Policy effect decomposition",
+      "current_approach": "Counterfactual adoption computed; policy cost tracked for distribution/subsidy only.",
+      "suggested_approach": "Add enforcement_cost from fines collected vs administrative cost per incident; optionally estimate mandate-driven incremental adoption by difference-in-differences across income groups.",
+      "expected_benefit": "More complete policy evaluation, including trade-offs between fines, admin costs, and adoption gains."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "Simulation.__init__ and load_params",
+      "modification": "Support spec parameter names via fallbacks (simulation_days, avg_degree, enforcement_strength, price_per_mask, policy_start_day) and maintain internal defaults.",
+      "reason": "Ensures external configuration per spec works as intended.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "Simulation._commit_buffers and Simulation.evaluate",
+      "modification": "Track retailer_stock_per_capita, enforcement_cost_daily (fines collected and admin cost), and misinformation_prevalence; compute time_to_70_percent and mask_supply_shortage_days in evaluate; add result aliases (adoption_rate_over_time, effective_Rt, inequity_index).",
+      "reason": "Completes the spec-required metrics and naming aliases.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "MessagingAndRiskModule.forward and _commit_buffers",
+      "modification": "Add state_updates.misinformation_belief with small drift based on misinformation_bump; apply in commit; compute misinformation_prevalence daily.",
+      "reason": "Implements dynamic misinformation prevalence metric per spec.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "CLI parse and main",
+      "modification": "Add --no-calib flag (default true) or respect env SKIP_CALIB=1 to skip calibration by default.",
+      "reason": "Substantial performance improvement and predictable startup behavior.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "HouseholdModule",
+      "modification": "Fix declared inputs to reflect usage of mask_use_history; keep dependencies empty or add explicit if planning to use same-day signals.",
+      "reason": "Consistency between documentation and implementation; avoids confusion.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "Simulation._init_modules",
+      "modification": "Optionally reorder modules so MobilityAndLocationModule runs before DiseaseTransmissionModule to enable location-based transmission in a later iteration.",
+      "reason": "Prepares architecture for location-based hazard without breaking current behavior.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "Series exists as adoption_rate with no alias; potential consumer mismatch.",
+      "suggestion": "Add alias adoption_rate_over_time in results; ensure evaluate and artifacts export both names."
+    },
+    {
+      "metric": "effective_Rt",
+      "current_gap": "Series exists as Rt only.",
+      "suggestion": "Add alias effective_Rt to results; maintain the current computation but document method."
+    },
+    {
+      "metric": "inequity_index",
+      "current_gap": "Exposed as inequality_index_of_adoption only.",
+      "suggestion": "Add inequity_index alias to results and evaluate; maintain computation method."
+    },
+    {
+      "metric": "misinformation_prevalence",
+      "current_gap": "Not currently computed.",
+      "suggestion": "Implement daily prevalence from misinformation_belief and report mean or thresholded share."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement missing metrics and aliases (time_to_70_percent, mask_supply_shortage_days, enforcement_cost, misinformation_prevalence; adoption_rate_over_time/effective_Rt/inequity_index).",
+    "Add spec-compliant parameter key fallbacks (simulation_days, avg_degree, enforcement_strength, price_per_mask, policy_start_day).",
+    "Gate calibration behind --no-calib (default true) or SKIP_CALIB env; reduce default budget further in quick modes.",
+    "Introduce misinformation_belief state updates in MessagingAndRiskModule and track prevalence.",
+    "Fix HouseholdModule inputs declaration to match implementation.",
+    "Prepare for location-based transmission by recording visit events and reordering modules (Mobility before Disease); implement full location-based hazard next iteration."
+  ],
+  "additional_comments": "The recent changes improved module dependency order, added masks_sold metrics, removed lag in risk perception, and improved observables. The system is robust with buffers\u2192commit and topological sorting. Completing the spec metrics and parameter fidelity, plus optional calibration, will significantly improve usability and compliance.",
+  "code_snippets": [
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "self.days = int(self.params.get(\"simulation_duration_days\", 60))\nself.avg_deg = int(self.params.get(\"network_avg_degree\", int(self.params.get(\"average_degree\", 10))))",
+      "after": "self.days = int(self.params.get(\"simulation_days\", self.params.get(\"simulation_duration_days\", 60)))\nself.avg_deg = int(self.params.get(\"avg_degree\", self.params.get(\"network_avg_degree\", int(self.params.get(\"average_degree\", 10)))))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "authority = PublicHealthAuthority(\n    id=0,\n    mandate_level=float(self.params.get(\"mandate_level\", 0.6)),\n    enforcement_probability=float(self.params.get(\"enforcement_probability\", 0.3)),\n    fine_amount=float(self.params.get(\"fine_amount\", 50.0)),",
+      "after": "authority = PublicHealthAuthority(\n    id=0,\n    mandate_level=float(self.params.get(\"mandate_level\", 0.6)),\n    enforcement_probability=float(self.params.get(\"enforcement_probability\", self.params.get(\"enforcement_strength\", 0.3))),\n    fine_amount=float(self.params.get(\"fine_amount\", 50.0)),",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "retailer = Retailer(\n    id=0,\n    stock=initial_stock,\n    restock_rate=float(self.params.get(\"restock_rate_per_day\", 0.1)),\n    price=float(self.params.get(\"mask_price\", 1.0)),\n    supply_variability=float(self.params.get(\"supply_variability\", 0.2)),\n)",
+      "after": "retailer = Retailer(\n    id=0,\n    stock=initial_stock,\n    restock_rate=float(self.params.get(\"restock_rate_per_day\", 0.1)),\n    price=float(self.params.get(\"mask_price\", self.params.get(\"price_per_mask\", 1.0))),\n    supply_variability=float(self.params.get(\"supply_variability\", self.params.get(\"supply_chain_disruption_prob\", 0.2))),\n)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "start_day = params.get(\"mandate_start_day\", None)",
+      "after": "start_day = params.get(\"mandate_start_day\", params.get(\"policy_start_day\", None))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "class HouseholdModule(Module):\n    name = \"HouseholdModule\"\n    inputs = [\"state.households\", \"signals.person.mask_decision\"]",
+      "after": "class HouseholdModule(Module):\n    name = \"HouseholdModule\"\n    inputs = [\"state.households\", \"state.mask_use_history\"]",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "class MessagingAndRiskModule(Module):\n    outputs = [\"state_updates.person.risk_perception\", \"signals.person.info_exposure\"]",
+      "after": "class MessagingAndRiskModule(Module):\n    outputs = [\"state_updates.person.risk_perception\", \"signals.person.info_exposure\", \"state_updates.person.misinformation_belief\"]",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "# inside MessagingAndRiskModule.forward()\n            # Update misinformation_belief drift (not a state update here; just signal captured)\n            _ = misinformation_bump  # placeholder; not used directly\n\n        buffers.setdefault(\"state_updates\", {})[\"risk_perception\"] = risk_updates",
+      "after": "# inside MessagingAndRiskModule.forward()\n            # Simple drift: move belief toward 1 with misinformation_bump, and decay slightly otherwise\n            new_belief = clip01(p.misinformation_belief + 0.05 * misinformation_bump - 0.01 * (1 - misinformation_bump))\n            # collect belief update\n            \n        buffers.setdefault(\"state_updates\", {})[\"risk_perception\"] = risk_updates\n        buffers[\"state_updates\"][\"misinformation_belief\"] = [clip01(p.misinformation_belief + 0.05 * (0 if channels == [] else 1) ) for p in persons]  # replace with per-agent new_belief list computed above",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "# in Simulation._commit_buffers(), before applying free distributions\npolicy_cost_today = 0.0",
+      "after": "# in Simulation._commit_buffers(), before applying free distributions\npolicy_cost_today = 0.0\nfines_collected_today = 0.0",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "# Apply enforcement fines; budgets cannot go negative.\nauthority = self.state[\"authority\"]\nfine_amount = float(getattr(authority, \"fine_amount\", 0.0))\nenforcement_events = self.buffers.get(\"events\", {}).get(\"enforcement_events\", [])\nif fine_amount > 0.0 and enforcement_events:\n    for ev in enforcement_events:\n        pid = ev.get(\"pid\")\n        if isinstance(pid, int) and 0 <= pid < N:\n            persons[pid].budget = max(0.0, float(persons[pid].budget) - fine_amount)",
+      "after": "# Apply enforcement fines; track fines collected and budgets cannot go negative.\nauthority = self.state[\"authority\"]\nfine_amount = float(getattr(authority, \"fine_amount\", 0.0))\nadmin_cost = float(self.params.get(\"enforcement_admin_cost_per_incident\", 0.0))\nenforcement_events = self.buffers.get(\"events\", {}).get(\"enforcement_events\", [])\nif enforcement_events:\n    for ev in enforcement_events:\n        pid = ev.get(\"pid\")\n        if isinstance(pid, int) and 0 <= pid < N:\n            pre = float(persons[pid].budget)\n            deduct = min(fine_amount, pre)\n            persons[pid].budget = max(0.0, pre - deduct)\n            fines_collected_today += deduct\n    # Net enforcement cost = admin cost minus fines collected\n    net_enforcement_cost = admin_cost * len(enforcement_events) - fines_collected_today\nelse:\n    net_enforcement_cost = 0.0\nself.results.setdefault(\"enforcement_cost_daily\", []).append(float(net_enforcement_cost))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "# Observables from aggregator and modules\nobs = self.buffers.get(\"observables\", {})\nif \"adoption_rate_daily\" in obs:\n    self.results[\"adoption_rate\"].append(float(obs[\"adoption_rate_daily\"]))",
+      "after": "# Observables from aggregator and modules\nobs = self.buffers.get(\"observables\", {})\nif \"adoption_rate_daily\" in obs:\n    val = float(obs[\"adoption_rate_daily\"])\n    self.results[\"adoption_rate\"].append(val)\n    # aliases for spec\n    self.results.setdefault(\"adoption_rate_over_time\", []).append(val)\n# Track retailer stock per capita\nstock_per_capita = safe_div(self.state[\"retailer\"].stock, max(1, len(self.state[\"persons\"])), 0.0)\nself.results.setdefault(\"retailer_stock_per_capita\", []).append(float(stock_per_capita))\n# Misinformation prevalence (share above threshold)\nmis_prev = sum(1 for p in self.state[\"persons\"] if getattr(p, \"misinformation_belief\", 0.0) >= 0.5) / float(max(1, len(self.state[\"persons\"])))\nself.results.setdefault(\"misinformation_prevalence\", []).append(float(mis_prev))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "# Rt approximation\nself.results[\"Rt\"].append(float(Rt))",
+      "after": "# Rt approximation\nself.results[\"Rt\"].append(float(Rt))\nself.results.setdefault(\"effective_Rt\", []).append(float(Rt))\n# alias for inequity\nif \"inequality_index_of_adoption\" in obs:\n    self.results.setdefault(\"inequity_index\", []).append(float(obs[\"inequality_index_of_adoption\"]))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "def evaluate(...):\n    ...\n    t50 = time_to_threshold(adoption, 0.5)\n    t80 = time_to_threshold(adoption, 0.8)\n    peak_adoption_rate = max(adoption) if adoption else 0.0",
+      "after": "def evaluate(...):\n    ...\n    t50 = time_to_threshold(adoption, 0.5)\n    t70 = time_to_threshold(adoption, 0.7)\n    t80 = time_to_threshold(adoption, 0.8)\n    peak_adoption_rate = max(adoption) if adoption else 0.0\n    # Shortage days by per-capita threshold\n    stock_pc = series_window(results.get(\"retailer_stock_per_capita\", []))\n    thr = float(self.params.get(\"shortage_threshold_per_capita\", 0.1))\n    mask_supply_shortage_days = int(sum(1 for s in stock_pc if s < thr))\n    # Enforcement cost aggregation\n    enf_daily = series_window(results.get(\"enforcement_cost_daily\", []))\n    enforcement_cost_total = float(sum(enf_daily)) if enf_daily else 0.0\n    # Misinformation prevalence mean\n    mis_series = series_window(results.get(\"misinformation_prevalence\", []))\n    misinfo_prev_mean = float(sum(mis_series) / max(1, len(mis_series))) if mis_series else 0.0",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "metrics = {\n    \"time_to_50_percent_adoption\": t50,\n    \"time_to_80_percent_adoption\": t80,\n    \"peak_adoption_rate\": float(peak_adoption_rate),\n    ...\n    \"policy_effect_contribution\": policy_effect_contribution,\n}",
+      "after": "metrics = {\n    \"time_to_50_percent_adoption\": t50,\n    \"time_to_70_percent\": t70,\n    \"time_to_80_percent_adoption\": t80,\n    \"peak_adoption_rate\": float(peak_adoption_rate),\n    ...,\n    \"mask_supply_shortage_days\": mask_supply_shortage_days,\n    \"enforcement_cost\": enforcement_cost_total,\n    \"misinformation_prevalence\": misinfo_prev_mean,\n    \"policy_effect_contribution\": policy_effect_contribution,\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "def parse_cli(argv: List[str]) -> Dict[str, Any]:\n    opts = {\n        \"param_file\": None,\n        \"overrides\": {},\n        \"calibrator\": \"random_search\",\n        \"budget\": 20,\n        \"calib_window\": None,\n        \"artifacts_dir\": ARTIFACTS_DIR,\n    }",
+      "after": "def parse_cli(argv: List[str]) -> Dict[str, Any]:\n    opts = {\n        \"param_file\": None,\n        \"overrides\": {},\n        \"calibrator\": \"random_search\",\n        \"budget\": 20,\n        \"calib_window\": None,\n        \"artifacts_dir\": ARTIFACTS_DIR,\n        \"no_calib\": True if os.environ.get(\"SKIP_CALIB\", \"1\") == \"1\" else False,\n    }",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_25.py",
+      "before": "# In main()\ncalibrator = get_calibrator(calib_name, None)\n...\nfitted = calibrator.fit(...)\nBasicParamsAdapter().apply(sim, fitted)",
+      "after": "# In main()\nif not args.get(\"no_calib\", True):\n    calibrator = get_calibrator(calib_name, None)\n    fitted = calibrator.fit(...)\n    BasicParamsAdapter().apply(sim, fitted)\n# proceed to run regardless",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration improved module interactions (e.g., RetailSupply depends on Decision), reduced risk-update lag, added masks_sold metrics, and introduced policy counterfactual estimation. These changes generally increase realism and observability but still leave specification gaps.",
+    "positive_impacts": [
+      "RetailSupplyModule now services same-day purchase requests improving face-validity.",
+      "DecisionAndAdoptionModule uses same-day risk updates removing artificial lag.",
+      "Added masks_sold and adoption_by_group metrics aiding supply and equity analyses.",
+      "Introduced sustained_adoption_rate and policy_effect_contribution enriching evaluation."
+    ],
+    "negative_impacts": [
+      "Calibration still runs by default, impacting runtime.",
+      "Metric naming and coverage still diverge from spec (e.g., missing time_to_70_percent, enforcement_cost, misinformation_prevalence).",
+      "Disease module still omits location-based contacts, limiting policy-venue effects."
+    ],
+    "suggestions": [
+      "Make calibration opt-in via --no-calib (default true) and honor SKIP_CALIB env.",
+      "Add required metrics and aliases to align with spec and validation routines.",
+      "Prepare for location-based transmission by recording visits and reordering modules."
+    ]
+  }
+}

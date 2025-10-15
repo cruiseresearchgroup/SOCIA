@@ -1,0 +1,193 @@
+{
+  "summary": "The simulation runs and captures core agent-based mask adoption dynamics with networks, households, information exposure, retailers, and basic policy enforcement. However, several required metrics and validation criteria from the spec are missing; parameter mappings diverge from the spec; policy feedback loops are not implemented; and campaign reach is measured per day rather than cumulatively. The recent changes improved structure (retailers, households, location norms, CSV records) and fixed earlier wiring, but introduced gaps in spec alignment that should be addressed next.",
+  "critical_issues": [
+    {
+      "issue": "Missing required metrics and validations",
+      "impact": "Outputs do not include key KPIs (time_to_50_percent_adoption, peak_adoption_rate, adoption_disparity_index, policy_effect_size, average_enforcement_events_per_day, masks_purchased_per_capita, campaign_reach ever, post_policy_dropoff_rate) and omit validation checks, reducing the simulation\u2019s usefulness and failing the spec.",
+      "solution": "Track enforcement events per day and ever-exposed IDs; compute group-level adoption; add end-of-run computations and a validations block. Implement policy drop-off analysis around mandate end.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Spec parameter mapping gaps",
+      "impact": "Scenario inputs from the task (penalty_for_noncompliance, mandate_enforcement_level, campaign_intensity, retailer_initial_stock_per_100_agents, campaign_start_day) are not honored, leading to divergent behaviors from intended experiments.",
+      "solution": "Map spec params in _extract_parameters (e.g., penalty_for_noncompliance -> penalty_amount; mandate_enforcement_level -> location_enforcement_mean/enforcement_strength; campaign_intensity -> messaging_intensity; retailer_initial_stock_per_100_agents -> retailer_initial_inventory_per_capita=value/100; campaign_start_day gating to apply information exposure only after the day).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No policy feedback loop",
+      "impact": "Mandate and campaign intensity do not adapt to observed adoption/compliance, missing the policy_feedback interaction and limiting scenario realism.",
+      "solution": "Implement simple outcome-based control: lift mandates after sustained high adoption; increase enforcement or campaign intensity if compliance stagnates; optionally re-issue mandates if prevalence and adoption conditions indicate rising risk.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Campaign reach measured daily, not cumulatively",
+      "impact": "campaign_reach metric from the spec expects share of population ever exposed, but code only tracks daily reach, underestimating reach.",
+      "solution": "Track a set of agent IDs ever exposed across the horizon and compute campaign_reach at the end.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Adoption disparity not computed",
+      "impact": "Equity-related insights are missing; gini() is defined but unused.",
+      "solution": "Compute adoption by Person.group (already assigned as income terciles); report disparity index (max-min across groups) and optionally Gini of group rates using the existing gini().",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy feedback",
+      "current_approach": "Mandate is toggled by fixed dates; enforcement and messaging are static.",
+      "suggested_approach": "Adaptive control: if mean adoption over last 7 days > threshold_norm_adoption, lift mandate early and taper messaging; if adoption/compliance drop or prevalence rises, increase enforcement_strength or messaging_intensity; cap within [0,1].",
+      "expected_benefit": "Improves realism and allows exploration of responsive policies per the spec\u2019s policy_feedback interaction."
+    },
+    {
+      "aspect": "Campaign exposure",
+      "current_approach": "Daily exposure and daily reach fraction only.",
+      "suggested_approach": "Track ever-exposed set and gate exposure by campaign_start_day and campaign_intensity; allow channels to modulate tone variance via media_bias_variance.",
+      "expected_benefit": "Aligns with campaign_reach metric and allows scenario control of campaigns."
+    },
+    {
+      "aspect": "Adoption disparity",
+      "current_approach": "Groups by income terciles exist but no disparity metric is computed.",
+      "suggested_approach": "Compute final-day adoption rates by group and report max-min disparity and Gini across group rates.",
+      "expected_benefit": "Surfaces equity implications of policies and supply constraints."
+    },
+    {
+      "aspect": "Post-policy drop-off",
+      "current_approach": "No measurement of post-policy adoption decline.",
+      "suggested_approach": "Measure difference (or slope) between last 7 days of mandate and first 7 days after lifting; report daily drop rate and percent change.",
+      "expected_benefit": "Assesses persistence/habit effects vs. compliance-only effects."
+    },
+    {
+      "aspect": "Information dynamics",
+      "current_approach": "Fixed misinformation_rate and small fixed tone variance.",
+      "suggested_approach": "Expose media_bias_variance parameter; allow InformationChannel to counter/amplify misinformation (e.g., credibility reduces misinformation impact or updates misinformation_rate over time).",
+      "expected_benefit": "Richer information dynamics consistent with spec entities\u2019 behaviors."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Add tracking for ever-exposed IDs, enforcement events per day, and bounded probability checks; compute required metrics and validations in run().",
+      "reason": "Completes missing outputs and validation criteria; enables campaign_reach and average_enforcement_events_per_day.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Map spec parameters (penalty_for_noncompliance, mandate_enforcement_level, campaign_intensity, retailer_initial_stock_per_100_agents, campaign_start_day, media_bias_variance) in _extract_parameters and use them in step().",
+      "reason": "Aligns runtime behavior with the spec\u2019s parameterization.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement simple policy feedback in step(): adjust mandate_status and communication_strategy_intensity based on 7-day moving averages of adoption/compliance and prevalence.",
+      "reason": "Implements the policy_feedback interaction from the task.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute adoption disparity across income terciles and report final metrics (disparity index, Gini).",
+      "reason": "Fulfills adoption_disparity_index and uses existing gini() utility.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Gate information exposure by campaign_start_day and campaign_intensity; apply media_bias_variance to tone noise.",
+      "reason": "Implements campaign scheduling and intensity from spec; makes media dynamics tunable.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "Currently approximated only by mandate_rate; lacks counterfactual robustness.",
+      "suggestion": "Implement a simple difference-in-differences: compare mean adoption in a pre-policy window vs. a post-policy window, net of a synthetic control built from voluntary_rate. Alternatively, run a paired no-mandate counterfactual with the same random seed and report the delta."
+    },
+    {
+      "metric": "adoption_disparity_index",
+      "current_gap": "Not computed; group definitions limited to income terciles.",
+      "suggestion": "Expand Person attributes (e.g., political_identity, age brackets) and report disparity across multiple stratifications (SES terciles, age groups, and political identity)."
+    },
+    {
+      "metric": "campaign_reach",
+      "current_gap": "Daily reach only.",
+      "suggestion": "Use ever-exposed coverage and, where available, calibrate InformationChannel.reach and campaign_intensity to empirical campaign impression data."
+    },
+    {
+      "metric": "average_enforcement_events_per_day",
+      "current_gap": "Not reported explicitly.",
+      "suggestion": "Compute penalties_count + denied_access explicitly per day and average across horizon; if possible, calibrate enforcement_probability/enforcement_strength to match observed compliance checkpoints."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement missing metrics and validations in run() and minor state tracking in step().",
+    "Map spec parameters to internal names and use them (penalty_for_noncompliance, mandate_enforcement_level, campaign_intensity, retailer_initial_stock_per_100_agents, campaign_start_day, media_bias_variance).",
+    "Add policy feedback adjustments based on adoption/compliance and prevalence trends.",
+    "Track ever-exposed IDs to compute campaign_reach and gate exposure by campaign_start_day.",
+    "Compute adoption disparity index and Gini across income terciles.",
+    "Optionally: deprecate or fully integrate SupplyChain with Retailer dynamics to avoid confusion."
+  ],
+  "additional_comments": "The recent refactor meaningfully improved structure: households, retailers, location norms, CSV records, and epidemic integration. The main remaining gap is specification alignment (metrics, validation, and policy feedback). Keep the unconditional main() call as required by the sandbox.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "self.daily_message_reach: List[float] = []  # FIXED: Track message reach correctly\n# FIXED: Behavioral persistence/volatility tracking\nself._streak: List[int] = []\nself._streak_max: List[int] = []\nself.daily_switching_rate: List[float] = []\nself.daily_peer_exposure_index: List[float] = []\nself._initialized = False\nself._daily_records: List[Dict[str, Any]] = []  # Records for CSV",
+      "after": "self.daily_message_reach: List[float] = []  # daily fraction\nself._ever_exposed_ids: set[int] = set()  # cumulative campaign reach\nself.enforcement_events_daily: List[int] = []  # penalties_count + denied_access\nself._prob_violations: int = 0  # bounded_probabilities check counter\nself.group_index: Dict[str, List[int]] = {}  # cached at init for disparity metrics\n# Behavioral persistence/volatility tracking\nself._streak: List[int] = []\nself._streak_max: List[int] = []\nself.daily_switching_rate: List[float] = []\nself.daily_peer_exposure_index: List[float] = []\nself._initialized = False\nself._daily_records: List[Dict[str, Any]] = []  # Records for CSV"
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _extract_parameters(self, config: Dict[str, Any]) -> Dict[str, Any]:\n    # ... existing mappings ...\n    params.setdefault(\"mandate_start_day\", int(params.get(\"policy_start_day\", 30)))\n    params.setdefault(\"mandate_end_day\", int(params.get(\"policy_end_day\", 120)))\n    # ...",
+      "after": "def _extract_parameters(self, config: Dict[str, Any]) -> Dict[str, Any]:\n    # ... existing mappings ...\n    # Spec name mappings\n    if \"penalty_for_noncompliance\" in params:\n        params[\"penalty_amount\"] = float(params[\"penalty_for_noncompliance\"])  # dollars\n    if \"mandate_enforcement_level\" in params:\n        params[\"location_enforcement_mean\"] = float(params[\"mandate_enforcement_level\"])  # 0..1\n        params[\"enforcement_strength\"] = float(params[\"mandate_enforcement_level\"])       # 0..1\n    if \"campaign_intensity\" in params:\n        params[\"messaging_intensity\"] = float(params[\"campaign_intensity\"])               # 0..1\n    if \"retailer_initial_stock_per_100_agents\" in params:\n        params[\"retailer_initial_inventory_per_capita\"] = float(params[\"retailer_initial_stock_per_100_agents\"]) / 100.0\n    if \"campaign_start_day\" in params:\n        params[\"campaign_start_day\"] = int(params[\"campaign_start_day\"])                  # day gating\n    if \"media_bias_variance\" in params:\n        params[\"media_bias_variance\"] = float(params[\"media_bias_variance\"])              # tone variance\n    params.setdefault(\"mandate_start_day\", int(params.get(\"policy_start_day\", 30)))\n    params.setdefault(\"mandate_end_day\", int(params.get(\"policy_end_day\", 120)))\n    # ..."
+    },
+    {
+      "file": "simulation.py",
+      "before": "exposed_ids = set()\nfor ch in self.information_channels:\n    for person in self.people:\n        if self.rng.random() < max(0.0, min(1.0, ch.reach)):\n            if person.observe_media(self.rng, ch.bias, ch.misinformation_rate, ch.message_frequency):\n                exposed_ids.add(person.pid)\nself.daily_message_reach.append(len(exposed_ids) / max(1, len(self.people)))",
+      "after": "exposed_ids = set()\ncamp_start = int(self.params.get(\"campaign_start_day\", 0))\nif day >= camp_start:\n    bias_var = float(self.params.get(\"media_bias_variance\", 0.05))\n    for ch in self.information_channels:\n        for person in self.people:\n            if self.rng.random() < max(0.0, min(1.0, ch.reach * float(self.params.get(\"messaging_intensity\", 0.6)))):\n                # pass variance to observe_media via bias jitter\n                if person.observe_media(self.rng, ch.bias + self.rng.uniform(-bias_var, bias_var), ch.misinformation_rate, ch.message_frequency):\n                    exposed_ids.add(person.pid)\nself._ever_exposed_ids.update(exposed_ids)\nself.daily_message_reach.append(len(exposed_ids) / max(1, len(self.people)))"
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Enforce policy\nfines_value, denied = loc.enforce_policy(self.rng, admitted_people)\npenalties_today_value += fines_value\npenalties_today_count += int(round(fines_value / max(1e-9, loc.fine_amount))) if loc.fine_amount > 0 else 0\ndenied_access_today += denied",
+      "after": "# Enforce policy\nfines_value, denied = loc.enforce_policy(self.rng, admitted_people)\npenalties_today_value += fines_value\npenalties_today_count += int(round(fines_value / max(1e-9, loc.fine_amount))) if loc.fine_amount > 0 else 0\ndenied_access_today += denied\n# Track enforcement events explicitly\n# One event per fine-equivalent plus each denial\n# (If you prefer to count exact interactions, expose a counter in enforce_policy)\n"
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Aggregate metrics\nwearing_now = [1.0 if p.mask_adoption_state == \"wearing\" else 0.0 for p in self.people]\nadoption_rate = sum(wearing_now) / max(1, len(wearing_now))\nself.daily_adoption.append(adoption_rate)\nself.daily_penalties.append(penalties_today_value)\nself.daily_penalties_count.append(penalties_today_count)\nself.policy_active_daily.append(policy_active)\nself.daily_denied_access.append(denied_access_today)",
+      "after": "# Aggregate metrics\nwearing_now = [1.0 if p.mask_adoption_state == \"wearing\" else 0.0 for p in self.people]\nadoption_rate = sum(wearing_now) / max(1, len(wearing_now))\nself.daily_adoption.append(adoption_rate)\nself.daily_penalties.append(penalties_today_value)\nself.daily_penalties_count.append(penalties_today_count)\nself.policy_active_daily.append(policy_active)\nself.daily_denied_access.append(denied_access_today)\n# Enforcement events (penalized + denied)\nself.enforcement_events_daily.append(penalties_today_count + denied_access_today)\n# Cache group index once\nif day == 0 and not self.group_index:\n    from collections import defaultdict\n    gi = defaultdict(list)\n    for idx, person in enumerate(self.people):\n        gi[person.group].append(idx)\n    self.group_index = dict(gi)"
+    },
+    {
+      "file": "simulation.py",
+      "before": "def run(self, steps: int) -> Dict[str, Any]:\n    for day in range(steps):\n        self.step(day)\n    result: Dict[str, Any] = {\n        \"seed\": self.seed,\n        \"parameters\": self.params,\n        \"series\": { ... },\n        \"by_location_adoption\": self.by_loc_daily_series,\n        \"location_compliance\": self.location_compliance_daily,\n        \"final\": { ... },\n        \"daily_records\": self._daily_records,\n        \"hash\": stable_hash_dict(self.params),\n    }\n    return result",
+      "after": "def run(self, steps: int) -> Dict[str, Any]:\n    for day in range(steps):\n        self.step(day)\n    # Required metrics\n    series_adopt = self.daily_adoption\n    peak_adoption_rate = max(series_adopt) if series_adopt else 0.0\n    time_to_50 = next((i for i, v in enumerate(series_adopt) if v >= 0.5), None)\n    # Disparity index across income terciles (final day)\n    disparity_index = 0.0\n    gini_index = 0.0\n    if self.group_index and series_adopt:\n        last_wearing = [1.0 if p.mask_adoption_state == \"wearing\" else 0.0 for p in self.people]\n        group_rates = []\n        for g, idxs in self.group_index.items():\n            if idxs:\n                group_rates.append(sum(last_wearing[i] for i in idxs) / len(idxs))\n        if group_rates:\n            disparity_index = max(group_rates) - min(group_rates)\n            gini_index = gini(group_rates)\n    policy_effect_size = 0.0\n    if self.daily_mandate_rate:\n        # average incremental share attributable to mandate when active\n        policy_effect_size = sum(self.daily_mandate_rate) / len(self.daily_mandate_rate)\n    avg_enforcement_events = (sum(self.enforcement_events_daily) / len(self.enforcement_events_daily)) if self.enforcement_events_daily else 0.0\n    masks_purchased_per_capita = self.cumulative_masks_purchased / max(1, len(self.people))\n    campaign_reach_ever = len(self._ever_exposed_ids) / max(1, len(self.people))\n    # Post-policy dropoff: compare last 7 pre-end vs first 7 post-end\n    end_day = int(self.params.get(\"mandate_end_day\", len(series_adopt)-1))\n    w = 7\n    drop_rate = 0.0\n    if len(series_adopt) > 2*w and 0 < end_day < len(series_adopt)-w:\n        pre = series_adopt[max(0, end_day-w):end_day]\n        post = series_adopt[end_day+1:end_day+1+w]\n        if pre and post:\n            drop_rate = (sum(post)/len(post) - sum(pre)/len(pre)) / max(1, w)\n    # Validations\n    validations = {\n        \"adoption_convergence\": False,\n        \"stock_nonnegativity\": all(r.mask_stock >= 0 for r in self.retailers) if self.retailers else True,\n        \"bounded_probabilities\": (self._prob_violations == 0)\n    }\n    if len(series_adopt) >= 8:\n        tail = series_adopt[-8:]\n        diffs = [abs(tail[i+1]-tail[i]) for i in range(7)]\n        validations[\"adoption_convergence\"] = all(d < 0.01 for d in diffs)\n    result: Dict[str, Any] = {\n        \"seed\": self.seed,\n        \"parameters\": self.params,\n        \"series\": {\n            \"adoption_rate\": self.daily_adoption,\n            \"workplace_adoption\": self.daily_workplace_adoption,\n            \"message_reach\": self.daily_message_reach,\n            \"penalties_value\": self.daily_penalties,\n            \"penalties_count\": self.daily_penalties_count,\n            \"denied_access\": self.daily_denied_access,\n            \"policy_active\": self.policy_active_daily,\n            \"voluntary_rate\": self.daily_voluntary_rate,\n            \"mandate_rate\": self.daily_mandate_rate,\n            \"policy_violations\": self.daily_policy_violations,\n            \"unmet_demand\": self.daily_unmet_demand,\n            \"attempted_purchases\": self.daily_attempted_purchases,\n            \"purchases\": self.daily_masks_purchased,\n            \"stockout_share\": self.daily_stockout_share,\n            \"prevalence_signal\": self.epidemic_prevalence_daily,\n            \"incident_cases\": self.daily_incident_cases,\n            \"Rt\": self.daily_Rt,\n            \"avg_mask_quality\": self.daily_mask_quality,\n            \"switching_rate\": self.daily_switching_rate,\n            \"peer_exposure_index\": self.daily_peer_exposure_index,\n            \"enforcement_events\": self.enforcement_events_daily,\n        },\n        \"by_location_adoption\": self.by_loc_daily_series,\n        \"location_compliance\": self.location_compliance_daily,\n        \"metrics\": {\n            \"final_adoption_rate\": self.daily_adoption[-1] if self.daily_adoption else 0.0,\n            \"peak_adoption_rate\": peak_adoption_rate,\n            \"time_to_50_percent_adoption\": time_to_50,\n            \"adoption_disparity_index\": disparity_index,\n            \"adoption_disparity_gini\": gini_index,\n            \"policy_effect_size\": policy_effect_size,\n            \"average_enforcement_events_per_day\": avg_enforcement_events,\n            \"masks_purchased_per_capita\": masks_purchased_per_capita,\n            \"campaign_reach\": campaign_reach_ever,\n            \"post_policy_dropoff_rate\": drop_rate,\n        },\n        \"final\": {\n            \"final_adoption_rate\": self.daily_adoption[-1] if self.daily_adoption else 0.0,\n            \"avg_adoption_rate\": (sum(self.daily_adoption) / len(self.daily_adoption)) if self.daily_adoption else 0.0,\n            \"mask_type_counts\": self.mask_type_counts,\n            \"cumulative_masks_purchased\": self.cumulative_masks_purchased,\n            \"peak_incidence\": self.peak_incidence,\n            \"cumulative_infections_averted\": self.cumulative_infections_averted,\n        },\n        \"validations\": validations,\n        \"daily_records\": self._daily_records,\n        \"hash\": stable_hash_dict(self.params),\n    }\n    return result"
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Person:\n    # ...\n    def decide_mask_use(self, rng: random.Random, policy_active: bool, peer_share: float, params: Dict[str, float]) -> None:\n        # ...\n        p_wear = sigmoid(latent + noise)\n        wearing = rng.random() < p_wear",
+      "after": "class Person:\n    # ...\n    last_p_wear: float = 0.0\n    def decide_mask_use(self, rng: random.Random, policy_active: bool, peer_share: float, params: Dict[str, float]) -> None:\n        # ...\n        p_wear = sigmoid(latent + noise)\n        self.last_p_wear = max(0.0, min(1.0, p_wear))\n        wearing = rng.random() < self.last_p_wear"
+    },
+    {
+      "file": "simulation.py",
+      "before": "# No policy feedback adjustments after aggregation",
+      "after": "# Simple policy feedback (optional but spec-aligned)\ntry:\n    window = 7\n    if len(self.daily_adoption) >= window:\n        recent_avg = sum(self.daily_adoption[-window:]) / window\n        thresh = float(self.params.get(\"threshold_norm_adoption\", 0.6))\n        if policy_active and recent_avg >= thresh:\n            # reduce messaging and consider lifting by advancing end day\n            self.params[\"mandate_end_day\"] = min(int(self.params.get(\"mandate_end_day\", day)), day)\n            self.policy.lift_mandate()\n        elif not policy_active and recent_avg < (thresh - 0.1):\n            # intensify campaign if lagging\n            self.params[\"messaging_intensity\"] = min(1.0, float(self.params.get(\"messaging_intensity\", 0.6)) + 0.1)\nexcept Exception:\n    pass"
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes substantially improved the simulation\u2019s breadth: added retailers (replacing direct supply use), households with norms and sharing, richer network generation (small-world and scale-free), location norms and enforcement, CSV logging, and an SIR-like epidemic coupling. However, they did not complete the spec\u2019s metrics/validations and introduced some naming drift from the provided parameters.",
+    "positive_impacts": [
+      "Retailer-based procurement with price dynamics (stockout share tracking)",
+      "Household norms and mask sharing prior to decisions",
+      "Observed norms per location and enforcement heterogeneity",
+      "Expanded network options (scale-free) and homophily-aware rewiring",
+      "CSV daily logging and richer daily record"
+    ],
+    "negative_impacts": [
+      "SupplyChain remains partially unused, causing potential confusion",
+      "Campaign reach tracked as daily fraction rather than cumulative ever-exposed",
+      "Spec parameter names not fully mapped (enforcement level, penalties, campaign intensity, retailer stock per 100 agents, campaign start day)"
+    ],
+    "suggestions": [
+      "Implement the missing metrics and validations in run() and add minimal state tracking in step()",
+      "Map spec parameters and gate campaign by campaign_start_day with intensity scaling",
+      "Add a simple policy feedback loop using recent adoption/compliance and prevalence signals",
+      "Either remove SupplyChain or integrate it as the upstream to Retailer.restock() for clarity"
+    ]
+  }
+}

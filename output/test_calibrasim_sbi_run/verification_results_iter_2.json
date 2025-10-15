@@ -1,0 +1,98 @@
+{
+  "passed": false,
+  "summary": "The code runs and is syntactically correct with proper imports and a working simulation loop. However, it does not implement several key requirements from the specified task: entity attributes and behaviors diverge from the spec, critical metrics (e.g., masked_interaction_fraction, supply_adequacy) are missing, and parameters such as mandate_start_day=null are not handled. Some logical and robustness issues also exist (e.g., duplicate summarize_metrics method, redundant summaries, and no handling for null mandate).",
+  "issues": [
+    {
+      "type": "implementation",
+      "severity": "critical",
+      "description": "Entities, attributes, and behaviors do not match the required specification. For example, Person lacks adherence_prob, mask_quality, fatigue_level; PolicyMaker/MediaSource are replaced by PolicyCampaign/InformationChannel; and many behaviors (e.g., comply_with_policy with adherence probability, experience_adherence_fatigue) are not implemented.",
+      "location": "Entity dataclasses (Person, Household, Location, PolicyCampaign, InformationChannel) and behavior modules",
+      "solution": "Align entities and behaviors with the task specification. Add the missing attributes (e.g., adherence_prob, mask_quality, fatigue_level, workplace_id, daily_contacts) and implement corresponding behaviors (evaluate_adoption_decision, wear_mask_in_interaction with adherence probability, update_risk_perception, share_information_with_contacts, purchase_mask with price elasticity, comply_with_policy, experience_adherence_fatigue). Replace or map PolicyCampaign/InformationChannel to PolicyMaker/MediaSource semantics as required."
+    },
+    {
+      "type": "implementation",
+      "severity": "critical",
+      "description": "Required metrics and validation criteria are not implemented. Metrics like overall_adoption_rate, final_adoption_rate, time_to_50_percent_adoption, average_adherence, policy_effect_size, sustained_adoption_rate, supply_adequacy, masked_interaction_fraction are missing or approximated.",
+      "location": "AdoptionAggregator.update, Simulation.evaluate",
+      "solution": "Compute and store: overall_adoption_rate (per-day), final_adoption_rate (last day), time_to_50_percent_adoption, average_adherence (mean adherence among adopters), policy_effect_size (e.g., diff-in-diff around mandate), sustained_adoption_rate (post-policy window), supply_adequacy (fraction of days with non-zero inventory across retailers), and masked_interaction_fraction (based on contact pairs and mask states). Update evaluate() to return these metrics."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "Parameter set diverges from the required task parameters (e.g., population_size=10000, simulation_days=180, price_elasticity_of_demand, misinformation_rate, adherence_decay_rate). The code uses a different set under MODEL_PLAN.",
+      "location": "MODEL_PLAN['parameters'] and modules using params",
+      "solution": "Replace or extend MODEL_PLAN parameters to match the task. Honor population_size, simulation_days, time_step_days, network_topology and average_degree, social_influence_strength, risk_sensitivity, misinformation_rate, adherence_decay_rate, mask_price, price_elasticity_of_demand, retailer_restock_rate, enforcement_strength, free_mask_distribution_rate, workplace_contact_multiplier, household_norm_strength, random_seed, mask_quality_mean, max_contacts_per_day, etc."
+    },
+    {
+      "type": "logic",
+      "severity": "major",
+      "description": "Mandate parameters do not handle null (None) values, which the spec requires (e.g., mandate_start_day: null). The comparison with None will raise an error.",
+      "location": "PolicyCampaignModule.update: mandate_active = (day >= self.policy.mandate_start_day) and (day <= self.policy.mandate_end_day)",
+      "solution": "Guard against None: mandate_active = bool(self.policy.mandate_start_day is not None and self.policy.mandate_end_day is not None and (self.policy.mandate_start_day <= day <= self.policy.mandate_end_day)). Also adjust default parameters accordingly."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "No explicit adherence probability is modeled; wearing is deterministic per decision. The spec requires adherence_prob and adherence fatigue dynamics (adherence_decay_rate).",
+      "location": "BehaviorDecisionModule.update and Person dataclass",
+      "solution": "Add adherence_prob to Person. When will_wear is true, sample wearing as Bernoulli(adherence_prob), and update adherence_prob over time with fatigue (e.g., adherence_prob *= (1 - adherence_decay_rate), bounded to [0,1])."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "Masked interaction fraction is not computed though contacts are generated.",
+      "location": "MobilityAndLocationModule.update (contacts generation) and AdoptionAggregator.update",
+      "solution": "Compute masked_interaction_fraction = fraction of contacts where at least one party wore a mask (use signals['person']['mask_use_state'] for both agents in each contact). Store daily and summarize."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "Supply adequacy metric (share of days retailers have non-zero inventory) is missing.",
+      "location": "RetailerSupplyModule.update and AdoptionAggregator.update",
+      "solution": "Track per-day whether each retailer has inventory > 0. Aggregate to a daily boolean or fraction and then compute overall supply_adequacy across days in summarize_metrics."
+    },
+    {
+      "type": "logic",
+      "severity": "minor",
+      "description": "AdoptionAggregator defines summarize_metrics twice; the second definition overrides the first and indicates code duplication. evaluate() calls summarize_metrics twice redundantly.",
+      "location": "AdoptionAggregator class and Simulation.evaluate",
+      "solution": "Remove duplicate summarize_metrics and redundant calls, ensuring a single, correct implementation. Extend summarize_metrics to include all required metrics."
+    },
+    {
+      "type": "implementation",
+      "severity": "minor",
+      "description": "Price elasticity parameter from the spec is not used. Purchase intents are fixed quantity and weakly depend on price via a simple affordability term.",
+      "location": "BehaviorDecisionModule.update (purchase intent logic)",
+      "solution": "Incorporate price_elasticity_of_demand to modulate purchase probability or quantity as a function of price (e.g., demand ~ price^elasticity), and consider income/SES constraints."
+    },
+    {
+      "type": "logic",
+      "severity": "minor",
+      "description": "Network neighbor indices assume that agent IDs are 0..N-1 and align with graph nodes. This is true now but could break if IDs change.",
+      "location": "SocialNetworkBuilder.build",
+      "solution": "Explicitly map graph nodes to agent IDs using a mapping dict or ensure agents are always indexed 0..N-1 and IDs match indices."
+    },
+    {
+      "type": "error_handling",
+      "severity": "minor",
+      "description": "Visualization may fail in headless environments despite try/except but prints a generic message. No fallback to saving the plot.",
+      "location": "Simulation.visualize",
+      "solution": "On exception, save the plot to a file (e.g., PNG) in DATA_DIR rather than attempting to show it."
+    },
+    {
+      "type": "performance",
+      "severity": "minor",
+      "description": "Retailer stocks can grow unbounded due to constant restock without a cap, which may be acceptable but can skew price dynamics and metrics in long runs.",
+      "location": "RetailerSupplyModule.update",
+      "solution": "Optionally cap stock_level or model demand-driven restocking; add parameters for maximum inventory or depletion rates."
+    }
+  ],
+  "verification_details": {
+    "syntax_check": true,
+    "imports_check": true,
+    "implementation_check": false,
+    "logic_check": false,
+    "error_handling_check": false,
+    "performance_check": true
+  }
+}

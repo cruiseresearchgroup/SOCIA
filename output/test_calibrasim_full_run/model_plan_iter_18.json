@@ -1,0 +1,988 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion of a pro-social behavior (e.g., guideline or product adoption) on a social network with media and policy signals, habit decay/relapse, and daily observations for calibration to time series data.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "community_id",
+        "degree",
+        "neighbors",
+        "threshold",
+        "susceptibility",
+        "media_exposure",
+        "adopted",
+        "time_since_adoption",
+        "fatigue",
+        "habit_strength"
+      ],
+      "behaviors": [
+        "evaluate_social_influence",
+        "update_adoption_state",
+        "receive_media_policy_signal",
+        "habit_decay_and_relapse"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "population_size": 5000,
+          "initial_adoption_fraction": 0.02,
+          "threshold_distribution": "Beta(alpha=2.0, beta=3.0)",
+          "media_exposure_mean": 0.2
+        }
+      }
+    },
+    {
+      "name": "Community",
+      "attributes": [
+        "community_id",
+        "size",
+        "policy_modifier"
+      ],
+      "behaviors": [
+        "apply_policy_modifier"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "community_count": 10
+        }
+      }
+    },
+    {
+      "name": "MediaChannel",
+      "attributes": [
+        "baseline_intensity",
+        "reach_fraction",
+        "pulse_interval_days",
+        "pulse_duration_days",
+        "pulse_magnitude"
+      ],
+      "behaviors": [
+        "broadcast_signal"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "baseline_intensity": 0.3,
+          "reach_fraction": 0.5
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the social network and assigns communities with homophily and degree/assortativity targets.",
+      "inputs": [
+        "init.population_size",
+        "data.network_edges_csv",
+        "data.communities_csv"
+      ],
+      "outputs": [
+        "graph.G",
+        "people.list",
+        "communities.list",
+        "people.degree",
+        "people.community_id"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  if data.network_edges_csv available:\n    G <- load_edges_csv()\n  else:\n    if network_type_code == 0: G <- watts_strogatz(N=population_size, k=round(average_degree), beta=rewiring_prob)\n    if network_type_code == 1: G <- erdos_renyi(N=population_size, p=average_degree/(population_size-1))\n    if network_type_code == 2: G <- barabasi_albert(N=population_size, m=max(1, round(average_degree/2)))\n  assign communities (community_count) to nodes to match homophily_strength and assortativity_target using iterative label swap heuristic\n  adjust clustering toward clustering_target using triad-closure rewiring if feasible\n  create Person agents with degree, neighbors, community_id",
+        "notes": [
+          "Runs only at t=0; later ticks are no-ops.",
+          "Homophily_strength steers within-community edge fraction.",
+          "Assortativity_target achieved with constrained degree-preserving swaps."
+        ]
+      },
+      "requirements": [
+        "graph_generation",
+        "rng",
+        "data_loader"
+      ],
+      "module_parameters": [
+        "network_type_code",
+        "average_degree",
+        "rewiring_prob",
+        "homophily_strength",
+        "community_count",
+        "degree_distribution_code",
+        "assortativity_target",
+        "clustering_target"
+      ]
+    },
+    {
+      "name": "MediaAndPolicy",
+      "description": "Generates exogenous influence signals from media and policy interventions; can target high-degree nodes and selected communities.",
+      "inputs": [
+        "time.t",
+        "communities.list",
+        "graph.G",
+        "people.degree",
+        "people.community_id"
+      ],
+      "outputs": [
+        "signals.external_influence_per_person",
+        "signals.policy_active"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "policy_active <- (t >= policy_start_day) and (t <= policy_end_day)\nbase_intensity <- baseline_media_intensity\nif policy_active:\n  base_intensity <- base_intensity + enforcement_level * 0.5\npulse_active <- ((t - 1) % media_pulse_interval_days) < media_pulse_duration_days\nif pulse_active:\n  base_intensity <- base_intensity + media_pulse_magnitude\nfor person i in people:\n  reach_mask <- Bernoulli(media_reach_fraction)\n  deg_bias <- (degree[i] / max_degree) ^ targeting_bias_by_degree\n  comm_target <- 1.0\n  if top_n_communities_targeted > 0 and policy_active:\n    comm_targeted <- top_n_communities_by_size(top_n_communities_targeted)\n    if community_id[i] in comm_targeted:\n      comm_target <- 1.0 + community_policy_strength\n  signals.external_influence_per_person[i] <- base_intensity * reach_mask * (0.5 + 0.5*deg_bias) * comm_target",
+        "notes": [
+          "External influence is per-person daily scalar.",
+          "Degree targeting amplifies signals to central individuals.",
+          "Community targeting activates only when policy is active."
+        ]
+      },
+      "requirements": [
+        "rng",
+        "graph_queries"
+      ],
+      "module_parameters": [
+        "baseline_media_intensity",
+        "media_reach_fraction",
+        "media_pulse_interval_days",
+        "media_pulse_duration_days",
+        "media_pulse_magnitude",
+        "policy_start_day",
+        "policy_end_day",
+        "enforcement_level",
+        "targeting_bias_by_degree",
+        "top_n_communities_targeted",
+        "community_policy_strength"
+      ]
+    },
+    {
+      "name": "InfluencePropagation",
+      "description": "Updates agent adoption based on social influence from neighbors combined with external signals using a mixed threshold/cascade mechanism.",
+      "inputs": [
+        "graph.G",
+        "people.list",
+        "signals.external_influence_per_person",
+        "time.t"
+      ],
+      "outputs": [
+        "people.adopted",
+        "people.time_since_adoption",
+        "signals.new_adoptions_today",
+        "signals.cascades_attribution"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "MediaAndPolicy"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "signals.new_adoptions_today <- 0\nif t == 0:\n  initialize thresholds: theta_i ~ Beta(threshold_alpha, threshold_beta)\nfor person i:\n  if adopted[i] == true: continue\n  social_frac <- mean(adopted[neighbors(i)] over neighbor_memory_window_days)  # if window>1, use EMA\n  social_signal <- social_weight * social_frac\n  media_signal <- media_weight * signals.external_influence_per_person[i]\n  total_signal <- social_signal + media_signal + Normal(0, adoption_noise_sigma)\n  if adoption_rule_code == 0:  # linear threshold\n    will_adopt <- (total_signal >= theta_i)\n  else:  # independent cascade hybrid\n    prob <- 1 - exp(-total_signal)\n    will_adopt <- Bernoulli(max(0,min(1, prob)))\n  if will_adopt:\n    adopted[i] <- true\n    time_since_adoption[i] <- 0\n    signals.new_adoptions_today += 1\n    attribute cascade attributions to neighbors proportionally to their influence\nfor person i with adopted[i]==true:\n  time_since_adoption[i] += 1",
+        "notes": [
+          "Thresholds sampled once per agent.",
+          "Asynchronous updates: if async_fraction<1, sample subset to update today.",
+          "Influence from 2-hop neighbors can be modeled via influence_decay_lambda if desired by extending social_frac."
+        ]
+      },
+      "requirements": [
+        "rng",
+        "vector_ops"
+      ],
+      "module_parameters": [
+        "social_weight",
+        "media_weight",
+        "threshold_alpha",
+        "threshold_beta",
+        "adoption_noise_sigma",
+        "async_fraction",
+        "neighbor_memory_window_days",
+        "influence_decay_lambda",
+        "adoption_rule_code"
+      ]
+    },
+    {
+      "name": "BehaviorDecayAndMemory",
+      "description": "Models habit reinforcement, fatigue, decay, and possible relapse from adopted to non-adopted states.",
+      "inputs": [
+        "people.adopted",
+        "people.time_since_adoption",
+        "people.habit_strength",
+        "time.t"
+      ],
+      "outputs": [
+        "people.adopted",
+        "people.habit_strength",
+        "people.fatigue",
+        "signals.relapses_today"
+      ],
+      "dependencies": [
+        "InfluencePropagation"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "signals.relapses_today <- 0\nfor person i:\n  if adopted[i]:\n    habit_strength[i] <- min(1.0, habit_strength[i] + (1 - habit_strength[i]) * 0.1)\n    fatigue[i] <- min(1.0, fatigue[i] + fatigue_accumulation_rate)\n    relapse_prob <- relapse_prob_daily * (1 - habit_strength[i]) * (0.5 + fatigue[i])\n    if Bernoulli(relapse_prob):\n      adopted[i] <- false\n      signals.relapses_today += 1\n  else:\n    fatigue[i] <- max(0.0, fatigue[i] - recovery_rate_daily)\n    habit_strength[i] <- max(0.0, habit_strength[i] - decay_rate_daily)",
+        "notes": [
+          "Habit_strength grows with continued adoption and decays otherwise.",
+          "Fatigue increases while adopted; decreases otherwise.",
+          "Relapse probability declines as habits strengthen."
+        ]
+      },
+      "requirements": [
+        "rng"
+      ],
+      "module_parameters": [
+        "decay_rate_daily",
+        "relapse_prob_daily",
+        "habit_strength",
+        "fatigue_accumulation_rate",
+        "recovery_rate_daily"
+      ]
+    },
+    {
+      "name": "ObservationAggregator",
+      "description": "Aggregates daily observables and applies smoothing/reporting lag to match data characteristics.",
+      "inputs": [
+        "people.adopted",
+        "people.community_id",
+        "signals.new_adoptions_today",
+        "time.t"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adoptions_daily",
+        "observable.adoption_rate_by_community",
+        "observable.cumulative_adoptions"
+      ],
+      "dependencies": [
+        "InfluencePropagation",
+        "BehaviorDecayAndMemory"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "raw_adoption_rate <- mean(adopted)\nraw_new_adoptions <- signals.new_adoptions_today\nsmoothed_adoption_rate <- moving_average(raw_adoption_rate, window=smoothing_window_days)\nsmoothed_new_adoptions <- moving_average(raw_new_adoptions, window=smoothing_window_days)\napply report lag by emitting values from t - report_lag_days\nby_comm <- group_mean(adopted by community_id)\ncum_adopt <- cumulative_sum(smoothed_new_adoptions)\npublish observables with lag adjustment",
+        "notes": [
+          "Smoothing and reporting lag align with noisy/lagged reporting in real data.",
+          "Group-level observable supports calibration by community."
+        ]
+      },
+      "requirements": [
+        "rolling_windows"
+      ],
+      "module_parameters": [
+        "smoothing_window_days",
+        "report_lag_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "network_type_code",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 2
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "0=Watts-Strogatz, 1=Erdos-Renyi, 2=Barabasi-Albert",
+      "frozen": true
+    },
+    {
+      "key": "average_degree",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 4.0,
+        "high": 40.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target average degree in the synthetic network.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.08,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Rewiring probability for Watts\u2013Strogatz small-world.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_strength",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Weight for within-community edge preference.",
+      "frozen": false
+    },
+    {
+      "key": "community_count",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 2,
+        "high": 50
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of communities to partition the population.",
+      "frozen": false
+    },
+    {
+      "key": "degree_distribution_code",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 2
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "0=Poisson-like, 1=Power-law, 2=Empirical (if provided).",
+      "frozen": true
+    },
+    {
+      "key": "assortativity_target",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": -0.5,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target degree assortativity coefficient.",
+      "frozen": false
+    },
+    {
+      "key": "clustering_target",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.6
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target global clustering coefficient.",
+      "frozen": false
+    },
+    {
+      "key": "baseline_media_intensity",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Baseline external influence level.",
+      "frozen": false
+    },
+    {
+      "key": "media_reach_fraction",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Daily fraction of population reached by media.",
+      "frozen": false
+    },
+    {
+      "key": "media_pulse_interval_days",
+      "dtype": "int",
+      "default": 21,
+      "bounds": {
+        "low": 7,
+        "high": 60
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Interval between media pulses.",
+      "frozen": false
+    },
+    {
+      "key": "media_pulse_duration_days",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Duration of each media pulse.",
+      "frozen": false
+    },
+    {
+      "key": "media_pulse_magnitude",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Additive intensity during pulses.",
+      "frozen": false
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 30,
+      "bounds": {
+        "low": 0,
+        "high": 120
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Day policy becomes active.",
+      "frozen": false
+    },
+    {
+      "key": "policy_end_day",
+      "dtype": "int",
+      "default": 90,
+      "bounds": {
+        "low": 0,
+        "high": 180
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Day policy ends.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_level",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Strength of policy enforcement.",
+      "frozen": false
+    },
+    {
+      "key": "targeting_bias_by_degree",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Exponent for biasing media/policy toward high-degree nodes.",
+      "frozen": false
+    },
+    {
+      "key": "top_n_communities_targeted",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 0,
+        "high": 20
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Number of largest communities to target during policy.",
+      "frozen": false
+    },
+    {
+      "key": "community_policy_strength",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaAndPolicy",
+      "description": "Additional multiplier for targeted communities.",
+      "frozen": false
+    },
+    {
+      "key": "social_weight",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluencePropagation",
+      "description": "Weight of social influence in adoption.",
+      "frozen": false
+    },
+    {
+      "key": "media_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluencePropagation",
+      "description": "Weight of external influence in adoption.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_alpha",
+      "dtype": "float",
+      "default": 2.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 5.0
+      },
+      "owner_module": "InfluencePropagation",
+      "description": "Alpha parameter of Beta for thresholds.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_beta",
+      "dtype": "float",
+      "default": 3.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 5.0
+      },
+      "owner_module": "InfluencePropagation",
+      "description": "Beta parameter of Beta for thresholds.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_noise_sigma",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "InfluencePropagation",
+      "description": "Gaussian noise on total adoption signal.",
+      "frozen": false
+    },
+    {
+      "key": "async_fraction",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "InfluencePropagation",
+      "description": "Fraction of agents updated per day.",
+      "frozen": false
+    },
+    {
+      "key": "neighbor_memory_window_days",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "InfluencePropagation",
+      "description": "Days for averaging neighbor adoption (EMA or window).",
+      "frozen": false
+    },
+    {
+      "key": "influence_decay_lambda",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluencePropagation",
+      "description": "Exponential decay per hop for multi-hop influence (0=off).",
+      "frozen": false
+    },
+    {
+      "key": "adoption_rule_code",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "InfluencePropagation",
+      "description": "0=linear threshold; 1=independent cascade hybrid.",
+      "frozen": true
+    },
+    {
+      "key": "decay_rate_daily",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "BehaviorDecayAndMemory",
+      "description": "Daily habit decay when not adopted.",
+      "frozen": false
+    },
+    {
+      "key": "relapse_prob_daily",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "BehaviorDecayAndMemory",
+      "description": "Base relapse probability per day (modulated by habit/fatigue).",
+      "frozen": false
+    },
+    {
+      "key": "habit_strength",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorDecayAndMemory",
+      "description": "Initial habit strength for all agents.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_accumulation_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "BehaviorDecayAndMemory",
+      "description": "Daily increase in fatigue while adopted.",
+      "frozen": false
+    },
+    {
+      "key": "recovery_rate_daily",
+      "dtype": "float",
+      "default": 0.03,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "BehaviorDecayAndMemory",
+      "description": "Daily decrease in fatigue while not adopted.",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "ObservationAggregator",
+      "description": "Window for moving average smoothing of observables.",
+      "frozen": false
+    },
+    {
+      "key": "report_lag_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 0,
+        "high": 7
+      },
+      "owner_module": "ObservationAggregator",
+      "description": "Reporting lag to align with observed data.",
+      "frozen": false
+    },
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 120,
+      "bounds": {
+        "low": 60,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total simulation length.",
+      "frozen": false
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG.",
+      "frozen": true
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 1000,
+        "high": 50000
+      },
+      "owner_module": "global",
+      "description": "Number of agents.",
+      "frozen": false
+    },
+    {
+      "key": "initial_adoption_fraction",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "global",
+      "description": "Fraction of agents initialized as adopted at t=0.",
+      "frozen": false
+    },
+    {
+      "key": "initial_media_exposure_mean",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial media_exposure attribute.",
+      "frozen": false
+    },
+    {
+      "key": "initial_threshold_correlation_with_degree",
+      "dtype": "float",
+      "default": -0.2,
+      "bounds": {
+        "low": -0.5,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Pearson correlation target between degree and threshold.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "time_series.csv:overall_adoption_rate"
+    },
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "count(Person.adopted_t) - count(Person.adopted_{t-1})",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "time_series.csv:new_adoptions"
+    },
+    {
+      "id": "observable.adoption_rate_by_community",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "by_group(community_id)",
+      "target_data_field": "community_daily.csv:adoption_rate_by_community"
+    },
+    {
+      "id": "observable.cumulative_adoptions",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "cumulative_sum(new_adoptions_daily)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "time_series.csv:cumulative_adoptions"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_overall_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "PeakError_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "window": 7
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeak",
+        "config": {
+          "unit": "days"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "initial_adoption_fraction": 0.02,
+    "time_horizon_days": 120,
+    "network_type_code": 0
+  },
+  "algorithms": {
+    "network_generation": "Watts\u2013Strogatz / Erdos\u2013Renyi / Barabasi\u2013Albert based on network_type_code with homophily-aware community assignment via label swapping.",
+    "influence_update": "Mixed linear threshold and independent cascade with additive media signal and Gaussian noise, optional asynchronous updates.",
+    "policy_media_schedule": "Piecewise-constant baseline with periodic pulses and policy window amplification with degree/community targeting.",
+    "habit_decay_relapse": "State-dependent habit reinforcement/decay with fatigue dynamics influencing relapse probability.",
+    "observation_smoothing": "Moving average smoothing and lagging to align simulated signals with observed reporting patterns."
+  },
+  "data_sources": [
+    {
+      "name": "time_series.csv",
+      "purpose": "Calibration of daily adoption rates and new adoptions; evaluation.",
+      "fields_used": [
+        "overall_adoption_rate",
+        "new_adoptions",
+        "cumulative_adoptions"
+      ]
+    },
+    {
+      "name": "community_daily.csv",
+      "purpose": "Calibration of community-level adoption heterogeneity.",
+      "fields_used": [
+        "community_id",
+        "date",
+        "adoption_rate_by_community"
+      ]
+    },
+    {
+      "name": "network_edges.csv",
+      "purpose": "Optional empirical network structure import.",
+      "fields_used": [
+        "source_id",
+        "target_id"
+      ]
+    },
+    {
+      "name": "communities.csv",
+      "purpose": "Optional empirical community assignments.",
+      "fields_used": [
+        "person_id",
+        "community_id"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: parses config, instantiates modules, runs simulation loop, computes metrics."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder with generators and community assignment."
+      },
+      {
+        "name": "modules/media_policy.py",
+        "description": "Implements MediaAndPolicy signals."
+      },
+      {
+        "name": "modules/influence.py",
+        "description": "Implements InfluencePropagation update rules."
+      },
+      {
+        "name": "modules/habit_decay.py",
+        "description": "Implements BehaviorDecayAndMemory."
+      },
+      {
+        "name": "modules/observation.py",
+        "description": "Implements ObservationAggregator and bindings to observables."
+      },
+      {
+        "name": "data/io.py",
+        "description": "Loading/saving datasets and config; provides data availability flags."
+      },
+      {
+        "name": "metrics/evaluation.py",
+        "description": "Implements RMSE, MAE, PeakError, TimeToPeak using observables and bound targets."
+      },
+      {
+        "name": "utils/rng.py",
+        "description": "Seeded random number utilities."
+      },
+      {
+        "name": "utils/graph_ops.py",
+        "description": "Graph queries, degree/community utilities, label swapping."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "scipy",
+      "pandas",
+      "networkx",
+      "scikit-learn"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 91,
+    "end_day": 120
+  },
+  "evaluation_metrics": [
+    "RMSE_overall_adoption",
+    "MAE_new_adoptions",
+    "PeakError_new_adoptions",
+    "TimeToPeak_new_adoptions"
+  ]
+}

@@ -1,0 +1,239 @@
+{
+  "summary": "The current simulation core is syntactically valid and adds helpful features (small-world network, multi-retailers, richer series). However, it contains a critical runtime bug (int(None) for max_time_steps), does not fully align with the task specification (missing entities/behaviors and metric names), and has logic gaps (policy end handling for None, stock dependency, and validation criteria). This feedback prioritizes fixing runtime blockers, aligning metrics and policy handling to spec, correcting inventory/consumption logic to satisfy stock dependency, and adding minimal validation hooks. Subsequent iterations should extend entities and interactions (Locations, MediaChannels, movement) and refine metrics.",
+  "critical_issues": [
+    {
+      "issue": "Runtime crash due to int(None) when reading max_time_steps",
+      "impact": "Simulation fails to start if DEFAULT_CONFIG['max_time_steps'] is None or if the user provides null; halts all execution.",
+      "solution": "Handle None explicitly before casting. If None or falsy, fall back to days.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "mandate_end_day incorrectly cast to int unconditionally and mandate status calculation does not handle None end correctly",
+      "impact": "Crashes when users supply null for indefinite mandates; incorrect mandate state when end is None.",
+      "solution": "Allow Optional[int]: use None when user provides null. In Government.issue_or_lift_mandate, treat None as open-ended.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Retailers instantiated even when with_supply is False",
+      "impact": "Produces misleading stockout series and inconsistent supply dynamics (retailer prices/stock adjust despite supply disabled).",
+      "solution": "Initialize retailers only if with_supply is True; otherwise keep retailers empty and gate stockout computations.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Inventory logic allows adoption without stock and does not consume masks daily",
+      "impact": "Violates the 'stock_dependency' validation; individuals can adopt without inventory, and continuing adopters do not consume masks each day, enabling unrealistically high sustained adoption when stock is zero.",
+      "solution": "Enforce daily consumption for every day a person uses a mask and disallow use when inventory is zero. Adjust step() to compute use_today and decrement inventory; prevent use_today when inventory is 0.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Metrics naming and coverage do not match specification",
+      "impact": "Downstream evaluation cannot find required metrics; important policy-related metrics (violation_rate, policy_effect_size, network_influence_index, stockout_frequency, sustained_adoption_rate) are missing or named differently.",
+      "solution": "Add or map metrics to the specified names; compute violation_rate, sustained_adoption_rate, policy_effect_size (simplified DiD), network_influence_index (alias neighbor_corr), and stockout_frequency.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No validation hooks for S-curve, monotonic policy response, no-influence sanity, and stock dependency",
+      "impact": "Incorrect model variants may pass unnoticed; no guardrails for core expected behaviors.",
+      "solution": "Add a validate() routine that runs controlled sub-scenarios to check the validation criteria and returns a report.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Decision uses static config price even when retailers dynamically adjust prices",
+      "impact": "Cost effect on adoption is inconsistent with actual market price; weakens policy and supply signal realism.",
+      "solution": "Use the retailer price observed during purchase or an average current market price; pass that to evaluate_mask_use_decision.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy handling (mandate duration and enforcement)",
+      "current_approach": "Mandate start and end are both integers; mandate_end_day cast to int, mandate status check uses chained comparison; enforcement tracked only as counts.",
+      "suggested_approach": "Allow mandate_end_day to be None (open-ended). Track violation_rate as visits under active mandate where non-compliance occurs. Keep enforcement monotonic by ensuring penalties/trust effects can only increase compliance.",
+      "expected_benefit": "Prevents runtime errors on null, improves policy metric interpretability, and supports monotonic policy response validation."
+    },
+    {
+      "aspect": "Supply and inventory constraints",
+      "current_approach": "Retailers exist even when supply is disabled. Adoption can occur even without inventory; only newly adopting individuals consume 1 mask once.",
+      "suggested_approach": "Instantiate retailers only if with_supply is True. Consume 1 mask per day of use. Disallow use if inventory is zero. Gate belief updates by influence weight to support 'no_influence_sanity_check.'",
+      "expected_benefit": "Satisfies stock_dependency validation and yields realistic supply-limited adoption dynamics."
+    },
+    {
+      "aspect": "Metrics alignment to task spec",
+      "current_approach": "Custom metric names and partial coverage (e.g., 'stockout_rate', 'peak_adoption').",
+      "suggested_approach": "Implement and/or alias to exact metric names: overall_adoption_rate, time_to_50_percent, peak_adoption_rate, sustained_adoption_rate, violation_rate, policy_effect_size, network_influence_index, stockout_frequency, adoption_inequality.",
+      "expected_benefit": "Compatibility with evaluation pipeline and clearer comparisons across runs."
+    },
+    {
+      "aspect": "Validation criteria checks",
+      "current_approach": "No explicit validation of S-curve, monotonic policy effects, sanity checks.",
+      "suggested_approach": "Add validate() method: run small sub-simulations to verify S-curve under social influence, monotonicity under higher enforcement/fine, near-constant adoption with zero influence/messaging/mandate (and zero risk update), and stock dependency with zero stock/restock.",
+      "expected_benefit": "Early detection of model regressions and improved scientific credibility."
+    },
+    {
+      "aspect": "Entities and interactions (alignment with spec)",
+      "current_approach": "Individuals, Households, Workplaces, Government, Retailers; missing Locations, PolicyMaker distinct class, and MediaChannel. No movement nor location-based enforcement/contexts.",
+      "suggested_approach": "Introduce minimal Location (home, work, public) with policy_strictness and enforcement_level; a MediaChannel that updates risk/trust with misinformation; movement using movement_matrix. Map PolicyMaker to Government with aligned attributes.",
+      "expected_benefit": "Closer adherence to spec and enables computation of violation_rate by location context."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Handle None for max_time_steps when computing self.days",
+      "reason": "Fixes critical runtime crash when DEFAULT_CONFIG has max_time_steps=None or user provides null.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Allow None for mandate_end_day and update issue_or_lift_mandate to handle open-ended mandates",
+      "reason": "Prevents cast errors and ensures correct mandate activation when end is None.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Initialize retailers only when with_supply is True; gate stockout series accordingly",
+      "reason": "Prevents misleading stockout computations and unwanted price dynamics when supply is disabled.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use actual retailer price in decision utility and track a last_market_price fallback",
+      "reason": "Aligns perceived cost with current market conditions.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Enforce daily mask consumption and disallow use without inventory; adjust step() to compute use_today and decrement inventory",
+      "reason": "Satisfies stock dependency and improves realism of inventory constraints.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Align evaluation metrics to spec, add aliases, and compute violation_rate, sustained_adoption_rate, policy_effect_size, network_influence_index, stockout_frequency, adoption_inequality",
+      "reason": "Ensures compatibility with the specified evaluation and richer policy insights.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Scale belief updates by peer influence weight to support 'no_influence_sanity_check'",
+      "reason": "Prevents unintended belief drift when social_influence_weight=0 in validation scenarios.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add a validate() method implementing the four validation_criteria",
+      "reason": "Provides automated checks for core behavioral properties and prevents regressions.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "Not computed; no difference-in-differences or trend control.",
+      "suggestion": "Implement DiD: compare mean adoption pre- vs. post-mandate after controlling for pre-trend via linear regression on pre-period. In absence of a control group, report pre/post delta with pre-trend adjustment."
+    },
+    {
+      "metric": "adoption_inequality",
+      "current_gap": "Computed as daily gini over income deciles but not reported under the required name.",
+      "suggestion": "Expose adoption_inequality as the average of daily gini; optionally report decile time series for diagnostic plots."
+    },
+    {
+      "metric": "network_influence_index",
+      "current_gap": "Neighbor correlation computed but not exposed under the required metric name.",
+      "suggestion": "Map neighbor_corr to network_influence_index and report the mean or final value; optionally include time series."
+    },
+    {
+      "metric": "violation_rate",
+      "current_gap": "Not tracked.",
+      "suggestion": "Count visits under active mandate (at locations or workplaces) and non-compliant instances; report total violations/visits and time series."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix int(None) for max_time_steps and allow None for mandate_end_day with correct mandate status handling.",
+    "Enforce daily mask consumption and disallow use without inventory; ensure adoption cannot exceed inventory when stock/restock are zero.",
+    "Instantiate retailers only when with_supply=True and gate stockout computations.",
+    "Align evaluation metrics to spec (naming and computation), including violation_rate, sustained_adoption_rate, policy_effect_size, network_influence_index, stockout_frequency, adoption_inequality.",
+    "Use retailer price in cost calculation for decisions.",
+    "Scale social belief updates by influence weight; add validate() harness for S-curve, monotonic policy response, no-influence sanity check, and stock dependency.",
+    "Plan and start implementing Locations, MediaChannels, and movement to fully meet the spec."
+  ],
+  "additional_comments": "There are many 'pass' statements left before code in methods; while harmless, removing them improves readability. The small-world network and added series are valuable improvements. To satisfy 'no_influence_sanity_check', consider also disabling risk_perception_update_rate during validation runs or make it configurable to 0 in the validation scenario.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "self.days = int(self.cfg.get(\"max_time_steps\", self.cfg.get(\"days\", 10)))",
+      "after": "val = self.cfg.get(\"max_time_steps\")\nself.days = int(self.cfg.get(\"days\", 10)) if val in (None, \"\", 0) else int(val)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.government = Government(\n    mandate_status=bool(self.cfg.get(\"mandate_enabled\", False)),\n    mandate_start_day=int(self.cfg.get(\"mandate_start_day\", 5)),\n    mandate_end_day=int(self.cfg.get(\"mandate_end_day\", 8)),\n    enforcement_probability=float(self.cfg.get(\"enforcement_probability\", 0.1)),\n    fine_amount=float(self.cfg.get(\"fine_amount\", 50.0)),\n    campaign_intensity=float(self.cfg.get(\"campaign_intensity\", 0.0)),\n)",
+      "after": "me = self.cfg.get(\"mandate_end_day\", 8)\nself.government = Government(\n    mandate_status=bool(self.cfg.get(\"mandate_enabled\", False)),\n    mandate_start_day=int(self.cfg.get(\"mandate_start_day\", 5)),\n    mandate_end_day=(None if me is None else int(me)),\n    enforcement_probability=float(self.cfg.get(\"enforcement_probability\", 0.1)),\n    fine_amount=float(self.cfg.get(\"fine_amount\", 50.0)),\n    campaign_intensity=float(self.cfg.get(\"campaign_intensity\", 0.0)),\n)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def issue_or_lift_mandate(self, day: int) -> None:\n    \"\"\"Issue or lift mandate based on schedule.\"\"\"\n    pass\n    self.mandate_status = self.mandate_start_day <= day <= self.mandate_end_day",
+      "after": "def issue_or_lift_mandate(self, day: int) -> None:\n    \"\"\"Issue or lift mandate based on schedule (None end means open-ended).\"\"\"\n    self.mandate_status = (day >= self.mandate_start_day) and (\n        self.mandate_end_day is None or day <= self.mandate_end_day\n    )",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# FIXED: Initialize multiple retailers with per-retailer inventory and pricing\nretailer_count = int(self.cfg.get(\"retailer_count\", 1))\n...\nself.retailers: List[Retailer] = [\n    Retailer(...)\n    for r in range(retailer_count)\n]",
+      "after": "# Initialize multiple retailers only if supply is enabled\nself.retailers: List[Retailer] = []\nif self.with_supply:\n    retailer_count = int(self.cfg.get(\"retailer_count\", 1))\n    total_initial_stock = int(self.cfg.get(\"supply_initial_stock\", 0))\n    per_retailer_stock = total_initial_stock // max(1, retailer_count)\n    per_restock = int(self.cfg.get(\"daily_supply_restock\", 0)) // max(1, retailer_count)\n    self.retailers = [\n        Retailer(\n            id=r,\n            inventory=per_retailer_stock,\n            price=float(self.cfg.get(\"mask_price\", 2.0)),\n            restock_rate=per_restock,\n            supply_allocation_quota=0,\n        )\n        for r in range(retailer_count)\n    ]",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Peer share\npeer_share = sum(1 for j in p.network_neighbors if self.people[j].current_mask_use) / max(1, len(p.network_neighbors))\n# Influence beliefs\np.update_beliefs_from_social_influence(peer_share, update_rate=0.1 * p.influenceability)",
+      "after": "# Peer share\npeer_share = sum(1 for j in p.network_neighbors if self.people[j].current_mask_use) / max(1, len(p.network_neighbors))\n# Influence beliefs (scale by peer influence weight to support sanity check)\np.update_beliefs_from_social_influence(peer_share, update_rate=peer_w * 0.1 * p.influenceability)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# If supply is active and agent has no inventory, attempt purchase from a retailer\nprice = float(self.cfg.get(\"mask_price\", self.supply.get(\"price\", 2.0)))\nif self.with_supply and p.mask_inventory <= 0 and self.retailers:\n    r = self.rng.choice(self.retailers)\n    r_inventory = {\"stock\": r.inventory}\n    bought = p.purchase_masks_from_retailer(price=r.price, inventory=r_inventory, rng=self.rng)\n    r.inventory = r_inventory[\"stock\"]\nelif self.with_supply and p.mask_inventory <= 0 and not self.retailers:\n    p.purchase_masks_from_retailer(price=price, inventory=self.supply, rng=self.rng)\n...\ndecision = p.evaluate_mask_use_decision(..., price=price, ...)",
+      "after": "# If supply is active and agent has no inventory, attempt purchase from a retailer\nbase_price = float(self.cfg.get(\"mask_price\", self.supply.get(\"price\", 2.0)))\nlast_market_price = base_price\nif self.with_supply and p.mask_inventory <= 0 and self.retailers:\n    r = self.rng.choice(self.retailers)\n    r_inventory = {\"stock\": r.inventory}\n    bought = p.purchase_masks_from_retailer(price=r.price, inventory=r_inventory, rng=self.rng)\n    r.inventory = r_inventory[\"stock\"]\n    last_market_price = r.price\nelif self.with_supply and p.mask_inventory <= 0 and not self.retailers:\n    p.purchase_masks_from_retailer(price=base_price, inventory=self.supply, rng=self.rng)\n    last_market_price = base_price\n...\ndecision = p.evaluate_mask_use_decision(..., price=last_market_price, ...)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# If adopting and with supply, consume mask inventory if newly adopting\nif decision and self.with_supply and p.mask_inventory > 0 and not p.current_mask_use:\n    p.mask_inventory -= 1\n\nnew_states.append(decision)",
+      "after": "# Enforce daily consumption and disallow use without inventory\nuse_today = decision\nif self.with_supply:\n    if use_today and p.mask_inventory > 0:\n        p.mask_inventory -= 1\n    elif use_today and p.mask_inventory <= 0:\n        use_today = False\n\n# Track violations under mandate (visit proxy: one workplace/public visit per day)\nif mandate_active:\n    self._visits_under_mandate += 1\n    if not use_today:\n        self._violations_under_mandate += 1\n\nnew_states.append(use_today)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate(self, evaluation_metrics: Optional[List[str]] = None) -> Dict[str, Any]:\n    ...\n    for name in metrics:\n        if name == \"adoption_rate_over_time\":\n            results[name] = adoption_series\n        elif name == \"mean_adoption\":\n            ...\n        elif name == \"stockout_rate\":\n            ...\n        elif name == \"spillover_persistence\":\n            ...",
+      "after": "def evaluate(self, evaluation_metrics: Optional[List[str]] = None) -> Dict[str, Any]:\n    metrics = evaluation_metrics if evaluation_metrics is not None else self.cfg.get(\"evaluation_metrics\", [])\n    name_map = {\n        \"overall_adoption_rate\": \"adoption_rate_over_time\",\n        \"peak_adoption_rate\": \"peak_adoption\",\n        \"stockout_frequency\": \"stockout_rate\",\n        \"adoption_inequality\": \"adoption_inequality_index\",\n        \"network_influence_index\": \"neighbor_corr_mean\"\n    }\n    # Precompute helper aggregates\n    neighbor_corr_series = self.series.get(\"neighbor_corr\", [])\n    neighbor_corr_mean = sum(neighbor_corr_series) / len(neighbor_corr_series) if neighbor_corr_series else 0.0\n    results: Dict[str, Any] = {}\n    for name in metrics:\n        key = name_map.get(name, name)\n        if key == \"adoption_rate_over_time\":\n            results[name] = adoption_series\n        elif key == \"mean_adoption\":\n            results[name] = sum(adoption_series) / len(adoption_series)\n        elif key == \"time_to_50_percent\":\n            ...  # unchanged window logic\n        elif key == \"peak_adoption\":\n            ...  # unchanged\n        elif key == \"adoption_inequality_index\":\n            ...  # unchanged gini average\n        elif key == \"neighbor_corr_mean\":\n            results[name] = neighbor_corr_mean\n        elif key == \"stockout_rate\":\n            ...  # unchanged but returned under stockout_frequency alias\n        elif key == \"sustained_adoption_rate\":\n            # mean adoption after mandate end or after day threshold\n            end = self.government.mandate_end_day\n            start_idx = (end + 1) if (end is not None and end + 1 < len(adoption_series)) else max(0, len(adoption_series) - 7)\n            tail = adoption_series[start_idx:]\n            results[name] = (sum(tail) / len(tail)) if tail else None\n        elif key == \"violation_rate\":\n            denom = max(1, self._visits_under_mandate)\n            results[name] = self._violations_under_mandate / denom\n        elif key == \"policy_effect_size\":\n            # Simple pre/post difference adjusted by pre-trend\n            start = self.government.mandate_start_day\n            pre_end = max(0, min(start - 1, len(adoption_series) - 1))\n            pre_start = max(0, pre_end - 6)\n            post_start = min(len(adoption_series) - 1, start + 1)\n            post_end = min(len(adoption_series) - 1, post_start + 6)\n            pre = adoption_series[pre_start: pre_end + 1]\n            post = adoption_series[post_start: post_end + 1]\n            pre_mean = sum(pre) / len(pre) if pre else 0.0\n            post_mean = sum(post) / len(post) if post else 0.0\n            # Approximate pre-trend slope\n            if len(pre) >= 2:\n                slope = (pre[-1] - pre[0]) / (len(pre) - 1)\n            else:\n                slope = 0.0\n            expected_post = pre[-1] + slope * (len(post) - 1) if pre else 0.0\n            results[name] = (post_mean - pre_mean) - (expected_post - pre[-1] if pre else 0.0)\n        else:\n            results[name] = None",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def initialize(self) -> None:\n    ...\n    # Results\n    self.series: Dict[str, List[float]] = {\n        \"adoption_rate\": [],\n        \"mandate_active\": [],\n        \"retailer_stockout_share\": [],\n        \"neighbor_corr\": [],\n        \"daily_gini\": [],\n    }\n    self.metrics: Dict[str, Any] = {}\n    self.enforcement_actions: int = 0\n    self.policy_cost_total: float = 0.0\n    self.stockout_days: int = 0\n    self.retailer_stockout_days: int = 0",
+      "after": "def initialize(self) -> None:\n    ...\n    # Counters and series\n    self.series = {\n        \"adoption_rate\": [],\n        \"mandate_active\": [],\n        \"retailer_stockout_share\": [],\n        \"neighbor_corr\": [],\n        \"daily_gini\": [],\n    }\n    self.metrics = {}\n    self.enforcement_actions = 0\n    self.policy_cost_total = 0.0\n    self.stockout_days = 0\n    self.retailer_stockout_days = 0\n    self._violations_under_mandate = 0\n    self._visits_under_mandate = 0",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes substantially improved the core (small-world network, richer time series, multi-retailer support, workplace parameters). However, they introduced a critical runtime bug (int(None) for max_time_steps) and created interpretability issues by instantiating retailers when supply is disabled. Metric naming still diverges from the spec, and validation criteria are not implemented.",
+    "positive_impacts": [
+      "Added Watts\u2013Strogatz small-world network with rewiring.",
+      "Introduced multi-retailer structure with allocation and price adjustment.",
+      "Extended time series collection (neighbor correlation, Gini).",
+      "Improved CLI and self-test payload."
+    ],
+    "negative_impacts": [
+      "Critical crash due to int(None) on max_time_steps.",
+      "Retailers created even with with_supply=False, confusing stockout metrics.",
+      "Policy end handling does not support None (open-ended mandates).",
+      "Metrics names and coverage still not aligned with spec."
+    ],
+    "suggestions": [
+      "Patch the days calculation and mandate_end handling as first fixes.",
+      "Gate retailer initialization under with_supply and align price usage in decision utility.",
+      "Add metrics aliasing and missing metrics to match spec.",
+      "Implement a minimal validate() function for S-curve, monotonicity, sanity, and stock dependency checks.",
+      "Plan the addition of Location and MediaChannel entities to fully meet the task specification."
+    ]
+  }
+}

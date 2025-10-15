@@ -14,6 +14,7 @@ from agents.data_analysis_odd.agent import DataAnalysisAgent as DataAnalysisOddA
 from agents.model_planning.agent import ModelPlanningAgent
 from agents.code_generation.agent import CodeGenerationAgent
 from agents.code_generation_odd.agent import CodeGenerationAgent as CodeGenerationOddAgent
+from agents.code_generation_calibrasim.agent import CodeGenerationCalibrasimAgent
 from agents.code_verification.agent import CodeVerificationAgent
 from agents.simulation_execution.agent import SimulationExecutionAgent
 from agents.result_evaluation.agent import ResultEvaluationAgent
@@ -105,7 +106,7 @@ class AgentContainer(containers.DeclarativeContainer):
     )
     
     code_generation_calibrasim_agent = providers.Factory(
-        CodeGenerationAgent,
+        CodeGenerationCalibrasimAgent,
         config=config.agents.code_generation_calibrasim
     )
     

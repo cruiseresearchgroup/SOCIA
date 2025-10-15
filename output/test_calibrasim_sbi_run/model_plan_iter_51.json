@@ -1,0 +1,882 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based social adoption model on a dynamic contact network with policy-driven exogenous exposure and heterogeneous thresholds/susceptibility. The model simulates daily interactions, influence accumulation, adoption and abandonment, and aggregates observables to match external data.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id:int",
+        "group:str",
+        "degree_preference:int",
+        "susceptibility:float",
+        "threshold:float",
+        "adopted:bool",
+        "aware:bool",
+        "satisfaction:float",
+        "last_adopted_day:int",
+        "last_drop_day:int"
+      ],
+      "behaviors": [
+        "interact_with_active_contacts",
+        "accumulate_influence",
+        "decide_adoption_or_abandonment",
+        "update_satisfaction_and_awareness"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "population_size": 5000,
+          "group_share_A": 0.5,
+          "susceptibility_logmean": -1.0,
+          "susceptibility_logstd": 0.5,
+          "threshold_alpha": 2.0,
+          "threshold_beta": 5.0,
+          "initial_adoption_fraction": 0.02,
+          "aware_fraction": 0.1
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "SocialNetworkBuilder",
+      "description": "Constructs the initial contact network with homophily and clustering using a degree-corrected SBM and triadic closure.",
+      "inputs": [],
+      "outputs": [
+        "signal.network_graph",
+        "signal.node_groups",
+        "signal.node_degrees"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  N = parameters.population_size\n  nA = round(N * parameters.group_share_A)\n  assign first nA nodes to group 'A', rest to 'B'\n  sample degree targets k_i ~ NegBin(mean=parameters.average_degree, dispersion=parameters.degree_dispersion_k)\n  construct DC-SBM probabilities P[group_u, group_v] with homophily parameters.homophily_index\n  generate multi-graph by stub-matching with group-aware probabilities, then simplify to simple graph\n  apply triadic closure: for each node, with prob parameters.clustering_triads_prob, connect two neighbors if not already connected\n  output signal.network_graph, signal.node_groups, signal.node_degrees\nelse:\n  pass",
+        "notes": [
+          "Degree-corrected SBM uses group mixing matrix derived from homophily_index: higher value increases within-group edge probability.",
+          "Triadic closure approximates clustering coefficient."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "networkx"
+      ],
+      "module_parameters": [
+        "average_degree",
+        "degree_dispersion_k",
+        "homophily_index",
+        "clustering_triads_prob",
+        "group_share_A"
+      ]
+    },
+    {
+      "name": "TemporalContactActivation",
+      "description": "Activates a daily subset of edges and performs low-rate rewiring to reflect changing contacts.",
+      "inputs": [
+        "signal.network_graph",
+        "signal.node_groups"
+      ],
+      "outputs": [
+        "signal.active_contacts"
+      ],
+      "dependencies": [
+        "SocialNetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "G = signal.network_graph\nactive_edges = []\n# Edge activation\nfor each edge (u, v) in G.edges:\n  if Bernoulli(parameters.edge_activation_rate_daily) == 1:\n    active_edges.append((u, v))\n# Rewiring (degree-preserving at low rate)\nfor each node u in G.nodes:\n  if Bernoulli(parameters.rewiring_rate) == 1:\n    pick neighbor v uniformly\n    pick candidate w from nodes with same group as u and not connected to u\n    if such w exists:\n      remove edge (u, v); add edge (u, w)\n# Output active contacts\nsignal.active_contacts = active_edges",
+        "notes": [
+          "Activation models day-level contact opportunities.",
+          "Rewiring preserves degree but adjusts partners, maintaining homophily via candidate selection."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "networkx"
+      ],
+      "module_parameters": [
+        "edge_activation_rate_daily",
+        "rewiring_rate"
+      ]
+    },
+    {
+      "name": "PolicyCampaign",
+      "description": "Allocates daily exogenous exposure to agents based on budget and targeting strategy; modifies effective thresholds via exposure.",
+      "inputs": [
+        "signal.network_graph",
+        "signal.node_groups",
+        "state.person_adopted"
+      ],
+      "outputs": [
+        "policy.exposure_vector",
+        "policy.threshold_reduction_vector"
+      ],
+      "dependencies": [
+        "SocialNetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t < parameters.campaign_start_day or t > parameters.campaign_end_day:\n  exposure_i = parameters.exogenous_exposure_base for all i\n  thresh_red_i = 0 for all i\nelse:\n  base = parameters.exogenous_exposure_base\n  B = parameters.campaign_budget_per_day\n  dollars_per_person = strategy_allocation(parameters.targeting_strategy, signal.network_graph, signal.node_groups, state.person_adopted)\n  for each person i:\n    addl_exposure = dollars_per_person[i] * parameters.exposure_per_dollar\n    effective_exposure = base + addl_exposure\n    if Bernoulli(parameters.compliance_probability) == 1:\n      exposure_i = effective_exposure\n      thresh_red_i = parameters.threshold_reduction_per_exposure * effective_exposure\n    else:\n      exposure_i = base\n      thresh_red_i = 0\npolicy.exposure_vector = exposure_i\npolicy.threshold_reduction_vector = thresh_red_i",
+        "notes": [
+          "strategy_allocation returns a per-person budget allocation vector summing to B.",
+          "Examples: 'degree_top10' allocates proportionally to node degree among top decile; 'random' uniform; 'group_A_priority' allocates more to group A."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "campaign_budget_per_day",
+        "targeting_strategy",
+        "exogenous_exposure_base",
+        "exposure_per_dollar",
+        "threshold_reduction_per_exposure",
+        "compliance_probability",
+        "campaign_start_day",
+        "campaign_end_day"
+      ]
+    },
+    {
+      "name": "InteractionDynamics",
+      "description": "Computes social influence, applies adoption and abandonment, and updates individual states.",
+      "inputs": [
+        "signal.active_contacts",
+        "policy.exposure_vector",
+        "policy.threshold_reduction_vector"
+      ],
+      "outputs": [
+        "state.person_adopted",
+        "event.new_adoptions",
+        "event.dropouts",
+        "state.satisfaction"
+      ],
+      "dependencies": [
+        "TemporalContactActivation",
+        "PolicyCampaign"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "initialize counts: new_adopts = 0, dropouts = 0\n# Influence accumulation per person\nfor each person i:\n  active_adopting_neighbors = number of neighbors j where (i, j) in signal.active_contacts and adopted[j] == True\n  social_infl = parameters.influence_weight_per_contact * active_adopting_neighbors\n  if active_adopting_neighbors >= 2:\n    social_infl *= (1.0 + parameters.reinforcement_synergy)\n  exog = policy.exposure_vector[i]\n  infl = parameters.baseline_adoption_exposure + social_infl + exog\n  eff_threshold = threshold[i] - policy.threshold_reduction_vector[i]\n  eff_threshold = max(0.0, min(1.0, eff_threshold))\n  perceived = infl * susceptibility[i]\n  # Adoption decision\n  if adopted[i] == False:\n    if (t - last_drop_day[i]) >= parameters.refractory_period_days:\n      if perceived >= eff_threshold:\n        adopted_next[i] = True\n        last_adopted_day[i] = t\n        satisfaction[i] += 1.0\n        new_adopts += 1\n      else:\n        adopted_next[i] = False\n    else:\n      adopted_next[i] = False\n  else:\n    # Abandonment hazard\n    hazard = parameters.abandonment_hazard_base * exp(-satisfaction[i])\n    if parameters.adoption_is_absorbing == True:\n      hazard = 0.0\n    if Bernoulli(hazard) == 1:\n      adopted_next[i] = False\n      last_drop_day[i] = t\n      dropouts += 1\n    else:\n      adopted_next[i] = True\n  # Satisfaction update\n  if active_adopting_neighbors > 0:\n    satisfaction[i] = min(satisfaction[i] + 0.5, 10.0)\n  else:\n    satisfaction[i] = max(satisfaction[i] - parameters.satisfaction_decay_rate, 0.0)\n# Commit updates\nadopted = adopted_next\noutput state.person_adopted, event.new_adoptions = new_adopts, event.dropouts = dropouts, state.satisfaction",
+        "notes": [
+          "Linear-threshold-like rule with heterogeneous thresholds and susceptibilities.",
+          "Refractory period prevents immediate re-adoption after dropout.",
+          "Satisfaction moderates abandonment."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "baseline_adoption_exposure",
+        "influence_weight_per_contact",
+        "susceptibility_logmean",
+        "susceptibility_logstd",
+        "threshold_alpha",
+        "threshold_beta",
+        "abandonment_hazard_base",
+        "satisfaction_decay_rate",
+        "adoption_is_absorbing",
+        "reinforcement_synergy",
+        "refractory_period_days"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily and cumulative adoption observables with optional smoothing and reporting delay.",
+      "inputs": [
+        "state.person_adopted",
+        "event.new_adoptions",
+        "signal.node_groups",
+        "policy.exposure_vector"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adoptions_daily",
+        "observable.cumulative_adoption",
+        "observable.groupA_adoption_rate_daily",
+        "observable.groupB_adoption_rate_daily",
+        "observable.campaign_exposure_daily_avg",
+        "observable.time_to_50_day"
+      ],
+      "dependencies": [
+        "InteractionDynamics",
+        "PolicyCampaign",
+        "SocialNetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "N = number of persons\nadopted_count = sum(state.person_adopted)\nrate = adopted_count / N\nnew_rate = event.new_adoptions / N\ncum = previous_cum + new_rate\n# By group\nA_idx = indices where signal.node_groups == 'A'\nB_idx = indices where signal.node_groups == 'B'\nrate_A = mean(state.person_adopted[A_idx])\nrate_B = mean(state.person_adopted[B_idx])\n# Exposure average\nexp_avg = mean(policy.exposure_vector)\n# Reporting delay buffer\npush (rate, new_rate, cum, rate_A, rate_B, exp_avg) into a FIFO buffer of length parameters.reporting_delay_days\nif buffer not yet full:\n  emit zeros or last known values\nelse:\n  emit buffered oldest values, optionally smoothed by moving average of window parameters.smoothing_window_days\n# Time to 50% computed once when cumulative first crosses 0.5\nif not set time_to_50:\n  if cum >= 0.5:\n    observable.time_to_50_day = t\nelse:\n  keep previous value",
+        "notes": [
+          "Smoothing applies a centered moving average to mitigate noise.",
+          "If reporting_delay_days = 0, values are emitted immediately."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "collections.deque"
+      ],
+      "module_parameters": [
+        "reporting_delay_days",
+        "smoothing_window_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 120,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": false
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Length of a time step in days.",
+      "frozen": true
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 500,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of agents in the simulation.",
+      "frozen": false
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG to ensure reproducibility.",
+      "frozen": false
+    },
+    {
+      "key": "prediction_start_day",
+      "dtype": "int",
+      "default": 30,
+      "bounds": {
+        "low": 1,
+        "high": 350
+      },
+      "owner_module": "global",
+      "description": "Start day (inclusive) for prediction/evaluation window.",
+      "frozen": false
+    },
+    {
+      "key": "prediction_end_day",
+      "dtype": "int",
+      "default": 39,
+      "bounds": {
+        "low": 2,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "End day (inclusive) for prediction/evaluation window.",
+      "frozen": false
+    },
+    {
+      "key": "average_degree",
+      "dtype": "float",
+      "default": 8.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 50.0
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Target average degree of the network.",
+      "frozen": false
+    },
+    {
+      "key": "degree_dispersion_k",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.5,
+        "high": 3.0
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Dispersion (shape) parameter for negative binomial degree heterogeneity.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_index",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.95
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Probability tilt toward within-group edges; 0=no homophily, 0.95=strong.",
+      "frozen": false
+    },
+    {
+      "key": "clustering_triads_prob",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.6
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Probability of adding a triadic closure edge per node to increase clustering.",
+      "frozen": false
+    },
+    {
+      "key": "group_share_A",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.9
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Share of population assigned to group A; remainder to group B.",
+      "frozen": false
+    },
+    {
+      "key": "edge_activation_rate_daily",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "TemporalContactActivation",
+      "description": "Probability that a given edge is active on a given day.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "TemporalContactActivation",
+      "description": "Daily probability per node of rewiring one connection to a same-group non-neighbor.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_budget_per_day",
+      "dtype": "float",
+      "default": 1000.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 100000.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Daily budget allocated to exogenous exposure.",
+      "frozen": false
+    },
+    {
+      "key": "targeting_strategy",
+      "dtype": "categorical",
+      "default": "degree_top10",
+      "bounds": null,
+      "owner_module": "PolicyCampaign",
+      "description": "Targeting scheme: one of ['random','degree_top10','group_A_priority','recent_nonadopters'].",
+      "frozen": false
+    },
+    {
+      "key": "exogenous_exposure_base",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Baseline exposure applied uniformly to all agents daily.",
+      "frozen": false
+    },
+    {
+      "key": "exposure_per_dollar",
+      "dtype": "float",
+      "default": 2e-05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.001
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Incremental exposure gained per budget dollar allocated to an agent.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_reduction_per_exposure",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Reduction applied to adoption threshold per unit of exposure.",
+      "frozen": false
+    },
+    {
+      "key": "compliance_probability",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Probability an agent responds to offered exposure.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_start_day",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 0,
+        "high": 120
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "First day of policy campaign activity.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_end_day",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 1,
+        "high": 365
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Last day of policy campaign activity.",
+      "frozen": false
+    },
+    {
+      "key": "baseline_adoption_exposure",
+      "dtype": "float",
+      "default": 0.005,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Background rate of adoption pressure independent of contacts or policy.",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_per_contact",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.05,
+        "high": 1.0
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Incremental influence contributed by each adopting active neighbor.",
+      "frozen": false
+    },
+    {
+      "key": "susceptibility_logmean",
+      "dtype": "float",
+      "default": -1.0,
+      "bounds": {
+        "low": -3.0,
+        "high": 1.0
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Log-mean of lognormal susceptibility distribution at initialization.",
+      "frozen": false
+    },
+    {
+      "key": "susceptibility_logstd",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.5
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Log-standard deviation of susceptibility distribution.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_alpha",
+      "dtype": "float",
+      "default": 2.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 5.0
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Alpha parameter of Beta distribution for adoption thresholds.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_beta",
+      "dtype": "float",
+      "default": 5.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 10.0
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Beta parameter of Beta distribution for adoption thresholds.",
+      "frozen": false
+    },
+    {
+      "key": "abandonment_hazard_base",
+      "dtype": "float",
+      "default": 0.001,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.02
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Base daily hazard of abandonment before satisfaction effects.",
+      "frozen": false
+    },
+    {
+      "key": "satisfaction_decay_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Daily reduction in satisfaction when unsupported by neighbors.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_is_absorbing",
+      "dtype": "bool",
+      "default": false,
+      "bounds": null,
+      "owner_module": "InteractionDynamics",
+      "description": "If true, adopted agents never abandon.",
+      "frozen": false
+    },
+    {
+      "key": "reinforcement_synergy",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Nonlinear boost to social influence when at least two adopting neighbors are active.",
+      "frozen": false
+    },
+    {
+      "key": "refractory_period_days",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 0,
+        "high": 60
+      },
+      "owner_module": "InteractionDynamics",
+      "description": "Minimum days after dropout before re-adoption is allowed.",
+      "frozen": false
+    },
+    {
+      "key": "reporting_delay_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 7
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Number of days by which reported observables are delayed.",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 7
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Moving average window for observable smoothing.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "event.new_adoptions / population_size",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:new_adoptions"
+    },
+    {
+      "id": "observable.cumulative_adoption",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "cumulative(sum(event.new_adoptions))/population_size",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:cumulative_adoption"
+    },
+    {
+      "id": "observable.groupA_adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted | group=='A')",
+      "frequency": "daily",
+      "aggregation": "by_group(group)",
+      "target_data_field": "train_data.csv:groupA_adoption_rate"
+    },
+    {
+      "id": "observable.groupB_adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted | group=='B')",
+      "frequency": "daily",
+      "aggregation": "by_group(group)",
+      "target_data_field": "train_data.csv:groupB_adoption_rate"
+    },
+    {
+      "id": "observable.campaign_exposure_daily_avg",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(policy.exposure_vector)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:campaign_exposure_avg"
+    },
+    {
+      "id": "observable.time_to_50_day",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "min t such that cumulative_adoption(t) >= 0.5",
+      "frequency": "once",
+      "aggregation": "min",
+      "target_data_field": "train_summary.json:time_to_50_day"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_overall",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true,
+          "window": [
+            0,
+            "time_horizon_days"
+          ]
+        }
+      }
+    },
+    {
+      "name": "RMSE_new",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true,
+          "window": [
+            0,
+            "time_horizon_days"
+          ]
+        }
+      }
+    },
+    {
+      "name": "RMSE_groupA",
+      "inputs": [
+        "observable.groupA_adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true,
+          "window": [
+            0,
+            "time_horizon_days"
+          ]
+        }
+      }
+    },
+    {
+      "name": "RMSE_groupB",
+      "inputs": [
+        "observable.groupB_adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true,
+          "window": [
+            0,
+            "time_horizon_days"
+          ]
+        }
+      }
+    },
+    {
+      "name": "TimeTo50AbsError",
+      "inputs": [
+        "observable.time_to_50_day"
+      ],
+      "definition": {
+        "type": "AbsoluteError",
+        "config": {
+          "target_field": "train_summary.json:time_to_50_day"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1.0,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "initial_adoption_fraction": 0.02,
+    "aware_fraction": 0.1,
+    "group_share_A": 0.5,
+    "threshold_distribution": {
+      "type": "Beta",
+      "alpha": 2.0,
+      "beta": 5.0
+    },
+    "susceptibility_distribution": {
+      "type": "LogNormal",
+      "logmean": -1.0,
+      "logstd": 0.5
+    }
+  },
+  "algorithms": {
+    "DegreeCorrectedSBM_with_TriadicClosure": "Generates a homophilous, clustered contact network with prescribed degree heterogeneity.",
+    "DailyEdgeActivation": "Bernoulli activation of edges each day to model contact opportunities.",
+    "TargetedExposureAllocation": "Allocates campaign budget by strategy to maximize or shape exposure.",
+    "WeightedLinearThreshold_Heterogeneous": "Adoption occurs when susceptibility-weighted influence plus exogenous exposure exceeds an agent-specific threshold.",
+    "SatisfactionModulatedAbandonment": "Adopted agents abandon with a hazard decreasing in satisfaction, which evolves by social reinforcement and decay."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and evaluation of daily adoption metrics.",
+      "fields_used": [
+        "adoption_rate",
+        "new_adoptions",
+        "cumulative_adoption",
+        "groupA_adoption_rate",
+        "groupB_adoption_rate",
+        "campaign_exposure_avg"
+      ]
+    },
+    {
+      "name": "train_summary.json",
+      "purpose": "Evaluation of event timing metrics.",
+      "fields_used": [
+        "time_to_50_day"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.py",
+        "description": "Parameter definitions, validation, and loading."
+      },
+      {
+        "name": "entities.py",
+        "description": "Data structures for Person and state containers."
+      },
+      {
+        "name": "module_network.py",
+        "description": "SocialNetworkBuilder and TemporalContactActivation implementations."
+      },
+      {
+        "name": "module_policy.py",
+        "description": "PolicyCampaign implementation and targeting strategies."
+      },
+      {
+        "name": "module_dynamics.py",
+        "description": "InteractionDynamics implementation."
+      },
+      {
+        "name": "module_aggregation.py",
+        "description": "AdoptionAggregator and observable computations."
+      },
+      {
+        "name": "runner.py",
+        "description": "Simulation loop, scheduling, seeding, and I/O bindings."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric computation using observables and target data bindings."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_overall",
+    "RMSE_new",
+    "RMSE_groupA",
+    "RMSE_groupB",
+    "TimeTo50AbsError"
+  ]
+}

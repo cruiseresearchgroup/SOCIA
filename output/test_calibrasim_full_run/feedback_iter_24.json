@@ -1,0 +1,197 @@
+{
+  "summary": "The simulation runs and includes social influence, household norms, policy enforcement, retail supply, and aggregate adoption metrics. However, it substantially diverges from the specified task: no disease transmission or related health states/metrics; several entities and metrics from the spec are missing; and there is a key retailer stock reconciliation bug that can distort supply dynamics. Recent changes improved robustness (topological sorting, buffer commit ordering, length clamping, rationing), but the retailer bug persists. The next iteration should prioritize adding a disease module, aligning entities/metrics to the spec, and fixing the stock reconciliation.",
+  "critical_issues": [
+    {
+      "issue": "No disease transmission dynamics or health states/metrics implemented",
+      "impact": "Precludes assessing mask effects on infections, Rt, or policy efficacy; violates core task requirements",
+      "solution": "Add a DiseaseTransmissionModule with an S(E)IR state machine on Person. Use location visits and mask decisions to modulate transmission via source control and wearer protection. Track daily incidence, cumulative infections, and compute Rt.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Retailer stock reconciliation bug in commit phase",
+      "impact": "Unpurchased allocated units returned to stock are overwritten by state_updates['retailer']['stock'], causing underestimation of inventory and distorted price dynamics",
+      "solution": "Apply retailer state update first and then add unspent_back_to_stock, or incorporate unspent_back_to_stock into the applied new stock. See code snippet to sum into ret_upd['stock'] before setting.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing required entities/attributes (MediaChannel, full GovernmentAuthority, Location schedule) and alignment of Person attributes",
+      "impact": "Cannot represent policy schedules, media/misinformation processes per spec; hinders fidelity and policy experiments",
+      "solution": "Add MediaChannel entity and integrate into MessagingAndRiskModule; extend PublicHealthAuthority with policy_schedule, subsidy_level, distribution_program_active; extend Person with health_state, age_group, mask_status, compliance_probability (naming alignment), workplace_id, perceived_cost/benefit.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing key metrics: equity_gap_in_adoption, compliance_rate_in_mandated_locations, average_mask_availability, policy_cost, peak_adoption_rate, npi_effectiveness",
+      "impact": "Limits evaluation of policy equity and program performance; deviates from specified outputs",
+      "solution": "Compute and store these metrics daily and in evaluation summary. Use venue counters for compliance, per-capita inventory for availability, and a policy cost accumulator.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Static mandate level; no policy schedule/mandate_start_day handling; subsidies not applied",
+      "impact": "Cannot model time-varying policy interventions or the effect of subsidies/distribution programs on adoption",
+      "solution": "In PolicyAndEnforcementModule, drive authority.mandate_level by t against policy_schedule/mandate_start_day. In DecisionAndAdoptionModule, reduce effective price by subsidy for target groups; optionally add distribution program events to increase inventory for eligible agents.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Calibration performance may be slow due to full N and T for each trial",
+      "impact": "Excessive runtime during calibration, risking timeouts in constrained environments",
+      "solution": "Downscale population_size and simulation_duration_days for calibration trials, or set a calibration_mode flag. Cache ground truth and avoid per-trial IO when possible.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Disease transmission coupling to mask use",
+      "current_approach": "None",
+      "suggested_approach": "Implement S(E)IR on Person with health_state and timers. During MobilityAndLocationModule visits, compute contacts and potential transmissions adjusted by mask usage (source control and wearer protection) and contact modifiers. Add DiseaseTransmissionModule to process infections, recoveries, and track incidence and Rt.",
+      "expected_benefit": "Enables evaluating mask policies on disease outcomes; aligns with task requirements and supports Rt/npi_effectiveness metrics."
+    },
+    {
+      "aspect": "Policy schedule and subsidies",
+      "current_approach": "Static mandate_level; no subsidy/distribution",
+      "suggested_approach": "Add policy_schedule or mandate_start_day handling to vary mandate_level over time. Implement subsidy_amount reducing effective price for selected groups (e.g., low-income tercile). Implement distribution_program_active that grants free masks (inventory boosts) on scheduled days.",
+      "expected_benefit": "Supports realistic policy scenarios and equity interventions; improves adoption realism and equity metrics."
+    },
+    {
+      "aspect": "Media and misinformation processes",
+      "current_approach": "Global misinformation_rate parameter; no media entities",
+      "suggested_approach": "Add MediaChannel with sentiment, reach, targeting_profile, and misinformation_rate. MessagingAndRiskModule should draw per-person info exposure based on reach/targeting and update risk_perception/trust accordingly.",
+      "expected_benefit": "Richer information dynamics; supports counterfactuals on communication campaigns and misinformation mitigation."
+    },
+    {
+      "aspect": "Equity and compliance metrics",
+      "current_approach": "Inequality index computed (not in spec) and adoption aggregates",
+      "suggested_approach": "Compute equity_gap_in_adoption (bottom vs top income group), compliance_rate_in_mandated_locations from venue counters, and average_mask_availability (mean inventory). Track policy_cost from subsidies and enforcement operations.",
+      "expected_benefit": "Directly addresses specified evaluation metrics; improves policy analysis utility."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation_code_iter_23.py",
+      "modification": "Fix retailer stock reconciliation to preserve unpurchased allocated units when applying retailer state updates",
+      "reason": "Prevents inventory underestimation and price misadjustments; aligns supply outcomes with requests and budgets",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "modification": "Add DiseaseTransmissionModule and required state/metrics; register it in module order and results",
+      "reason": "Implements missing core functionality (infection dynamics) and metrics (incidence, cumulative infections, Rt)",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "modification": "Compute compliance_rate_in_mandated_locations, equity_gap_in_adoption, average_mask_availability in AdoptionAggregator; store results series",
+      "reason": "Covers specified metrics; leverages existing venue counters and person inventories",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "modification": "Drive mandate level by day using policy_schedule or mandate_start_day; implement subsidy in purchase decision",
+      "reason": "Adds time-varying policy logic and affordability intervention; aligns with spec",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "modification": "Speed up calibration by shrinking N and days for trials in RandomSearchCalibrator.fit",
+      "reason": "Reduces runtime and risk of timeouts during parameter search",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "No direct connection to observed epidemic or policy phases; messaging and mandates do not vary over time",
+      "suggestion": "Use real policy schedule and media campaign timelines; add exogenous_risk_series from observed incidence to drive risk_perception; calibrate decision weights to match observed adoption trajectories."
+    },
+    {
+      "metric": "effective_reproduction_number_Rt",
+      "current_gap": "Not computed",
+      "suggestion": "Estimate Rt via standard EpiEstim-like method from simulated incidence; calibrate transmission parameters to match external Rt estimates for the target period."
+    },
+    {
+      "metric": "equity_gap_in_adoption",
+      "current_gap": "Not computed; only inequality index is produced",
+      "suggestion": "Compute adoption by income quantiles and report low-high gap; calibrate subsidy/distribution to reduce the gap in line with observed program outcomes."
+    },
+    {
+      "metric": "compliance_rate_in_mandated_locations",
+      "current_gap": "Not computed",
+      "suggestion": "Aggregate venue counters for mandated locations; compare with observed compliance audits if available; adjust enforcement_probability and staff_enforcement_level distributions."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement DiseaseTransmissionModule with S(E)IR and mask efficacy effects; add incidence, cumulative infections, and Rt metrics",
+    "Fix retailer stock reconciliation to avoid overwriting returned unpurchased stock",
+    "Add compliance_rate_in_mandated_locations, equity_gap_in_adoption, average_mask_availability, and peak_adoption_rate metrics",
+    "Add policy schedule/mandate_start_day and subsidy/distribution logic",
+    "Reduce calibration runtime by shrinking N and T for trials and caching ground truth",
+    "Extend entities to align with spec (MediaChannel, enriched GovernmentAuthority, additional Person fields)"
+  ],
+  "additional_comments": "Recent fixes improved stability (topological sort, guardrails around array lengths, removal of stray syntax errors, safe restocking/price adjustments, proportional rationing, and JSON-safe printing). The remaining gaps are primarily functional and metric-completeness relative to the spec. Focus next on disease dynamics and metric coverage, then on policy/media realism.",
+  "code_snippets": [
+    {
+      "file": "simulation_code_iter_23.py",
+      "before": "        # Reconcile retailer allocations with budgets; return unpurchased to stock.\n        allocations: Dict[int, int] = upd.get(\"retailer_allocations\", {})\n        retailer_price = max(0.1, self.state[\"retailer\"].price)\n        unspent_back_to_stock = 0\n        for pid, qty in allocations.items():\n            if 0 <= pid < N and qty > 0:\n                price = retailer_price\n                affordable_qty = int(persons[pid].budget // price)\n                actual_qty = max(0, min(qty, affordable_qty))\n                spend = actual_qty * price\n                persons[pid].budget = max(0.0, persons[pid].budget - spend)\n                persons[pid].mask_inventory += actual_qty\n                unspent_back_to_stock += max(0, qty - actual_qty)\n        # Return unpurchased quantity to retailer\n        if unspent_back_to_stock > 0:\n            self.state[\"retailer\"].stock = max(0, self.state[\"retailer\"].stock + unspent_back_to_stock)\n\n        # FIXED: Apply retailer state updates (stock, price) from buffers after reconciliation.\n        ret_upd = upd.get(\"retailer\")\n        if isinstance(ret_upd, dict):\n            r = self.state[\"retailer\"]\n            if \"stock\" in ret_upd:\n                r.stock = int(ret_upd[\"stock\"])\n            if \"price\" in ret_upd:\n                r.price = float(ret_upd[\"price\"])",
+      "after": "        # Reconcile retailer allocations with budgets; track unpurchased allocations.\n        allocations: Dict[int, int] = upd.get(\"retailer_allocations\", {})\n        retailer_price = max(0.1, self.state[\"retailer\"].price)\n        unspent_back_to_stock = 0\n        for pid, qty in allocations.items():\n            if 0 <= pid < N and qty > 0:\n                price = retailer_price\n                affordable_qty = int(persons[pid].budget // price)\n                actual_qty = max(0, min(qty, affordable_qty))\n                spend = actual_qty * price\n                persons[pid].budget = max(0.0, persons[pid].budget - spend)\n                persons[pid].mask_inventory += actual_qty\n                unspent_back_to_stock += max(0, qty - actual_qty)\n\n        # Apply retailer state updates and preserve unpurchased units\n        ret_upd = upd.get(\"retailer\") or {}\n        r = self.state[\"retailer\"]\n        new_stock = int(ret_upd.get(\"stock\", r.stock)) + int(unspent_back_to_stock)\n        r.stock = max(0, new_stock)\n        if \"price\" in ret_upd:\n            r.price = float(ret_upd[\"price\"])",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "before": "class AdoptionAggregator(Module):\n    ...\n    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], params: Dict[str, Any], t: int) -> None:\n        ...\n        buffers.setdefault(\"observables\", {})[\"adoption_rate_daily\"] = adoption_rate\n        buffers[\"observables\"][\"enforcement_incidents_rate_per_1k_pd\"] = incidents_rate\n        buffers[\"observables\"][\"inequality_index_of_adoption\"] = inequality_index\n        buffers[\"observables\"][\"average_mask_use_days_per_person\"] = average_days",
+      "after": "class AdoptionAggregator(Module):\n    ...\n    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], params: Dict[str, Any], t: int) -> None:\n        ...\n        # Equity gap (low vs high income groups)\n        equity_gap = (means[-1] - means[0]) if len(means) >= 3 else 0.0\n        \n        # Compliance in mandated locations using venue counters\n        venues: List[Venue] = state.get(\"venues\", [])\n        mandated_visitors = sum(v.daily_visitors for v in venues if v.mask_required)\n        mandated_compliant = sum(v.compliant_visitors for v in venues if v.mask_required)\n        compliance_rate_mandated = safe_div(mandated_compliant, max(1, mandated_visitors), 0.0)\n        \n        # Average per-capita mask availability\n        avg_inventory = sum(p.mask_inventory for p in persons) / float(N)\n        \n        obs = buffers.setdefault(\"observables\", {})\n        obs[\"adoption_rate_daily\"] = adoption_rate\n        obs[\"enforcement_incidents_rate_per_1k_pd\"] = incidents_rate\n        obs[\"inequality_index_of_adoption\"] = inequality_index\n        obs[\"equity_gap_in_adoption_daily\"] = equity_gap\n        obs[\"compliance_rate_in_mandated_locations_daily\"] = compliance_rate_mandated\n        obs[\"average_mask_availability_daily\"] = avg_inventory\n        obs[\"average_mask_use_days_per_person\"] = average_days",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "before": "class PolicyAndEnforcementModule(Module):\n    ...\n    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], params: Dict[str, Any], t: int) -> None:\n        authority: PublicHealthAuthority = state[\"authority\"]\n        venues: List[Venue] = state[\"venues\"]\n        requirement_rate = float(params.get(\"location_mask_requirement_rate\", 0.5))\n        staff_enforcement_level_mean = float(params.get(\"staff_enforcement_level_mean\", 0.5))\n        gatekeeping_weight = float(params.get(\"gatekeeping_strictness_weight\", 1.0))\n        # Propagate\n        rate = requirement_rate * authority.mandate_level",
+      "after": "class PolicyAndEnforcementModule(Module):\n    ...\n    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], params: Dict[str, Any], t: int) -> None:\n        authority: PublicHealthAuthority = state[\"authority\"]\n        venues: List[Venue] = state[\"venues\"]\n        requirement_rate = float(params.get(\"location_mask_requirement_rate\", 0.5))\n        staff_enforcement_level_mean = float(params.get(\"staff_enforcement_level_mean\", 0.5))\n        gatekeeping_weight = float(params.get(\"gatekeeping_strictness_weight\", 1.0))\n        \n        # Time-varying mandate level from schedule or start day\n        schedule = params.get(\"policy_schedule\", None)\n        start_day = params.get(\"mandate_start_day\", None)\n        if isinstance(schedule, list):\n            # schedule as list of {day: int, mandate_level: float}\n            todays = [s for s in schedule if int(s.get(\"day\", -1)) <= t]\n            if todays:\n                authority.mandate_level = clip01(float(sorted(todays, key=lambda s: s[\"day\"])[-1].get(\"mandate_level\", authority.mandate_level)))\n        elif isinstance(start_day, int):\n            authority.mandate_level = authority.mandate_level if t >= start_day else 0.0\n        \n        rate = requirement_rate * authority.mandate_level",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "before": "        min_price = retailer.price",
+      "after": "        # Apply subsidy for eligible agents (e.g., lowest income tercile)\n        min_price = retailer.price\n        subsidy = float(params.get(\"subsidy_amount\", 0.0))\n        # Precompute income terciles for eligibility\n        incomes = [p.income for p in persons]\n        idx_sorted = sorted(range(N), key=lambda i: incomes[i])\n        tercile_size = max(1, N // 3)\n        low_income_set = set(idx_sorted[:tercile_size])",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "before": "            if decision == 0 and p.mask_inventory <= 0.0:\n                # Attempt to comply if mandate/venue likely require - approximate with policy level\n                desire_to_buy = policy_signal > 0.2 or (social > 0.3)\n                # FIXED: Gate purchase requests on current retailer stock to reduce futile requests.\n                if desire_to_buy and retailer_stock_snapshot > 0:\n                    pack_cost = purchase_pack_size * min_price\n                    # FIXED: Interpret affordability threshold as share of budget, not 1-share.\n                    afford_limit = p.budget * affordability_share\n                    if pack_cost <= afford_limit:\n                        purchases.append((i, purchase_pack_size))\n                    elif min_price <= afford_limit:\n                        purchases.append((i, 1))",
+      "after": "            if decision == 0 and p.mask_inventory <= 0.0:\n                desire_to_buy = policy_signal > 0.2 or (social > 0.3)\n                if desire_to_buy and retailer_stock_snapshot > 0:\n                    eff_price = max(0.1, min_price - (subsidy if i in low_income_set else 0.0))\n                    pack_cost = purchase_pack_size * eff_price\n                    afford_limit = p.budget * affordability_share\n                    if pack_cost <= afford_limit:\n                        purchases.append((i, purchase_pack_size))\n                    elif eff_price <= afford_limit:\n                        purchases.append((i, 1))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "before": "class RandomSearchCalibrator(Calibrator):\n    ...\n    def fit(...):\n        for i in range(budget):\n            # Sample param vector\n            sim_params = simulator.get_params()\n            trial_params = copy.deepcopy(sim_params)\n            for key, (lo, hi) in self.search_space.items():\n                trial_params[key] = random.uniform(lo, hi)\n            # Map to FittedParams\n            fp = BasicParamsAdapter().capture(Simulation(trial_params))\n            # Evaluate\n            sim_trial = Simulation(trial_params)\n            scores = evaluator(sim_trial, fp, train_window)",
+      "after": "class RandomSearchCalibrator(Calibrator):\n    ...\n    def fit(...):\n        for i in range(budget):\n            sim_params = simulator.get_params()\n            trial_params = copy.deepcopy(sim_params)\n            for key, (lo, hi) in self.search_space.items():\n                trial_params[key] = random.uniform(lo, hi)\n            # Downscale for calibration speed\n            trial_params[\"population_size\"] = max(200, int(trial_params.get(\"population_size\", 2000) * 0.3))\n            trial_params[\"simulation_duration_days\"] = min(30, int(trial_params.get(\"simulation_duration_days\", 60)))\n            \n            sim_trial = Simulation(trial_params)\n            fp = BasicParamsAdapter().capture(sim_trial)\n            scores = evaluator(sim_trial, fp, train_window)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_23.py",
+      "before": "# No disease module present",
+      "after": "class DiseaseTransmissionModule(Module):\n    name = \"DiseaseTransmissionModule\"\n    inputs = [\"signals.person.mask_decision\", \"MobilityAndLocationModule.events.enforcement_events\"]\n    outputs = [\"state_updates.person.health_state\", \"observables.new_infections_daily\", \"observables.Rt\"]\n    dependencies = [\"MobilityAndLocationModule\"]\n    def forward(self, state, buffers, params, t):\n        persons = state[\"persons\"]\n        # Minimal SIR placeholder: compute exposures from visits via venue counters\n        beta = float(params.get(\"base_transmission_prob_per_contact\", 0.04))\n        src_eff = float(params.get(\"mask_efficacy_source_control\", 0.5))\n        wearer_eff = float(params.get(\"mask_efficacy_wearer_protection\", 0.3))\n        # ... compute new infections and write to buffers[\"observables\"][\"new_infections_daily\"] ...",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes improved robustness and correctness around module ordering, buffer handling, and stability. However, the main functional gaps with respect to the task remain (disease dynamics, policy/media richness, equity/compliance metrics). A notable logic issue persists in retailer stock reconciliation.",
+    "positive_impacts": [
+      "Topological sort enforces declared module dependencies",
+      "Avoidance of in-place state mutation inside module forward() improves determinism",
+      "Array length clamping eliminates index errors on early days",
+      "Proportional rationing in RetailSupplyModule handles stockouts more realistically",
+      "JSON-safe final print and added guardrails in modules"
+    ],
+    "negative_impacts": [
+      "Retailer stock reconciliation still overwrites unspent allocations due to commit ordering",
+      "Gating purchase requests on current stock snapshot can under-request on restock-heavy days",
+      "Inputs/outputs metadata still partially misaligned with actual buffer keys (minor clarity issue)",
+      "Core disease component and several specified metrics/entities remain unimplemented"
+    ],
+    "suggestions": [
+      "Fix the retailer reconciliation by merging unspent allocations into the applied stock update",
+      "Add DiseaseTransmissionModule and related metrics to meet task requirements",
+      "Compute compliance_rate_in_mandated_locations, equity_gap_in_adoption, and average_mask_availability in AdoptionAggregator",
+      "Implement policy schedules and subsidies in PolicyAndEnforcementModule/DecisionAndAdoptionModule",
+      "Downscale calibration trials for performance; cache ground truth to avoid repeated IO"
+    ]
+  }
+}

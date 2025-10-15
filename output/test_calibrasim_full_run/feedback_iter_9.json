@@ -1,0 +1,228 @@
+{
+  "summary": "The simulation is broadly well-structured and modular, but several critical logic bugs will cause runtime failure or misleading metrics. The most urgent fixes are: (1) ensure WorkplaceEnforcement returns an array for enforcement_level during mandate days; (2) commit campaign-induced risk perception updates to state; (3) correct dynamic pricing to raise price when inventory is low; (4) compute mandate compliance only on mandate days; (5) compute average price paid using cumulative spend/quantity instead of unweighted daily averages. Additional improvements include better shortage detection, incorporating unused attributes (social_influence_susceptibility, sanctions_exposure, rationing_policy), and providing a network fallback if networkx is missing.",
+  "critical_issues": [
+    {
+      "issue": "Workplace enforcement level becomes a scalar during mandate days.",
+      "impact": "Crashes PeerInfluenceUpdater with 'numpy.float64 is not subscriptable' when indexing w_enf[wid]. Simulation stops on mandate start.",
+      "solution": "Return an array of enforcement levels for all workplaces during mandate days using np.full.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Campaign risk perception update not committed.",
+      "impact": "Policy and campaign effects on risk perception are silently ignored, underestimating adoption response to campaigns.",
+      "solution": "Include 'Person.risk_perception' in the updates dict, not just in buffers; or implement buffer commit semantics.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Dynamic pricing direction is reversed.",
+      "impact": "Prices decrease when inventory is scarce, producing unrealistic supply-demand dynamics and masking shortages.",
+      "solution": "Flip the sign so price increases when inventory ratio is below target.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Mandate compliance averaged over non-mandate days.",
+      "impact": "Reported compliance is biased and not interpretable as compliance during mandate periods.",
+      "solution": "Emit a mandate-day flag; set compliance to NaN/None on non-mandate days; average only over mandate days in evaluate().",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Average price paid is an unweighted mean of daily averages and defaults to reference price on no-purchase days.",
+      "impact": "Biases price metrics toward the reference price, hides scarcity-induced price spikes, and overstates affordability.",
+      "solution": "Track total_spend_daily and total_qty_daily; compute overall average_price_paid = total_spend_sum / total_qty_sum.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Social influence representation",
+      "current_approach": "Uses social_exposure_memory uniformly for all agents.",
+      "suggested_approach": "Weight social exposure by Person.social_influence_susceptibility in AdoptionDecision (e.g., w_social * social * susceptibility).",
+      "expected_benefit": "Heterogeneous peer effects for more realistic diffusion patterns."
+    },
+    {
+      "aspect": "Sanctions and policy pressure",
+      "current_approach": "sanctions_exposure computed but not used in adoption.",
+      "suggested_approach": "Add a term to policy_pressure that scales sanctions_exposure by agent income or a normalization factor.",
+      "expected_benefit": "Improves policy realism by penalizing non-adoption under enforcement, especially for lower-income agents."
+    },
+    {
+      "aspect": "Shortage detection",
+      "current_approach": "Flags shortage if any assigned retailer hits zero during an attempt.",
+      "suggested_approach": "Track attempted vs fulfilled purchases and set shortage when fulfilled/attempted < 0.95.",
+      "expected_benefit": "Aligns the 'shortage_days' metric with spec and improves sensitivity to widespread shortages."
+    },
+    {
+      "aspect": "Rationing policy",
+      "current_approach": "rationing_policy stored, not enforced.",
+      "suggested_approach": "Implement per-purchase caps under rationing, e.g., min(1 or 2), and enforce queue-like behavior.",
+      "expected_benefit": "Better capture supply constraints and equitable distribution dynamics."
+    },
+    {
+      "aspect": "Network dependency",
+      "current_approach": "Hard-depends on networkx and raises an error if unavailable.",
+      "suggested_approach": "Provide a pure-Python ring lattice fallback to avoid hard failure in constrained environments.",
+      "expected_benefit": "Improves robustness in sandboxed or minimal environments."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Return an enforcement array (not scalar) during mandates.",
+      "reason": "Prevents crash in PeerInfluenceUpdater and preserves per-workplace indexing.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Commit campaign risk perception updates to state.",
+      "reason": "Ensures campaign effects propagate to AdoptionDecision in the same tick.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Flip dynamic pricing adjustment sign to increase price when inventory is low.",
+      "reason": "Correct supply-price feedback loop logic.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Emit mandate-day flag and NaN compliance on non-mandate days; average mandate compliance only over mandate days.",
+      "reason": "Improves metric validity and interpretability.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Track total_spend_daily and total_qty_daily, then compute weighted average price in evaluate.",
+      "reason": "Removes bias from averaging daily averages and defaults.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Improve shortage detection by comparing fulfilled vs attempted purchases.",
+      "reason": "Aligns shortage_days with the spec (<5% of demand fulfilled).",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Incorporate social_influence_susceptibility and sanctions_exposure into AdoptionDecision.",
+      "reason": "Uses defined attributes to improve behavioral realism.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add a networkx fallback ring-lattice builder.",
+      "reason": "Avoids runtime failure if networkx is missing.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "Campaign effects likely underpowered due to uncommitted risk perception updates.",
+      "suggestion": "Commit risk perception updates and tune campaign_effect_size and persuasion_strength via calibration."
+    },
+    {
+      "metric": "average_price_paid",
+      "current_gap": "Biased towards reference price due to unweighted averaging and defaulting on no-purchase days.",
+      "suggestion": "Use cumulative spend/qty method; enable stronger price responses under shortages."
+    },
+    {
+      "metric": "shortage_days",
+      "current_gap": "Over/under-counted due to binary per-agent retailer zero check.",
+      "suggestion": "Switch to fulfillment ratio-based shortage and aggregate across all retailers/agents per day."
+    },
+    {
+      "metric": "adoption_disparity_index",
+      "current_gap": "Income heterogeneity not fully exploited (e.g., sanctions and affordability).",
+      "suggestion": "Include sanctions_exposure and affordability constraints (income-price) more directly in adoption probability."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix WorkplaceEnforcement to return array in mandate days.",
+    "Commit campaign-updated risk perception to state within PolicyAndCampaignManager.forward().",
+    "Correct dynamic pricing sign so prices increase when inventory is low.",
+    "Emit mandate-day flag and compute compliance only on those days.",
+    "Compute average price paid from cumulative spend/qty; emit total_spend_daily and total_qty_daily.",
+    "Refactor shortage detection based on fulfilled vs attempted purchases.",
+    "Incorporate social_influence_susceptibility and sanctions_exposure into AdoptionDecision.",
+    "Implement rationing_policy logic in PurchaseAndAccess.",
+    "Add networkx fallback for SocialNetworkBuilder."
+  ],
+  "additional_comments": "The pervasive 'pass' statements before real code blocks are harmless no-ops but can be removed for clarity. Calibration hooks look reasonable and are gated for sandbox speed. Consider redefining 'adoption_state' to be 'ever adopted' for cascade analysis; otherwise, cascades may reflect only daily usage rather than diffusion.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "enforcement = np.clip(base_mean * (1.0 + gov_enf), 0.0, 1.0)",
+      "after": "value = np.clip(base_mean * (1.0 + gov_enf), 0.0, 1.0)\nenforcement = np.full(len(w_ids), value, dtype=float)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "buffers[\"Person.risk_perception\"] = risk_perception\n# ... no commit of risk_perception in updates",
+      "after": "# Commit risk perception so downstream modules see it\nupdates = {\n    \"Government.policy_state\": policy_state,\n    \"Government.enforcement_prob\": enforcement_prob,\n    \"Government.campaign_budget\": campaign_budget,\n    \"Person.campaign_exposure\": campaign_exposure,\n    \"Person.sanctions_exposure\": sanctions_exposure,\n    \"Person.risk_perception\": risk_perception,\n}",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "delta = desired_ratio - ratio\nprice[r] = clamp(price[r] * (1.0 + sens * (-delta)), min_price, max_price)",
+      "after": "delta = desired_ratio - ratio  # positive when inventory below desired\nprice[r] = clamp(price[r] * (1.0 + sens * (delta)), min_price, max_price)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "if policy_state == \"mandate\" and employed_mask.any():\n    mandate_compliance = float(np.mean(use[employed_mask]))\nelse:\n    mandate_compliance = float(np.mean(use[employed_mask])) if employed_mask.any() else 0.0",
+      "after": "is_mandate_day = 1 if policy_state == \"mandate\" else 0\nif is_mandate_day and employed_mask.any():\n    mandate_compliance = float(np.mean(use[employed_mask]))\nelse:\n    mandate_compliance = float(\"nan\")\nupdates = {\n    \"observable.mandate_compliance_rate_daily\": mandate_compliance,\n    \"observable.is_mandate_day\": is_mandate_day,\n    # ... other observables\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "avg_price_paid = (total_price / total_qty) if total_qty > 0 else float(price_ref)\nupdates = {\n    \"observable.average_price_paid_daily\": avg_price_paid,\n    \"observable.shortage_indicator_daily\": 1 if shortage else 0,\n}",
+      "after": "attempts = attempts if 'attempts' in locals() else 0  # ensure defined\nfulfilled = total_qty\navg_price_paid = (total_price / total_qty) if total_qty > 0 else None\nupdates = {\n    \"observable.average_price_paid_daily\": avg_price_paid,\n    \"observable.total_spend_daily\": total_price,\n    \"observable.total_qty_daily\": total_qty,\n    \"observable.attempts_daily\": attempts,\n    \"observable.fulfilled_daily\": fulfilled,\n    \"observable.shortage_indicator_daily\": 1 if (attempts > 0 and (fulfilled / max(1, attempts)) < 0.95) else 0,\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "metrics = {\n    # ...\n    \"average_price_paid\": float(np.mean(avg_price_series_w)) if avg_price_series_w else float(self.params.get(\"mask_price\", 1.0)),\n}",
+      "after": "spend_series = self.results[\"observables\"].get(\"observable.total_spend_daily\", [])\nqty_series = self.results[\"observables\"].get(\"observable.total_qty_daily\", [])\nspend_w = subwindow(spend_series)\nqty_w = subwindow(qty_series)\nspend_sum = float(np.nansum(spend_w))\nqty_sum = int(np.nansum(qty_w))\naverage_price_paid = (spend_sum / qty_sum) if qty_sum > 0 else None\nmetrics = {\n    # ...\n    \"average_price_paid\": average_price_paid,\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "w_social = float(params.get(\"social_influence_weight\", 0.4))\n# ...\nlinear = logit(base_p) + (w_social * social) + (w_risk * (0.5 * risk_env + 0.5 * risk_perception)) + (w_policy * policy_pressure_vec) + habit - (w_cost * (comfort + (mask_owned == 0).astype(float)))",
+      "after": "w_social = float(params.get(\"social_influence_weight\", 0.4))\nsusc = state.get(\"Person.social_influence_susceptibility\", np.ones(n, dtype=float))\nsanctions = state.get(\"Person.sanctions_exposure\", np.zeros(n, dtype=float))\nalpha_sanctions = float(params.get(\"sanctions_weight\", 0.05))\npolicy_pressure_vec = policy_pressure_vec + alpha_sanctions * sanctions\nlinear = logit(base_p) + (w_social * social * susc) + (w_risk * (0.5 * risk_env + 0.5 * risk_perception)) + (w_policy * policy_pressure_vec) + habit - (w_cost * (comfort + (mask_owned == 0).astype(float)))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "if nx is None:\n    raise RuntimeError(\"networkx unavailable; cannot build social network\")",
+      "after": "if nx is None:\n    # Fallback: ring lattice\n    neighbors = [[] for _ in range(n)]\n    k_local = max(2, min(k, n-1))\n    half_k = k_local // 2\n    for i in range(n):\n        for d in range(1, half_k + 1):\n            j1 = (i + d) % n\n            j2 = (i - d) % n\n            neighbors[i].extend([j1, j2])\n    sim.state[\"Person.network_neighbors\"] = neighbors\nelse:\n    g = nx.watts_strogatz_graph(n, k, beta, seed=int(sim.params.get(\"seed\", 42)))\n    # ... as before",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "mandate_compliance_rate = float(np.mean(compliance_series_w)) if compliance_series_w else 0.0",
+      "after": "mandate_flags = self.results[\"observables\"].get(\"observable.is_mandate_day\", [])\nflags_w = subwindow(mandate_flags)\ncomp_vals = [c for c, f in zip(compliance_series_w, flags_w) if f == 1 and c == c]  # filter mandate days and non-NaN\nmandate_compliance_rate = float(np.mean(comp_vals)) if comp_vals else None",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The rewrite introduced a full modular engine with schedulable modules, evaluation, and calibration. Logging is directed to stderr and a main() call is made at global scope to satisfy sandbox requirements.",
+    "positive_impacts": [
+      "Clear modular design (Environment, Policy, Supply, Purchase, Peer Influence, Adoption, Habit, Aggregator) improves readability and testability.",
+      "Seeding and logging are handled consistently; calibration is gated for sandbox performance.",
+      "Observables and metrics are organized and saved; artifacts are optional."
+    ],
+    "negative_impacts": [
+      "Critical runtime bug in WorkplaceEnforcement (scalar enforcement) introduced a crash path.",
+      "Campaign-induced risk perception updates are written to buffers but never committed, nullifying campaign effects.",
+      "Dynamic pricing feedback is inverted, encouraging demand during scarcity.",
+      "Compliance metric definition does not reflect mandate-only periods.",
+      "Average price metric is biased by unweighted means and defaults."
+    ],
+    "suggestions": [
+      "Adopt the concrete code fixes in the snippets to restore correct behavior.",
+      "Add a lightweight buffer-commit step in the scheduler only if truly needed; otherwise, pass updates explicitly.",
+      "Extend observables to include attempts/fulfilled to improve shortage metrics.",
+      "Consider defining adoption_state as 'ever adopted' if cascade size inference is a priority."
+    ]
+  }
+}

@@ -1,0 +1,1428 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based, networked diffusion model of mask-wearing adoption driven by social influence, public health policies, communication, and misinformation, with fatigue dynamics.",
+  "entities": [
+    {
+      "name": "Individual",
+      "attributes": [
+        "id",
+        "adopted_mask",
+        "propensity_to_adopt",
+        "risk_perception",
+        "social_influence_susceptibility",
+        "trust_in_authorities",
+        "compliance_fatigue",
+        "demographic_group",
+        "exposure_to_misinformation",
+        "network_neighbors"
+      ],
+      "behaviors": [
+        "evaluate_adoption_decision",
+        "adopt_mask",
+        "drop_mask",
+        "influence_neighbors",
+        "update_perceptions"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "population_size": 1000,
+          "initial_adoption_rate": 0.1,
+          "propensity_to_adopt": {
+            "distribution": "truncated_normal_0_1",
+            "mean": 0.5,
+            "sd": 0.15
+          },
+          "risk_perception": {
+            "distribution": "truncated_normal_0_1",
+            "mean": 0.3,
+            "sd": 0.1
+          },
+          "social_influence_susceptibility": {
+            "distribution": "truncated_normal_0_1",
+            "mean": 0.5,
+            "sd": 0.2
+          },
+          "trust_in_authorities": {
+            "distribution": "truncated_normal_0_1",
+            "mean": 0.6,
+            "sd": 0.15
+          },
+          "compliance_fatigue": {
+            "distribution": "constant",
+            "value": 0.0
+          },
+          "exposure_to_misinformation": {
+            "distribution": "truncated_normal_0_1",
+            "mean": 0.3,
+            "sd": 0.2
+          },
+          "demographic_group": {
+            "categories": [
+              "young",
+              "adult",
+              "senior"
+            ],
+            "probabilities": [
+              0.35,
+              0.5,
+              0.15
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "PublicHealthAuthority",
+      "attributes": [
+        "mandate_active",
+        "policy_strength",
+        "enforcement_probability",
+        "campaign_active",
+        "campaign_effect_size",
+        "message_frequency_per_day"
+      ],
+      "behaviors": [
+        "launch_campaign",
+        "implement_mandate",
+        "adjust_policy",
+        "enforce_policy",
+        "broadcast_messages"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "mandate_active": false,
+          "policy_strength": 0.0,
+          "enforcement_probability": 0.2,
+          "campaign_active": false,
+          "campaign_effect_size": 0.15,
+          "message_frequency_per_day": 1.0
+        }
+      }
+    },
+    {
+      "name": "SocialNetwork",
+      "attributes": [
+        "type",
+        "average_degree",
+        "clustering_coefficient",
+        "homophily_level",
+        "graph"
+      ],
+      "behaviors": [
+        "connect_individuals",
+        "update_ties"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "type": "small_world",
+          "average_degree": 8,
+          "homophily_level": 0.2,
+          "rewiring_probability": 0.05,
+          "dynamic_network": false
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the social network graph with homophily and specified topology.",
+      "inputs": [
+        "global.population_size",
+        "global.demographic_groups",
+        "global.demographic_group_probs"
+      ],
+      "outputs": [
+        "signal.network.graph",
+        "signal.network.neighbors"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  set rng with random_seed\n  assign demographic_group to each individual by categorical draw\n  if network_type == 'small_world':\n    G = watts_strogatz_graph(population_size, average_degree, rewiring_probability)\n  elif network_type == 'random':\n    G = erdos_renyi_graph(population_size, p=average_degree/(population_size-1))\n  elif network_type == 'scale_free':\n    G = barabasi_albert_graph(population_size, m=max(1, int(average_degree/2)))\n  # apply homophily: rewire a fraction proportional to homophily_level to increase within-group ties\n  for each edge (u,v) sampled:\n    if groups[u] != groups[v] and rand() < homophily_level:\n      find w with groups[w] == groups[u] and not connected to u; rewire (u,v)->(u,w)\n  emit signal.network.graph = G and neighbors list for each node",
+        "notes": [
+          "Homophily rewiring preserves degree approximately.",
+          "dynamic_network=false implies one-time build at t=0."
+        ]
+      },
+      "requirements": [
+        "networkx"
+      ],
+      "module_parameters": [
+        "network_type",
+        "average_degree",
+        "rewiring_probability",
+        "homophily_level",
+        "dynamic_network"
+      ]
+    },
+    {
+      "name": "RiskSignalProcess",
+      "description": "Generates external risk signal and a smoothed perception baseline.",
+      "inputs": [],
+      "outputs": [
+        "signal.risk.external_level",
+        "signal.risk.smoothed_level"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  prev = risk_signal_level\nelse:\n  shock = Normal(0, risk_signal_volatility)\n  raw = clip(prev + shock, 0, 1)\n  smoothed = risk_signal_smoothing*prev + (1-risk_signal_smoothing)*raw\n  prev = smoothed\nemit signal.risk.external_level = raw\nemit signal.risk.smoothed_level = smoothed",
+        "notes": [
+          "A simple AR(1)-like process bounded to [0,1].",
+          "Use smoothed signal to update individual risk perception."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "risk_signal_level",
+        "risk_signal_volatility",
+        "risk_signal_smoothing"
+      ]
+    },
+    {
+      "name": "PublicHealthPolicy",
+      "description": "Activates mandates, enforcement, and communication campaigns; emits policy pressure and messaging signals.",
+      "inputs": [
+        "global.simulation_day",
+        "observable.adoption_rate_daily"
+      ],
+      "outputs": [
+        "signal.policy.mandate_active",
+        "signal.policy.policy_pressure",
+        "signal.policy.enforcement_probability",
+        "signal.policy.campaign_active",
+        "signal.policy.message_boost"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "mandate_active = (t >= mandate_start_day) and (t <= mandate_end_day)\npolicy_strength = mandate_strength if mandate_active else 0.0\nenforcement_prob = enforcement_probability if mandate_active else 0.0\ncampaign_active = (t >= communication_campaign_start_day)\nmessage_boost = campaign_effect_size * message_frequency_per_day if campaign_active else 0.0\n# optional adaptive adjustment each policy_adjust_interval days\nif policy_adjust_interval > 0 and t % policy_adjust_interval == 0 and t > 0:\n  # simplistic adaptive rule: if adoption < 0.5 under mandate, increase pressure slightly\n  if mandate_active and observable.adoption_rate_daily[t-1] < 0.5:\n    policy_strength = clip(policy_strength + 0.05, 0, 1)\nemit signals accordingly",
+        "notes": [
+          "Policy pressure modifies perceived cost of non-compliance.",
+          "Message boost is used by perception update."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "mandate_start_day",
+        "mandate_end_day",
+        "mandate_strength",
+        "enforcement_probability",
+        "communication_campaign_start_day",
+        "campaign_effect_size",
+        "message_frequency_per_day",
+        "policy_adjust_interval",
+        "enforcement_penalty_strength"
+      ]
+    },
+    {
+      "name": "MisinformationModule",
+      "description": "Evolves individual exposure to misinformation and its impacts.",
+      "inputs": [
+        "signal.network.neighbors"
+      ],
+      "outputs": [
+        "signal.misinfo.exposure_delta",
+        "signal.misinfo.trust_delta",
+        "signal.misinfo.risk_delta",
+        "signal.misinfo.fatigue_delta"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each individual i:\n  # background exposure increase\n  delta_exp = misinformation_rate * (1 - exposure_i)\n  # optional social clustering: if many neighbors high exposure, increase faster\n  neighbor_mean_exp = mean(exposure_j for j in neighbors[i]) if neighbors available else 0\n  delta_exp += 0.5*misinformation_rate*(neighbor_mean_exp - exposure_i)\n  exposure_delta[i] = clip(delta_exp, -1, 1)\n  trust_delta[i] = - misinformation_effect_on_trust * exposure_i\n  risk_delta[i] = - misinformation_effect_on_risk * exposure_i\n  fatigue_delta[i] = misinformation_effect_on_fatigue * exposure_i\nemit vectors",
+        "notes": [
+          "Exposure-to-misinformation state is maintained per individual in the main state and updated using exposure_delta.",
+          "Effects scale with current exposure."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "misinformation_rate",
+        "misinformation_effect_on_trust",
+        "misinformation_effect_on_risk",
+        "misinformation_effect_on_fatigue"
+      ]
+    },
+    {
+      "name": "SocialInfluenceModule",
+      "description": "Computes neighborhood adoption fractions and social pressure.",
+      "inputs": [
+        "signal.network.neighbors",
+        "state.individual.adopted_mask",
+        "state.individual.social_influence_susceptibility"
+      ],
+      "outputs": [
+        "signal.social.neighbor_adoption_fraction",
+        "signal.social.pressure"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each individual i:\n  nbrs = neighbors[i]\n  if len(nbrs) > 0:\n    frac = mean(adopted_mask[j] for j in nbrs)\n  else:\n    frac = 0.0\n  # add perception noise\n  frac_obs = clip(frac + Normal(0, neighbor_observation_noise), 0, 1)\n  neighbor_adoption_fraction[i] = frac_obs\n  social_pressure[i] = social_influence_weight * (frac_obs ** influence_exponent) * social_influence_susceptibility[i]\nemit vectors",
+        "notes": [
+          "Noise accounts for imperfect observation.",
+          "Influence exponent allows concave/convex influence effects."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "social_influence_weight",
+        "influence_exponent",
+        "neighbor_observation_noise"
+      ]
+    },
+    {
+      "name": "PerceptionUpdateModule",
+      "description": "Updates trust and risk perception from risk signal, policy messaging, and misinformation.",
+      "inputs": [
+        "signal.risk.smoothed_level",
+        "signal.policy.campaign_active",
+        "signal.policy.message_boost",
+        "signal.misinfo.trust_delta",
+        "signal.misinfo.risk_delta"
+      ],
+      "outputs": [
+        "state.individual.trust_in_authorities",
+        "state.individual.risk_perception"
+      ],
+      "dependencies": [
+        "RiskSignalProcess",
+        "PublicHealthPolicy",
+        "MisinformationModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each individual i:\n  # trust update\n  trust_target = trust_in_authorities[i] + trust_update_rate * ( (signal.policy.message_boost if signal.policy.campaign_active else 0) + signal.misinfo.trust_delta[i] )\n  trust_in_authorities[i] = clip( (1 - trust_decay_rate) * trust_in_authorities[i] + trust_target, trust_clamp_low, trust_clamp_high )\n  # risk perception update\n  risk_target = risk_perception[i] + risk_update_rate * ( signal.risk.smoothed_level + signal.misinfo.risk_delta[i] )\n  risk_perception[i] = clip( (1 - risk_decay_rate) * risk_perception[i] + risk_target, risk_clamp_low, risk_clamp_high )\nemit updated states",
+        "notes": [
+          "Campaign effects are additive boosts to trust; misinformation lowers both trust and risk perception.",
+          "Decay terms prevent runaway growth and model forgetting."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "trust_update_rate",
+        "risk_update_rate",
+        "trust_decay_rate",
+        "risk_decay_rate",
+        "trust_clamp_low",
+        "trust_clamp_high",
+        "risk_clamp_low",
+        "risk_clamp_high"
+      ]
+    },
+    {
+      "name": "AdoptionDecisionModule",
+      "description": "Computes adoption probabilities and state transitions (adopt or drop) considering social, policy, risk, trust, and fatigue.",
+      "inputs": [
+        "signal.social.pressure",
+        "signal.policy.policy_pressure",
+        "signal.policy.enforcement_probability",
+        "signal.policy.mandate_active",
+        "state.individual.propensity_to_adopt",
+        "state.individual.risk_perception",
+        "state.individual.trust_in_authorities",
+        "state.individual.compliance_fatigue",
+        "state.individual.adopted_mask"
+      ],
+      "outputs": [
+        "state.individual.adopted_mask",
+        "signal.policy.enforcement_events"
+      ],
+      "dependencies": [
+        "SocialInfluenceModule",
+        "PublicHealthPolicy"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "enforcement_events = zeros(population_size)\nfor each individual i:\n  # compute utility toward adoption\n  U = 0\n  U += social_pressure[i]\n  U += policy_pressure_weight * signal.policy.policy_pressure\n  U += risk_perception_weight * risk_perception[i]\n  U += trust_weight * trust_in_authorities[i]\n  U += propensity_to_adopt[i]\n  U -= fatigue_weight * compliance_fatigue[i]\n  # enforcement chance if mandate active and not adopted\n  caught = False\n  if signal.policy.mandate_active and not adopted_mask[i]:\n    caught = (rand() < signal.policy.enforcement_probability)\n    if caught:\n      U += enforcement_penalty_strength  # increases immediate adoption utility\n      enforcement_events[i] = 1\n  # stochastic decision via soft threshold\n  p_adopt = sigmoid( (U - adoption_threshold) / max(1e-6, decision_temperature) )\n  if not adopted_mask[i]:\n    adopt_now = (rand() < p_adopt) or (caught and rand() < enforcement_compliance_boost)\n    adopted_mask[i] = adopt_now\n  else:\n    # probability to drop increases with fatigue and low pressure\n    pressure = social_pressure[i] + policy_pressure_weight*signal.policy.policy_pressure + risk_perception_weight*risk_perception[i]\n    drop_prob = clip(drop_base_rate + max(0, 0.5 - pressure) + 0.5*compliance_fatigue[i], 0, 1)\n    if rand() < drop_prob:\n      adopted_mask[i] = False\nemit updated adopted_mask and enforcement_events",
+        "notes": [
+          "Utility aggregation is linear; sigmoid maps to probability.",
+          "Enforcement impacts utility and can trigger immediate compliance.",
+          "Dropping is more likely when pressures are low and fatigue is high."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "policy_pressure_weight",
+        "risk_perception_weight",
+        "trust_weight",
+        "adoption_threshold",
+        "decision_temperature",
+        "fatigue_weight",
+        "drop_base_rate",
+        "enforcement_compliance_boost"
+      ]
+    },
+    {
+      "name": "FatigueModule",
+      "description": "Updates compliance fatigue based on wearing mask (fatigue accrues) or not (fatigue recovers), plus misinformation additive effect.",
+      "inputs": [
+        "state.individual.adopted_mask",
+        "signal.misinfo.fatigue_delta"
+      ],
+      "outputs": [
+        "state.individual.compliance_fatigue"
+      ],
+      "dependencies": [
+        "MisinformationModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each individual i:\n  if adopted_mask[i]:\n    compliance_fatigue[i] = clip(compliance_fatigue[i] + fatigue_rate_per_day, 0, fatigue_max)\n  else:\n    compliance_fatigue[i] = clip(compliance_fatigue[i] - fatigue_recovery_rate_per_day, 0, fatigue_max)\n  compliance_fatigue[i] = clip(compliance_fatigue[i] + signal.misinfo.fatigue_delta[i], 0, fatigue_max)\nemit updated fatigue",
+        "notes": [
+          "Fatigue dynamics are bounded.",
+          "Misinformation increases fatigue slightly."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "fatigue_rate_per_day",
+        "fatigue_recovery_rate_per_day",
+        "fatigue_max"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily adoption metrics and group-level statistics.",
+      "inputs": [
+        "state.individual.adopted_mask",
+        "state.individual.demographic_group",
+        "signal.policy.mandate_active"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.group_adoption_rate_daily",
+        "observable.mandate_active_daily",
+        "observable.noncompliance_under_mandate_daily",
+        "observable.adoption_rate_auc"
+      ],
+      "dependencies": [
+        "AdoptionDecisionModule",
+        "PublicHealthPolicy"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate = mean(adopted_mask)\nby_group = {g: mean(adopted_mask[i] for i in group g)}\nmandate_flag = 1 if signal.policy.mandate_active else 0\nnoncompliance_mandate = (1 - adoption_rate) if mandate_flag == 1 else None\n# AUC cumulative\nif t == 0:\n  auc = adoption_rate\nelse:\n  auc = prev_auc + adoption_rate\nemit adoption_rate_daily[t] = adoption_rate\nemit group_adoption_rate_daily[t] = by_group\nemit mandate_active_daily[t] = mandate_flag\nemit noncompliance_under_mandate_daily[t] = noncompliance_mandate\nemit adoption_rate_auc[t] = (auc / (t+1)) if auc_normalize else auc",
+        "notes": [
+          "AUC is maintained as cumulative sum; optionally normalized.",
+          "Noncompliance under mandate is only recorded when mandate is active."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "inequality_index_type",
+        "auc_normalize"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 1000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of individuals in the simulation.",
+      "frozen": true
+    },
+    {
+      "key": "simulation_days",
+      "dtype": "int",
+      "default": 100,
+      "bounds": {
+        "low": 10,
+        "high": 1000
+      },
+      "owner_module": "global",
+      "description": "Total number of days to simulate.",
+      "frozen": true
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 7.0
+      },
+      "owner_module": "global",
+      "description": "Simulation time step in days.",
+      "frozen": true
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Random seed for reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of mask adopters.",
+      "frozen": false
+    },
+    {
+      "key": "base_propensity_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of individual base propensity to adopt.",
+      "frozen": false
+    },
+    {
+      "key": "base_propensity_sd",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "SD of base propensity distribution.",
+      "frozen": false
+    },
+    {
+      "key": "trust_in_authorities_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Initial mean trust in authorities.",
+      "frozen": false
+    },
+    {
+      "key": "trust_init_sd",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial SD of trust.",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_init_mean",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Initial mean of risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_init_sd",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial SD of risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "social_influence_susceptibility_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Initial mean susceptibility to social influence.",
+      "frozen": false
+    },
+    {
+      "key": "social_influence_susceptibility_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial SD of susceptibility.",
+      "frozen": false
+    },
+    {
+      "key": "exposure_to_misinformation_init_mean",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Initial mean exposure to misinformation.",
+      "frozen": false
+    },
+    {
+      "key": "exposure_to_misinformation_init_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial SD of exposure to misinformation.",
+      "frozen": false
+    },
+    {
+      "key": "demographic_groups",
+      "dtype": "categorical",
+      "default": [
+        "young",
+        "adult",
+        "senior"
+      ],
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "global",
+      "description": "List of demographic group labels.",
+      "frozen": true
+    },
+    {
+      "key": "demographic_group_probs",
+      "dtype": "categorical",
+      "default": [
+        0.35,
+        0.5,
+        0.15
+      ],
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "global",
+      "description": "Sampling probabilities for demographic groups.",
+      "frozen": true
+    },
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "small_world",
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Type of network topology: small_world | random | scale_free.",
+      "frozen": false
+    },
+    {
+      "key": "average_degree",
+      "dtype": "int",
+      "default": 8,
+      "bounds": {
+        "low": 2,
+        "high": 100
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Average number of neighbors per node.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_probability",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Watts-Strogatz rewiring probability.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_level",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Strength of preference for same-group ties.",
+      "frozen": false
+    },
+    {
+      "key": "dynamic_network",
+      "dtype": "bool",
+      "default": false,
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Whether the network updates over time.",
+      "frozen": true
+    },
+    {
+      "key": "risk_signal_level",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "RiskSignalProcess",
+      "description": "Baseline external risk signal level.",
+      "frozen": false
+    },
+    {
+      "key": "risk_signal_volatility",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "RiskSignalProcess",
+      "description": "Daily volatility of external risk signal.",
+      "frozen": false
+    },
+    {
+      "key": "risk_signal_smoothing",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "RiskSignalProcess",
+      "description": "Smoothing factor for risk signal (higher means more inertia).",
+      "frozen": false
+    },
+    {
+      "key": "mandate_start_day",
+      "dtype": "int",
+      "default": 20,
+      "bounds": {
+        "low": 0,
+        "high": 3650
+      },
+      "owner_module": "PublicHealthPolicy",
+      "description": "Day mandate becomes active.",
+      "frozen": false
+    },
+    {
+      "key": "mandate_end_day",
+      "dtype": "int",
+      "default": 100,
+      "bounds": {
+        "low": 0,
+        "high": 3650
+      },
+      "owner_module": "PublicHealthPolicy",
+      "description": "Day mandate ends (inclusive).",
+      "frozen": false
+    },
+    {
+      "key": "mandate_strength",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PublicHealthPolicy",
+      "description": "Policy pressure strength under mandate.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_probability",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PublicHealthPolicy",
+      "description": "Daily probability an individual is checked if noncompliant under mandate.",
+      "frozen": false
+    },
+    {
+      "key": "communication_campaign_start_day",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 3650
+      },
+      "owner_module": "PublicHealthPolicy",
+      "description": "Day public health campaign starts.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_effect_size",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PublicHealthPolicy",
+      "description": "Effect size of campaign messages on trust/risk.",
+      "frozen": false
+    },
+    {
+      "key": "message_frequency_per_day",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "PublicHealthPolicy",
+      "description": "Average number of messages per day.",
+      "frozen": false
+    },
+    {
+      "key": "policy_adjust_interval",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 0,
+        "high": 90
+      },
+      "owner_module": "PublicHealthPolicy",
+      "description": "Days between adaptive policy adjustments (0 disables).",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_penalty_strength",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PublicHealthPolicy",
+      "description": "Utility boost toward adoption if caught noncompliant.",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "MisinformationModule",
+      "description": "Daily increase rate of misinformation exposure.",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_effect_on_trust",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MisinformationModule",
+      "description": "Strength by which exposure reduces trust.",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_effect_on_risk",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MisinformationModule",
+      "description": "Strength by which exposure reduces risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_effect_on_fatigue",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "MisinformationModule",
+      "description": "Increment to fatigue from misinformation exposure.",
+      "frozen": false
+    },
+    {
+      "key": "social_influence_weight",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Weight of neighbor adoption on utility.",
+      "frozen": false
+    },
+    {
+      "key": "influence_exponent",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 3.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Exponent for saturation/acceleration of social influence.",
+      "frozen": false
+    },
+    {
+      "key": "neighbor_observation_noise",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Stddev of noise added to observed neighbor adoption fraction.",
+      "frozen": false
+    },
+    {
+      "key": "trust_update_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PerceptionUpdateModule",
+      "description": "Rate at which campaign/misinformation changes trust.",
+      "frozen": false
+    },
+    {
+      "key": "risk_update_rate",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PerceptionUpdateModule",
+      "description": "Rate at which external risk changes risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "trust_decay_rate",
+      "dtype": "float",
+      "default": 0.005,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "PerceptionUpdateModule",
+      "description": "Daily decay of trust toward baseline.",
+      "frozen": false
+    },
+    {
+      "key": "risk_decay_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "PerceptionUpdateModule",
+      "description": "Daily decay of risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "trust_clamp_low",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PerceptionUpdateModule",
+      "description": "Lower bound for trust.",
+      "frozen": true
+    },
+    {
+      "key": "trust_clamp_high",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "PerceptionUpdateModule",
+      "description": "Upper bound for trust.",
+      "frozen": true
+    },
+    {
+      "key": "risk_clamp_low",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PerceptionUpdateModule",
+      "description": "Lower bound for risk perception.",
+      "frozen": true
+    },
+    {
+      "key": "risk_clamp_high",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "PerceptionUpdateModule",
+      "description": "Upper bound for risk perception.",
+      "frozen": true
+    },
+    {
+      "key": "policy_pressure_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.5
+      },
+      "owner_module": "AdoptionDecisionModule",
+      "description": "Weight of policy pressure in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecisionModule",
+      "description": "Weight of risk perception in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "trust_weight",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecisionModule",
+      "description": "Weight of trust in authorities in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecisionModule",
+      "description": "Utility threshold for adoption decision.",
+      "frozen": false
+    },
+    {
+      "key": "decision_temperature",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.01,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecisionModule",
+      "description": "Softness of decision (higher means more randomness).",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_weight",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecisionModule",
+      "description": "Negative weight of fatigue on adoption.",
+      "frozen": false
+    },
+    {
+      "key": "drop_base_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionDecisionModule",
+      "description": "Baseline daily probability to drop masking.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_compliance_boost",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecisionModule",
+      "description": "Probability to adopt immediately if caught noncompliant.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_rate_per_day",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "FatigueModule",
+      "description": "Daily increase in fatigue when compliant.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_recovery_rate_per_day",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "FatigueModule",
+      "description": "Daily decrease in fatigue when not compliant.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_max",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "FatigueModule",
+      "description": "Upper bound on fatigue state.",
+      "frozen": true
+    },
+    {
+      "key": "inequality_index_type",
+      "dtype": "categorical",
+      "default": "cv",
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Inequality index type: 'cv' (coefficient of variation) or 'gini'.",
+      "frozen": true
+    },
+    {
+      "key": "auc_normalize",
+      "dtype": "bool",
+      "default": true,
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Whether to normalize AUC by number of days.",
+      "frozen": true
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted_mask)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": null
+    },
+    {
+      "id": "observable.group_adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "by_group(demographic_group, mean(Person.adopted_mask))",
+      "frequency": "daily",
+      "aggregation": "by_group(demographic_group)",
+      "target_data_field": null
+    },
+    {
+      "id": "observable.mandate_active_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "policy.mandate_active",
+      "frequency": "daily",
+      "aggregation": "none",
+      "target_data_field": null
+    },
+    {
+      "id": "observable.noncompliance_under_mandate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "if mandate_active then 1 - mean(Person.adopted_mask) else null",
+      "frequency": "daily",
+      "aggregation": "conditional_mean",
+      "target_data_field": null
+    },
+    {
+      "id": "observable.adoption_rate_auc",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "cumulative_sum(mean(Person.adopted_mask)) normalized",
+      "frequency": "daily",
+      "aggregation": "cumulative",
+      "target_data_field": null
+    }
+  ],
+  "metrics": [
+    {
+      "name": "final_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "FinalValue",
+        "config": {
+          "day": "last"
+        }
+      }
+    },
+    {
+      "name": "time_to_reach_70_percent",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToThreshold",
+        "config": {
+          "threshold": 0.7,
+          "first_passage": true
+        }
+      }
+    },
+    {
+      "name": "area_under_adoption_curve",
+      "inputs": [
+        "observable.adoption_rate_daily",
+        "observable.adoption_rate_auc"
+      ],
+      "definition": {
+        "type": "AUC",
+        "config": {
+          "normalized": true
+        }
+      }
+    },
+    {
+      "name": "adoption_inequality_index",
+      "inputs": [
+        "observable.group_adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "InequalityIndex",
+        "config": {
+          "method": "cv",
+          "day": "last"
+        }
+      }
+    },
+    {
+      "name": "noncompliance_under_mandate",
+      "inputs": [
+        "observable.noncompliance_under_mandate_daily",
+        "observable.mandate_active_daily"
+      ],
+      "definition": {
+        "type": "ConditionalMean",
+        "config": {
+          "condition_input": "observable.mandate_active_daily",
+          "condition_value": 1
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 1000,
+    "random_seed": 42,
+    "network_type": "small_world",
+    "average_degree": 8,
+    "rewiring_probability": 0.05,
+    "homophily_level": 0.2,
+    "initial_adoption_rate": 0.1,
+    "demographic_groups": [
+      "young",
+      "adult",
+      "senior"
+    ],
+    "demographic_group_probs": [
+      0.35,
+      0.5,
+      0.15
+    ]
+  },
+  "algorithms": {
+    "Watts-Strogatz": "Generate small-world network with given average degree and rewiring probability.",
+    "HomophilyRewiring": "Rewire cross-group edges with probability proportional to homophily to favor same-group connections while keeping degree distribution roughly constant.",
+    "LogisticDecision": "Compute adoption probability via sigmoid((U - threshold)/temperature) from linear utility in social/policy/risk/trust/fatigue.",
+    "AdaptivePolicy": "Periodic adjustment of policy strength based on observed adoption under mandate.",
+    "AUCComputation": "Cumulative trapezoidal (here simple sum due to unit time step) of adoption rate, optionally normalized by days.",
+    "InequalityCV": "Coefficient of variation across group adoption rates at a given day."
+  },
+  "data_sources": [],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entrypoint: parses config, orchestrates simulation loop, handles seeding and outputs."
+      },
+      {
+        "name": "entities.py",
+        "description": "Definitions for Individual, PublicHealthAuthority, SocialNetwork data structures."
+      },
+      {
+        "name": "network_builder.py",
+        "description": "Implements NetworkBuilder module and homophily rewiring."
+      },
+      {
+        "name": "risk_signal.py",
+        "description": "Implements RiskSignalProcess module."
+      },
+      {
+        "name": "policy.py",
+        "description": "Implements PublicHealthPolicy module."
+      },
+      {
+        "name": "misinformation.py",
+        "description": "Implements MisinformationModule."
+      },
+      {
+        "name": "social_influence.py",
+        "description": "Implements SocialInfluenceModule."
+      },
+      {
+        "name": "perception_update.py",
+        "description": "Implements PerceptionUpdateModule."
+      },
+      {
+        "name": "adoption_decision.py",
+        "description": "Implements AdoptionDecisionModule."
+      },
+      {
+        "name": "fatigue.py",
+        "description": "Implements FatigueModule."
+      },
+      {
+        "name": "aggregator.py",
+        "description": "Implements AdoptionAggregator module and metrics computation."
+      },
+      {
+        "name": "utils.py",
+        "description": "Shared utilities: random generators, truncated normal, clipping, metrics helpers."
+      },
+      {
+        "name": "config.py",
+        "description": "Parameter schema, validation, and loading."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "networkx",
+      "scipy",
+      "pandas",
+      "numba",
+      "pydantic"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 0,
+    "end_day": 99
+  },
+  "evaluation_metrics": [
+    "final_adoption_rate",
+    "time_to_reach_70_percent",
+    "area_under_adoption_curve",
+    "adoption_inequality_index",
+    "noncompliance_under_mandate"
+  ]
+}

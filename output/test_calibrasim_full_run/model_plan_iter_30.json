@@ -1,0 +1,1069 @@
+{
+  "model_type": "agent_based",
+  "description": "Network diffusion model for technology adoption with heterogeneous agents influenced by peers, marketing, and policy incentives.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "state",
+        "adoption_time",
+        "threshold",
+        "susceptibility",
+        "income",
+        "price_sensitivity",
+        "marketing_sensitivity",
+        "peer_weight",
+        "intrinsic_utility",
+        "fatigue",
+        "awareness",
+        "group_id",
+        "degree"
+      ],
+      "behaviors": [
+        "perceive_peer_influence",
+        "perceive_marketing",
+        "apply_policy_incentive",
+        "adoption_decision"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "threshold_distribution": "truncated_normal(mean=0.3, sd=0.15, bounds=[0,1])",
+          "peer_weight_distribution": "truncated_normal(mean=0.6, sd=0.2, bounds=[0,2])",
+          "intrinsic_utility_distribution": "normal(mean=0.2, sd=0.4)",
+          "income_distribution": "lognormal(mean=log(50000), sd=0.3)",
+          "price_sensitivity_distribution": "truncated_normal(mean=0.00002, sd=0.00001, bounds=[0,0.001])",
+          "marketing_sensitivity_distribution": "truncated_normal(mean=1.0, sd=0.5, bounds=[0,5])",
+          "initial_state_share_adopters": 0.01
+        }
+      }
+    },
+    {
+      "name": "Firm",
+      "attributes": [
+        "daily_budget",
+        "targeting_strategy",
+        "ad_effectiveness",
+        "saturation_half_life",
+        "max_reach_fraction",
+        "retargeting_bias"
+      ],
+      "behaviors": [
+        "allocate_marketing",
+        "update_awareness"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "daily_budget": 10000.0,
+          "targeting_strategy": "degree_weighted"
+        }
+      }
+    },
+    {
+      "name": "Policy",
+      "attributes": [
+        "subsidy_amount",
+        "start_day",
+        "end_day",
+        "eligibility_fraction",
+        "targeting_group_bias",
+        "awareness_effect"
+      ],
+      "behaviors": [
+        "assign_eligibility",
+        "apply_subsidy",
+        "boost_awareness"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "subsidy_amount": 50.0,
+          "start_day": 20,
+          "end_day": 60,
+          "eligibility_fraction": 0.5,
+          "targeting_group_bias": 0.7
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the social network and assigns group membership with homophily.",
+      "inputs": [],
+      "outputs": [
+        "signal.graph",
+        "signal.agents_with_groups"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "steps",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "if network_type == 'scale_free':\n  G = BarabasiAlbertGraph(N=population_size, m=preferential_attachment_m)\nelse:\n  G = WattsStrogatzGraph(N=population_size, k=round(avg_degree), p=rewiring_prob)\nAssign group_id to each node by sampling group_count groups with probabilities proportional to exp(homophily_strength * attribute_similarity)\nIf degree_assortativity != 0 or clustering_bias > 0:\n  perform degree-preserving rewiring to match target assortativity and clustering\nOutput G and agent group assignments",
+        "notes": [
+          "Homophily enacted by preferential within-group link rewiring until modularity target approximated.",
+          "Assortativity rewiring preserves degree sequence."
+        ]
+      },
+      "requirements": [
+        "RNG",
+        "networkx"
+      ],
+      "module_parameters": [
+        "network_type",
+        "avg_degree",
+        "rewiring_prob",
+        "preferential_attachment_m",
+        "homophily_strength",
+        "group_count",
+        "clustering_bias",
+        "degree_assortativity"
+      ]
+    },
+    {
+      "name": "MarketingModule",
+      "description": "Allocates daily marketing exposures to agents based on strategy and updates awareness with saturation dynamics.",
+      "inputs": [
+        "signal.graph",
+        "signal.agent_states"
+      ],
+      "outputs": [
+        "signal.marketing_signal_by_agent",
+        "signal.marketing_reach_daily"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "budget = marketing_budget_daily\nif targeting_strategy == 'uniform':\n  weight_i = 1 for all non-adopters\nelif targeting_strategy == 'degree_weighted':\n  weight_i = degree(i)\nelif targeting_strategy == 'high_income':\n  weight_i = income(i)\nelif targeting_strategy == 'retarget_nonadopters':\n  weight_i = (1 + retargeting_bias * (1 - adopted(i)))\nNormalize weights over non-adopters; limit targeted count to max_reach_fraction * population_size\nAllocate exposures_i = budget * weight_i / sum(weights) * ad_effectiveness\nUpdate awareness_i = awareness_i * exp(-ln(2)/saturation_half_life) + exposures_i\nmarketing_signal_i = exposures_i\nCompute marketing_reach_daily = fraction of agents with exposures_i > 0",
+        "notes": [
+          "Exposure measured in effective impressions per day.",
+          "Awareness decays with half-life and contributes indirectly via InfluenceAndAdoption through marketing_sensitivity."
+        ]
+      },
+      "requirements": [
+        "RNG",
+        "numpy"
+      ],
+      "module_parameters": [
+        "marketing_budget_daily",
+        "targeting_strategy",
+        "ad_effectiveness",
+        "saturation_half_life",
+        "max_reach_fraction",
+        "retargeting_bias"
+      ]
+    },
+    {
+      "name": "PolicyModule",
+      "description": "Implements time-bounded subsidy and eligibility assignment with group-targeting bias and policy awareness boost.",
+      "inputs": [
+        "signal.agents_with_groups",
+        "signal.day"
+      ],
+      "outputs": [
+        "signal.policy_subsidy_by_agent",
+        "signal.policy_indicator_by_agent"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day == 0:\n  For each group g, compute target probability p_g proportional to (targeting_group_bias if g in top-biased groups else 1)\n  Assign eligibility to agents via Bernoulli with group-conditioned p to meet eligibility_fraction overall\nactive = (policy_start_day <= day <= policy_end_day)\nFor each agent i:\n  policy_indicator_i = 1 if active and eligible(i) else 0\n  policy_subsidy_i = subsidy_amount if policy_indicator_i == 1 else 0\n  if policy_indicator_i == 1:\n    awareness_i += policy_awareness_effect",
+        "notes": [
+          "Eligibility fixed at day 0 to avoid endogeneity.",
+          "Group bias steers more eligibility to specified groups while respecting overall fraction."
+        ]
+      },
+      "requirements": [
+        "RNG"
+      ],
+      "module_parameters": [
+        "subsidy_amount",
+        "policy_start_day",
+        "policy_end_day",
+        "eligibility_fraction",
+        "targeting_group_bias",
+        "policy_awareness_effect"
+      ]
+    },
+    {
+      "name": "InfluenceAndAdoption",
+      "description": "Updates agent states via social influence, marketing, price and policy-modulated utility; records adoption events.",
+      "inputs": [
+        "signal.graph",
+        "signal.marketing_signal_by_agent",
+        "signal.policy_subsidy_by_agent",
+        "signal.policy_indicator_by_agent",
+        "signal.agent_attributes",
+        "signal.day"
+      ],
+      "outputs": [
+        "signal.agent_states",
+        "signal.daily_new_adopters"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "MarketingModule",
+        "PolicyModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "decay_factor = exp(-ln(2)/influence_decay_half_life)\nFor each agent i where state == 'NonAdopter':\n  peer_fraction = mean(state_j == 'Adopter' for j in neighbors(i)) if degree(i) > 0 else 0\n  perceived_peer_i = memory_decay * peer_fraction + (1 - memory_decay) * previous_perceived_peer_i\n  previous_perceived_peer_i = perceived_peer_i * decay_factor\n  effective_price_i = max(base_price - policy_subsidy_i, 0)\n  affordability_i = clamp(1.0 - effective_price_i / max(0.1 * income_i, 1.0), 0, 1)\n  utility_i = intrinsic_utility_i + peer_weight_i * perceived_peer_i + marketing_sensitivity_i * marketing_signal_i + policy_indicator_i * policy_awareness_effect\n  threshold_i = threshold_i (fixed per agent)\n  p_logit = 1 / (1 + exp(-(utility_i - threshold_i)/max(temperature, 1e-6)))\n  p_i = p_logit * affordability_i * (1 - fatigue_i)\n  if RNG.uniform() < p_i:\n    state_i = 'Adopter'; adoption_time_i = day; daily_new++\n  else:\n    fatigue_i = min(fatigue_i + fatigue_increment, 1.0)\nApply cap: if daily_new > max_daily_adoption_fraction * population_size, randomly accept only up to the cap and defer the rest\nOutput updated agent states and daily_new_adopters",
+        "notes": [
+          "Adoption is absorbing; no disadoption.",
+          "Fatigue represents diminishing responsiveness after repeated non-adopting exposures.",
+          "Affordability ties price to income to avoid unrealistic adoption at low incomes."
+        ]
+      },
+      "requirements": [
+        "RNG",
+        "numpy"
+      ],
+      "module_parameters": [
+        "base_price",
+        "price_elasticity",
+        "intrinsic_utility_mean",
+        "intrinsic_utility_sd",
+        "peer_weight_mean",
+        "peer_weight_sd",
+        "threshold_mean",
+        "threshold_sd",
+        "temperature",
+        "memory_decay",
+        "influence_decay_half_life",
+        "fatigue_increment",
+        "max_daily_adoption_fraction",
+        "income_mean",
+        "income_sd",
+        "price_sensitivity_mean",
+        "price_sensitivity_sd",
+        "marketing_sensitivity_mean",
+        "marketing_sensitivity_sd"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily observables and applies optional smoothing/lag.",
+      "inputs": [
+        "signal.agent_states",
+        "signal.daily_new_adopters",
+        "signal.agents_with_groups",
+        "signal.marketing_reach_daily"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.daily_new_adopters",
+        "observable.cumulative_adopters",
+        "observable.group_adoption_rate_daily",
+        "observable.marketing_reach_daily"
+      ],
+      "dependencies": [
+        "InfluenceAndAdoption",
+        "MarketingModule",
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "N = population_size\nadoption_rate_daily = count(state_i == 'Adopter') / N\ncumulative_adopters = count(state_i == 'Adopter')\nby_group = for each g: mean(state_i == 'Adopter' for i in group g)\nif smoothing_window_days > 1:\n  apply moving average to daily_new_adopters and adoption_rate_daily over the window\napply reporting_lag_days by shifting series forward if > 0\nOutput observables",
+        "notes": [
+          "Smoothing window is centered trailing average.",
+          "Reporting lag can emulate data publication delays."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "smoothing_window_days",
+        "report_by_group",
+        "reporting_lag_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Total number of agents in the population.",
+      "frozen": false
+    },
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 120,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total simulated days.",
+      "frozen": false
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Seed for reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "prediction_start_day",
+      "dtype": "int",
+      "default": 30,
+      "bounds": {
+        "low": 0,
+        "high": 364
+      },
+      "owner_module": "global",
+      "description": "Start day for prediction evaluation window.",
+      "frozen": true
+    },
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "scale_free",
+      "bounds": null,
+      "owner_module": "NetworkBuilder",
+      "description": "Type of social network: 'scale_free' or 'small_world'.",
+      "frozen": true
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "float",
+      "default": 8.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 50.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target average degree for the network.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Rewiring probability for Watts-Strogatz networks.",
+      "frozen": false
+    },
+    {
+      "key": "preferential_attachment_m",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 20
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Edges added per new node in Barabasi-Albert graph.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_strength",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Strength of within-group connection preference.",
+      "frozen": false
+    },
+    {
+      "key": "group_count",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 1,
+        "high": 50
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of social groups for homophily.",
+      "frozen": false
+    },
+    {
+      "key": "clustering_bias",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Bias to increase clustering via rewiring.",
+      "frozen": false
+    },
+    {
+      "key": "degree_assortativity",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target Pearson degree assortativity.",
+      "frozen": false
+    },
+    {
+      "key": "marketing_budget_daily",
+      "dtype": "float",
+      "default": 10000.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1000000.0
+      },
+      "owner_module": "MarketingModule",
+      "description": "Daily marketing spend.",
+      "frozen": false
+    },
+    {
+      "key": "targeting_strategy",
+      "dtype": "categorical",
+      "default": "degree_weighted",
+      "bounds": null,
+      "owner_module": "MarketingModule",
+      "description": "Targeting rule: 'uniform', 'degree_weighted', 'high_income', 'retarget_nonadopters'.",
+      "frozen": true
+    },
+    {
+      "key": "ad_effectiveness",
+      "dtype": "float",
+      "default": 0.015,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "MarketingModule",
+      "description": "Impressions-to-influence conversion factor.",
+      "frozen": false
+    },
+    {
+      "key": "saturation_half_life",
+      "dtype": "float",
+      "default": 14.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 90.0
+      },
+      "owner_module": "MarketingModule",
+      "description": "Half-life of awareness saturation decay in days.",
+      "frozen": false
+    },
+    {
+      "key": "max_reach_fraction",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MarketingModule",
+      "description": "Maximum fraction of population that can be reached daily.",
+      "frozen": false
+    },
+    {
+      "key": "retargeting_bias",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MarketingModule",
+      "description": "Weight to prioritize non-adopters under retargeting.",
+      "frozen": false
+    },
+    {
+      "key": "subsidy_amount",
+      "dtype": "float",
+      "default": 50.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 500.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Per-adopter subsidy discount applied during active policy.",
+      "frozen": false
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 20,
+      "bounds": {
+        "low": 0,
+        "high": 364
+      },
+      "owner_module": "PolicyModule",
+      "description": "Day policy becomes active.",
+      "frozen": false
+    },
+    {
+      "key": "policy_end_day",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 1,
+        "high": 365
+      },
+      "owner_module": "PolicyModule",
+      "description": "Day policy ceases.",
+      "frozen": false
+    },
+    {
+      "key": "eligibility_fraction",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Fraction of agents eligible for subsidy.",
+      "frozen": false
+    },
+    {
+      "key": "targeting_group_bias",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Bias toward specific groups for eligibility assignment.",
+      "frozen": false
+    },
+    {
+      "key": "policy_awareness_effect",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "PolicyModule",
+      "description": "Increment to awareness when policy is active for eligible agents.",
+      "frozen": false
+    },
+    {
+      "key": "base_price",
+      "dtype": "float",
+      "default": 300.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 2000.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Base product price before subsidies.",
+      "frozen": false
+    },
+    {
+      "key": "price_elasticity",
+      "dtype": "float",
+      "default": -1.2,
+      "bounds": {
+        "low": -5.0,
+        "high": 0.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Elasticity of adoption probability with respect to price via affordability.",
+      "frozen": true
+    },
+    {
+      "key": "intrinsic_utility_mean",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Mean of intrinsic utility distribution.",
+      "frozen": false
+    },
+    {
+      "key": "intrinsic_utility_sd",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "SD of intrinsic utility distribution.",
+      "frozen": false
+    },
+    {
+      "key": "peer_weight_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Mean weight on peer influence.",
+      "frozen": false
+    },
+    {
+      "key": "peer_weight_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "SD of peer weight.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_mean",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Mean adoption threshold.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_sd",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "SD of adoption threshold.",
+      "frozen": false
+    },
+    {
+      "key": "temperature",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.01,
+        "high": 2.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Decision noise controlling the logistic steepness.",
+      "frozen": false
+    },
+    {
+      "key": "memory_decay",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Weight on current peer signal vs. past perceived peer influence.",
+      "frozen": false
+    },
+    {
+      "key": "influence_decay_half_life",
+      "dtype": "float",
+      "default": 7.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 60.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Half-life for decaying perceived peer influence.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_increment",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Daily increment to fatigue when agent does not adopt.",
+      "frozen": false
+    },
+    {
+      "key": "max_daily_adoption_fraction",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.01,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Upper bound on fraction of population that can adopt in a single day.",
+      "frozen": false
+    },
+    {
+      "key": "income_mean",
+      "dtype": "float",
+      "default": 50000.0,
+      "bounds": {
+        "low": 10000.0,
+        "high": 200000.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Mean income used for initialization.",
+      "frozen": false
+    },
+    {
+      "key": "income_sd",
+      "dtype": "float",
+      "default": 15000.0,
+      "bounds": {
+        "low": 1000.0,
+        "high": 100000.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "SD of income for initialization.",
+      "frozen": false
+    },
+    {
+      "key": "price_sensitivity_mean",
+      "dtype": "float",
+      "default": 2e-05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.001
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Mean individual price sensitivity modifier.",
+      "frozen": false
+    },
+    {
+      "key": "price_sensitivity_sd",
+      "dtype": "float",
+      "default": 1e-05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.001
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "SD of individual price sensitivity modifier.",
+      "frozen": false
+    },
+    {
+      "key": "marketing_sensitivity_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Mean response to marketing signals.",
+      "frozen": false
+    },
+    {
+      "key": "marketing_sensitivity_sd",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "SD of response to marketing signals.",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 1,
+        "high": 30
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Moving average window for smoothing observables.",
+      "frozen": false
+    },
+    {
+      "key": "report_by_group",
+      "dtype": "bool",
+      "default": true,
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Whether to compute and emit group-level adoption rates.",
+      "frozen": true
+    },
+    {
+      "key": "reporting_lag_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 7
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Reporting delay applied to observable streams.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "count(Person.state == 'Adopter') / population_size",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_adoption.csv:adoption_rate"
+    },
+    {
+      "id": "observable.daily_new_adopters",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "sum(new_adoptions_today)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_adoption.csv:daily_new"
+    },
+    {
+      "id": "observable.cumulative_adopters",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "cumulative_sum(daily_new_adopters)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_adoption.csv:cumulative"
+    },
+    {
+      "id": "observable.group_adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "by_group(group_id, mean(Person.state == 'Adopter'))",
+      "frequency": "daily",
+      "aggregation": "by_group(group_id)",
+      "target_data_field": "train_adoption_by_group.csv:adoption_rate_by_group"
+    },
+    {
+      "id": "observable.marketing_reach_daily",
+      "source_module": "MarketingModule",
+      "formula_or_field": "fraction(Person with marketing_signal > 0)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_marketing.csv:reach"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate_daily",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_daily_new_adopters",
+      "inputs": [
+        "observable.daily_new_adopters"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "PeakError_daily_new",
+      "inputs": [
+        "observable.daily_new_adopters"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "on": "level"
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_daily_new",
+      "inputs": [
+        "observable.daily_new_adopters"
+      ],
+      "definition": {
+        "type": "TimeToPeak",
+        "config": {
+          "unit": "days"
+        }
+      }
+    },
+    {
+      "name": "FinalSizeError",
+      "inputs": [
+        "observable.cumulative_adopters"
+      ],
+      "definition": {
+        "type": "AbsoluteDifference",
+        "config": {
+          "at_day": 119
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "initial_adopter_fraction": 0.01,
+    "group_count": 5,
+    "time_horizon_days": 120
+  },
+  "algorithms": {
+    "BarabasiAlbertGraph": "Preferential attachment network generation with parameter m.",
+    "WattsStrogatzGraph": "Small-world network generation with mean degree k and rewiring probability p.",
+    "AssortativityRewiring": "Degree-preserving edge swaps to reach target assortativity/clustering.",
+    "ExponentialDecay": "x_t = x_{t-1} * exp(-ln(2)/half_life).",
+    "Sigmoid": "sigma(z) = 1 / (1 + exp(-z)) used for adoption probability.",
+    "TargetedAllocation": "Weighted budget allocation across chosen subset respecting max reach."
+  },
+  "data_sources": [
+    {
+      "name": "train_adoption.csv",
+      "purpose": "Time series of aggregate adoption to calibrate and evaluate.",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "daily_new",
+        "cumulative"
+      ]
+    },
+    {
+      "name": "train_adoption_by_group.csv",
+      "purpose": "Group-level adoption for validating heterogeneity.",
+      "fields_used": [
+        "date",
+        "group_id",
+        "adoption_rate_by_group"
+      ]
+    },
+    {
+      "name": "train_marketing.csv",
+      "purpose": "Marketing reach series for validating exogenous inputs.",
+      "fields_used": [
+        "date",
+        "reach"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entrypoint; parses config, runs simulation loop, orchestrates modules, computes metrics."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder with homophily and rewiring routines."
+      },
+      {
+        "name": "modules/marketing.py",
+        "description": "Implements MarketingModule and targeting strategies."
+      },
+      {
+        "name": "modules/policy.py",
+        "description": "Implements PolicyModule with eligibility assignment."
+      },
+      {
+        "name": "modules/influence.py",
+        "description": "Implements InfluenceAndAdoption dynamics and agent state updates."
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "Computes observables and applies smoothing/lag."
+      },
+      {
+        "name": "entities.py",
+        "description": "Data classes for Person, Firm, Policy and utilities."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric implementations: RMSE, MAE, PeakError, TimeToPeak, AbsoluteDifference."
+      },
+      {
+        "name": "utils/random.py",
+        "description": "Random number utilities with seeding."
+      },
+      {
+        "name": "utils/network_ops.py",
+        "description": "Graph utilities: assortativity rewiring, clustering adjustment."
+      },
+      {
+        "name": "config/schema.json",
+        "description": "JSON schema for configuration and parameters."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate_daily",
+    "MAE_daily_new_adopters",
+    "PeakError_daily_new",
+    "TimeToPeak_daily_new",
+    "FinalSizeError"
+  ]
+}

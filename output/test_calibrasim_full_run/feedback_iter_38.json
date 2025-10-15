@@ -1,0 +1,190 @@
+{
+  "summary": "The simulation runs and covers the key entities and interactions, but several critical logic issues undermine correctness: enforcement deterrence never reaches the adoption decision due to module order; government mandate effects are applied with a one-day lag; enforcement may fine people at home; and enforcement/stockout observables are double-counted. Additionally, adoption ignores per-person peer influence weights, household initialization is needlessly complex, and stockout measurement timing may not match the intended metric. Addressing module ordering, enforcement logic, and observables handling should be top priority, followed by incorporating heterogeneity and aligning markets/stockouts with intended definitions.",
+  "critical_issues": [
+    {
+      "issue": "Enforcement deterrence does not influence adoption and mandates lag by one day",
+      "impact": "Adoption decisions are made without enforcement deterrence and mandates only affect beliefs/adoption the next day, biasing dynamics and policy effects.",
+      "solution": "Reorder modules to: risk_signal -> mobility -> enforcement -> information -> social_influence -> adoption_decision -> retail_market -> aggregation. This ensures enforcement toggles mandate_active and publishes deterrence before beliefs/adoption use them.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Enforcement can fine individuals at home",
+      "impact": "Unrealistic enforcement inflates costs and deterrence, particularly when many agents are at home, corrupting metrics and behavior.",
+      "solution": "Only enforce when a person is at a valid public location: requires_mask = (loc is not None) and (gov_active or loc.mask_policy_required).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Daily enforcement and stockout observables are appended twice",
+      "impact": "Inflates metrics like enforcement_events and stockout days, creating misleading evaluation and calibration signals.",
+      "solution": "Remove enforcement_events_daily and stockouts_daily from AdoptionAggregator outputs (leave them as pass-through only from enforcement and retail modules), or guard in _commit to avoid double-append.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Adoption ignores per-person peer influence heterogeneity",
+      "impact": "Reduces behavioral realism and limits the model\u2019s ability to fit heterogeneous adoption patterns.",
+      "solution": "Scale the peer_norm contribution by Person.peer_influence_weight in the adoption latent score.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Module scheduling (policy and enforcement effects)",
+      "current_approach": "AdoptionDecisionModule runs before PolicyEnforcementModule; Information uses outdated government state.",
+      "suggested_approach": "Schedule enforcement before information/social/adoption, and mobility before enforcement so location context is valid during checks.",
+      "expected_benefit": "Correct, same-day responses to mandates and enforcement; enforcement deterrence affecting adoption as intended."
+    },
+    {
+      "aspect": "Enforcement applicability",
+      "current_approach": "Assumes mandates require masks regardless of being in a public location.",
+      "suggested_approach": "Enforce only for valid public locations (ignore home) and use location policy strictly when mandate is off.",
+      "expected_benefit": "More realistic enforcement counts and costs; fewer false positives."
+    },
+    {
+      "aspect": "Heterogeneity in peer influence",
+      "current_approach": "Global weight w_peer is used uniformly.",
+      "suggested_approach": "Multiply the peer term by individual peer_influence_weight.",
+      "expected_benefit": "Improved fit to real-world patterns and inequality metrics."
+    },
+    {
+      "aspect": "Retail stockout metric definition",
+      "current_approach": "Stockouts measured before processing purchases.",
+      "suggested_approach": "Measure stockouts after purchase processing (or track pre and post), matching the definition 'stockouts when demand exists'.",
+      "expected_benefit": "Better alignment between reported stockouts and experienced shortages."
+    },
+    {
+      "aspect": "Household generation",
+      "current_approach": "Creates households twice and reconstructs memberships; sizes drift from intended N unless corrected later.",
+      "suggested_approach": "Sample household sizes until sum equals N, create households once, then create persons accordingly.",
+      "expected_benefit": "Cleaner, reproducible initialization; easier household-level interventions."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Reorder modules to place enforcement before information/social/adoption and mobility before enforcement.",
+      "reason": "Ensure mandate_active and enforcement_deterrence are available to belief and adoption modules on the same day.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "In PolicyEnforcementModule.forward, require valid non-home location for enforcement checks.",
+      "reason": "Prevent unrealistic fines at home, reduce inflated costs and deterrence.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove enforcement_events_daily and stockouts_daily from AdoptionAggregator observables.",
+      "reason": "Avoid double-append and inflated totals; keep these as pass-through from their source modules only.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Scale peer norm with person-specific peer_influence_weight in adoption decision.",
+      "reason": "Introduce heterogeneity consistent with entity attributes.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute stockouts after purchases in RetailMarketModule or track both pre and post.",
+      "reason": "Align with intended metric of shortage days when demand exists.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Simplify household initialization to sample sizes summing to N in one pass.",
+      "reason": "Reduce complexity and potential for mismatches; improves clarity and maintainability.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "time_to_reach_70_adoption",
+      "current_gap": "Enforcement and mandate effects are lagged, delaying the simulated adoption ramp-up.",
+      "suggestion": "Fix module order so mandates take effect same-day and calibrate enforcement_probability, fine_amount, and enforcement_deterrence_factor."
+    },
+    {
+      "metric": "sustained_adoption_post_mandate",
+      "current_gap": "Habit formation/dissipation may be miscalibrated; affordability not strong enough to sustain adoption.",
+      "suggestion": "Tune habit_decay_rate and habit_persistence_mean/std; allow post-mandate media campaigns to maintain risk/trust signals; calibrate mask_affordability_weight."
+    },
+    {
+      "metric": "inequality_in_adoption",
+      "current_gap": "Heterogeneity limited by not using peer_influence_weight and coarse income budget rule.",
+      "suggestion": "Use per-person peer_influence_weight and refine daily budget rule (e.g., include minimum income floor or social support via subsidy_per_mask targeting)."
+    },
+    {
+      "metric": "overall_adoption_rate",
+      "current_gap": "Observed plateau may be off due to mis-specified risk signal.",
+      "suggestion": "If risk_signal_series is available, ingest it; otherwise use a seasonal or piecewise constant process aligned to observed periods."
+    }
+  ],
+  "prioritized_actions": [
+    "Reorder modules: risk_signal -> mobility -> enforcement -> information -> social_influence -> adoption_decision -> retail_market -> aggregation.",
+    "Fix enforcement at home: require valid location for enforcement and mask requirement checks.",
+    "Stop double-adding enforcement and stockouts by removing them from AdoptionAggregator outputs.",
+    "Use person-specific peer_influence_weight in adoption latent calculation.",
+    "Compute stockouts after purchases (or track both pre and post) to match intended metric.",
+    "Simplify household initialization to one-pass size sampling that sums to N.",
+    "Optionally rename Location.mask_policy_required to mask_policy for spec conformity."
+  ],
+  "additional_comments": "The codebase is now runnable with calibration scaffolding and deterministic RNG use. The next iteration should lock down the module order and observables handling to avoid misleading metrics during calibration. Consider supporting risk_signal_series input, and expose more parameters for calibration (e.g., enforcement_capacity_per_day dynamics, retailer supply elasticity).",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "self.modules = [\n    HealthRiskSignalModule(self.rng, \"risk_signal\"),\n    InformationAndBeliefModule(self.rng, \"information\"),\n    SocialInfluenceModule(self.rng, \"social_influence\"),\n    AdoptionDecisionModule(self.rng, \"adoption_decision\"),\n    RetailMarketModule(self.rng, \"retail_market\"),\n    MobilityAndLocationModule(self.rng, \"mobility\"),\n    PolicyEnforcementModule(self.rng, \"enforcement\"),\n    AdoptionAggregator(self.rng, \"aggregation\"),\n]",
+      "after": "self.modules = [\n    HealthRiskSignalModule(self.rng, \"risk_signal\"),\n    MobilityAndLocationModule(self.rng, \"mobility\"),\n    PolicyEnforcementModule(self.rng, \"enforcement\"),\n    InformationAndBeliefModule(self.rng, \"information\"),\n    SocialInfluenceModule(self.rng, \"social_influence\"),\n    AdoptionDecisionModule(self.rng, \"adoption_decision\"),\n    RetailMarketModule(self.rng, \"retail_market\"),\n    AdoptionAggregator(self.rng, \"aggregation\"),\n]",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "requires_mask = (gov_updates[\"mandate_active\"]) or (loc.mask_policy_required if loc else False)",
+      "after": "requires_mask = (loc is not None) and ((gov_updates[\"mandate_active\"]) or (loc.mask_policy_required))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "observables = {\n    \"adoption_rate_daily\": adoption_rate,\n    \"adoption_rate_high_income_daily\": adoption_high,\n    \"adoption_rate_low_income_daily\": adoption_low,\n    \"average_cost_per_person_cumulative\": avg_cost,\n    \"enforcement_events_daily\": enforce_events,\n    \"stockouts_daily\": stockouts,\n}",
+      "after": "observables = {\n    \"adoption_rate_daily\": adoption_rate,\n    \"adoption_rate_high_income_daily\": adoption_high,\n    \"adoption_rate_low_income_daily\": adoption_low,\n    \"average_cost_per_person_cumulative\": avg_cost\n    # enforcement_events_daily and stockouts_daily remain pass-through from source modules only\n}",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "X = w_r * p.risk_perception + w_p * peer + w_t * p.trust_in_authority + w_c * p.compliance_propensity + w_e * det",
+      "after": "X = (w_r * p.risk_perception\n     + (w_p * p.peer_influence_weight) * peer\n     + w_t * p.trust_in_authority\n     + w_c * p.compliance_propensity\n     + w_e * det)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Demand and stockouts tracking\nintent = buffers.get(\"signals\", {}).get(\"intent_to_wear_mask\", {})\nany_demand = any(intent.values()) if intent else False\nif any_demand:\n    stockouts_today = sum(1 for r in retailers if r.inventory_level <= 0)\n\n# Process purchases\nfor p in state[\"persons\"]:\n    ...\n\nio = {\"stockouts_today\": stockouts_today}",
+      "after": "# Demand\nintent = buffers.get(\"signals\", {}).get(\"intent_to_wear_mask\", {})\nany_demand = any(intent.values()) if intent else False\n\n# Process purchases first\nfor p in state[\"persons\"]:\n    ...\n\n# Stockouts measured after purchases when demand exists\nif any_demand:\n    stockouts_today = sum(1 for r in retailers if r.inventory_level <= 0)\n\nio = {\"stockouts_today\": stockouts_today}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Households: sample sizes and assign members\nhh_size_mean = float(self.params.get(\"household_size_mean\", 2.6))\n# We'll rough-sample sizes as max(1, Poisson-like via normal approx)\npersons_remaining = N\nhouseholds: List[Household] = []\nnext_hh_id = 0\nwhile persons_remaining > 0:\n    sz = max(1, int(round(max(1.0, self.rng.gauss(hh_size_mean, 0.75)))))\n    sz = min(sz, persons_remaining)\n    households.append(Household(id=next_hh_id, members=[], income=0.0, home_location_id=-1, shared_inventory=0))\n    next_hh_id += 1\n    persons_remaining -= sz\n# ... reconstruction and duplication follows",
+      "after": "# Households: sample sizes that sum exactly to N\nhh_size_mean = float(self.params.get(\"household_size_mean\", 2.6))\nsizes = []\nremaining = N\nwhile remaining > 0:\n    draw = max(1, int(round(max(1.0, self.rng.gauss(hh_size_mean, 0.75)))))\n    draw = min(draw, remaining)\n    sizes.append(draw)\n    remaining -= draw\nhouseholds = [Household(id=i, members=[], income=0.0, home_location_id=-1, shared_inventory=0) for i in range(len(sizes))]\n\n# Create persons per household size in one pass\npid = 0\npersons = []\nfor hh, size in zip(households, sizes):\n    hh_income = math.exp(self.rng.gauss(income_log_mean, income_log_sigma))\n    hh.income = hh_income\n    for _ in range(size):\n        # create Person as currently implemented\n        ...\n        persons.append(person)\n        hh.members.append(pid)\n        pid += 1",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "This iteration restores a runnable simulation with modular design, calibration hooks, RNG consistency, and output serialization. However, the chosen module order introduced critical lags and signal disconnects, and aggregator handling caused double-counting.",
+    "positive_impacts": [
+      "Working baseline ABM with small-world network and modules",
+      "Deterministic RNG and fast-mode scaling for sandbox",
+      "Calibration scaffolding (random search, logit head, SNPE fallback)",
+      "Robust JSON sanitization and artifact saving"
+    ],
+    "negative_impacts": [
+      "Module order prevents enforcement from influencing adoption and delays mandate effects",
+      "Double-append of observables inflates enforcement and stockout metrics",
+      "Household creation complexity increases risk of subtle bugs",
+      "Adoption decision lacks heterogeneity in peer influence"
+    ],
+    "suggestions": [
+      "Reorder modules to align causality and same-day effects",
+      "Emit enforcement/stockouts only from source modules and remove in aggregator",
+      "Simplify household initialization to one-pass size sampling",
+      "Incorporate person-specific peer_influence_weight into adoption"
+    ]
+  }
+}

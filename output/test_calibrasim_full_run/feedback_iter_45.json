@@ -1,0 +1,236 @@
+{
+  "summary": "The simulation is now a coherent, runnable ABM for mask adoption with information, policy, peer influence, and market constraints. Syntax, imports, and the standard main() invocation meet requirements. However, there are mismatches with the task spec (naming and unused entities), several logic issues affecting metric accuracy (price timing, baseline seed/network mismatch, Brier score), a weak inequality metric, and placeholders around ground truth and calibration. Addressing these will improve validity, interpretability, and alignment with real-world data without sacrificing performance.",
+  "critical_issues": [
+    {
+      "issue": "Parameter and entity naming divergence from the specification; some entities (Household) are unused.",
+      "impact": "Hinders plug-and-play with external bundles, increases confusion, and leads to unused code paths; downstream tools expecting spec keys will be unable to control the simulation properly.",
+      "solution": "Introduce a parameter alias map to accept spec keys (e.g., time_horizon_days, network_avg_degree, mask_cost) and map them to current internal names. Either implement minimal Household sharing or remove it from the build to avoid confusion.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Evaluation baseline uses a different random seed and regenerated network.",
+      "impact": "Incidence reduction calculation confounds policy/mask effects with stochastic differences in the contact network and initial states, biasing the metric.",
+      "solution": "Use the same seed, and preferably the same initial state/network for the baseline evaluation. At minimum, reuse the seed; ideally, build a shallow clone of the state or run the same simulator with modified parameters and a rebuild using the same seed.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Brier score computation is non-standard for continuous adoption rates.",
+      "impact": "Misleading evaluation: current Brier score compares a binarized target to a continuous adoption rate; it should compare two probabilities (or use a proper binary event series).",
+      "solution": "Define Brier as mean squared error between y_true and y_pred when both are in [0,1], or construct a binary series if you intend classification.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Price timing and feedback loop: Behavior decisions use prior-day price due to module order; Market adjusts price after Behavior.",
+      "impact": "Intra-day demand-price feedback is not captured; agents cannot respond to the current-day price adjustments, potentially dampening demand elasticity effects.",
+      "solution": "Make the design explicit (current-day decisions use last committed price) or implement a two-phase loop (forecast price from last day, make decisions, update price, and apply purchases). Document the choice. If keeping single-phase, base price adjustments on vendor.price (last committed), not a fixed base parameter per day.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Inequality metric is a crude high-minus-low SES difference rather than a formal index.",
+      "impact": "Reported adoption inequality may be unstable and not comparable to spec (Gini/CoV), reducing interpretability and validity.",
+      "solution": "Compute a daily Gini across SES bins (e.g., quintiles) of adoption rates and average it over time. The gini() function is available but currently unused.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Calibration and evaluator use a single-window simulation starting at start_day, without warming the state.",
+      "impact": "When the training window excludes early days, states are not warmed to that window; this may bias evaluator metrics and calibration outcomes.",
+      "solution": "Run from day 0 to end, then slice metrics to the evaluation window.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Ground truth loader is a stub; evaluators self-reference predictions to create a pseudo-target.",
+      "impact": "Calibration cannot meaningfully fit to real patterns; evaluation metrics are descriptive only.",
+      "solution": "Implement data loading from DATA_DIR for adoption_rate_over_time (CSV/JSON), with basic schema detection and validation; document fallback if missing.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Risk perception dynamics",
+      "current_approach": "Information campaign adds constant deltas; prevalence signal parameter exists but is unused.",
+      "suggested_approach": "Add a prevalence-driven risk update: \u0394risk_i \u221d risk_perception_sensitivity_to_prevalence \u00d7 (prevalence - risk_i) or proportional delta; optionally modulated by trust/compliance.",
+      "expected_benefit": "More realistic coupling between epidemiology and behavior; adoption tracks local prevalence as observed empirically."
+    },
+    {
+      "aspect": "Market and price dynamics",
+      "current_approach": "Price updates each day based on (total_demand - inventory)/inventory with base param; purchases allocated greedily in person index order.",
+      "suggested_approach": "Base price on vendor.price (prior-day), randomize allocation order or allocate proportionally, and add simple backlog/shortage smoothing. Optionally add income-based price sensitivity.",
+      "expected_benefit": "Reduces index bias, improves dynamic plausibility of supply shocks and price responses."
+    },
+    {
+      "aspect": "Mandate compliance measurement",
+      "current_approach": "Compliance equals overall adoption when mandate is active.",
+      "suggested_approach": "Estimate compliance among agents likely exposed to enforcement (e.g., working population fraction) or penalize non-wearers by enforcement probability; report compliance as in-mandate wearing rate among those 'at risk' of enforcement.",
+      "expected_benefit": "Metric aligns more closely with policy-relevant compliance rather than population-wide adoption."
+    },
+    {
+      "aspect": "Household resource sharing (optional)",
+      "current_approach": "Household entity is defined but unused.",
+      "suggested_approach": "Maintain a small shared inventory per household; if a person runs out, allow borrowing from household stock within a cap.",
+      "expected_benefit": "Captures within-household buffering observed in PPE acquisition and reduces inequality driven by individual-level stockouts."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Add parameter alias mapping for spec compatibility (time_horizon_days\u2192simulation_duration_days, network_avg_degree\u2192avg_degree, mask_cost\u2192mask_price, enforcement_probability\u2192enforcement_strength, initial_mask_adoption_rate\u2192initial_adoption_rate, initial_infection_prevalence_optional\u2192initial_infection_prevalence).",
+      "reason": "Aligns with the provided spec and allows external configs to work without renaming.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Fix baseline evaluation to reuse the same seed and (optionally) the same initial state; at minimum replace seed+999 with the same seed for the baseline run.",
+      "reason": "Removes confounding randomness from incidence_reduction_optional.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Correct Brier score to compare probabilities directly (y_true vs y_pred) rather than binarizing y_true.",
+      "reason": "Improves metric validity.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Change MarketAndSupply price update to base on vendor.price (previous day) instead of the mask_price parameter each day.",
+      "reason": "Prevents resetting towards base price daily; supports dynamic price path.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Randomize purchase allocation order to avoid index bias and better reflect fair rationing under scarcity.",
+      "reason": "Improves fairness and realism of allocation.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use warm-up run in evaluator: run simulator from day 0 to end, then slice the evaluation window for metrics.",
+      "reason": "Ensures state variables are consistent at the start of the evaluation window.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add prevalence-driven risk updates in InformationCampaignModule (or a new RiskUpdate module) using risk_perception_sensitivity_to_prevalence.",
+      "reason": "Connects epidemiology with behavior per spec.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Replace SES inequality proxy with a daily Gini across SES bins using available gini().",
+      "reason": "Aligns metric to spec and improves interpretability.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement load_ground_truth() to parse a CSV/JSON from DATA_DIR with adoption_rate_over_time and handle missing data gracefully.",
+      "reason": "Enables meaningful calibration/evaluation against real data.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "Calibrator learns against a shifted version of model outputs; no real target.",
+      "suggestion": "Load adoption time series from DATA_DIR/adoption.csv (columns: day, adoption) and validate lengths; optionally smooth or resample to match timestep."
+    },
+    {
+      "metric": "adoption_inequality_index",
+      "current_gap": "Proxy is high-minus-low quintile difference; spec calls for Gini or CoV.",
+      "suggestion": "Compute daily adoption across SES quintiles and use Gini across quintile means; optionally compare to empirical proxies (e.g., mask usage survey by income)."
+    },
+    {
+      "metric": "incidence_reduction_optional",
+      "current_gap": "Baseline confounded by random seed/network differences.",
+      "suggestion": "Compute baseline using same seed and initial state, changing only mask efficacy/policy; if possible, reuse contact structure exactly."
+    }
+  ],
+  "prioritized_actions": [
+    "Add parameter alias mapping to align with the spec (improves usability and interoperability).",
+    "Fix baseline evaluation to reuse the same seed and correct the Brier score.",
+    "Implement warm-up runs in evaluator (run from day 0 and slice the window).",
+    "Replace inequality proxy with Gini over SES bins.",
+    "Improve Market dynamics (price based on vendor.price, randomized allocation).",
+    "Add prevalence-driven risk updates.",
+    "Implement basic ground truth loader to enable meaningful calibration.",
+    "Decide on Household usage: implement minimal sharing or remove to reduce confusion."
+  ],
+  "additional_comments": "Performance is adequate for populations in the low thousands; for very large bounds (100k), consider explicit caps or caching the network during calibration trials. The module order and single-phase daily loop are acceptable if explicitly documented; otherwise, a two-phase approach (forecast vs realized price) can increase fidelity. The redundancy of 'pass' statements before function bodies is harmless but could be cleaned for readability.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def apply_overrides(self, overrides: List[str]) -> None:\n    pass\n    for item in overrides:\n        ...",
+      "after": "def apply_overrides(self, overrides: List[str]) -> None:\n    alias = {\n        \"time_horizon_days\": \"simulation_duration_days\",\n        \"network_avg_degree\": \"avg_degree\",\n        \"mask_cost\": \"mask_price\",\n        \"enforcement_probability\": \"enforcement_strength\",\n        \"initial_mask_adoption_rate\": \"initial_adoption_rate\",\n        \"initial_infection_prevalence_optional\": \"initial_infection_prevalence\",\n    }\n    for item in overrides:\n        if \"=\" not in item:\n            self.warnings.append(f\"Invalid override '{item}' (missing '=').\")\n            continue\n        key, sval = item.split(\"=\", 1)\n        key = key.strip()\n        key = alias.get(key, key)\n        if key not in self.defs:\n            self.warnings.append(f\"Unknown override parameter '{key}'; ignoring.\")\n            continue\n        d = self.defs[key]\n        if d.frozen:\n            self.warnings.append(f\"Ignoring override for frozen parameter '{key}'.\")\n            continue\n        val = self._cast(key, sval.strip())\n        val = self._validate_bounds(key, val)\n        self.values[key] = val",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "baseline_params = self.params.to_dict()\n... \nbase_sim = Simulation(bpr, self.seed + 999, os.path.join(self.artifacts_dir, \"baseline\"))",
+      "after": "baseline_params = self.params.to_dict()\n... \nbase_sim = Simulation(bpr, self.seed, os.path.join(self.artifacts_dir, \"baseline\"))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "brier = sum((int(a >= 0.5) - b) ** 2 for a, b in zip(y_true, y_pred)) / n",
+      "after": "brier = sum((a - b) ** 2 for a, b in zip(y_true, y_pred)) / n  # both in [0,1]",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "base_cost = params.get(\"mask_price\", v.price)\nexcess = max(total_demand - inventory, 0)\nfactor = 1.0 + elasticity * (excess / max(1, inventory)) if inventory > 0 else 1.2\nnew_price = max(0.1, base_cost * factor)",
+      "after": "prev_price = v.price  # use last committed price\nexcess = max(total_demand - inventory, 0)\nstock_ratio = inventory / max(1, inventory + total_demand)\n# Adjust around previous price, damped by elasticity\nnew_price = max(0.1, prev_price * (1.0 + elasticity * (excess / max(1, inventory))))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "allocations = [0] * len(persons)\n... \nfor idx, req in enumerate(demand):",
+      "after": "allocations = [0] * len(persons)\norder = list(range(len(persons)))\nstate[\"rng\"].shuffle(order)\nfor idx in order:\n    req = demand[idx]",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate_params(simulator: \"Simulation\", params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    ...\n    start, end = window\n    simulator.run(start, end)",
+      "after": "def evaluate_params(simulator: \"Simulation\", params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    ...\n    start, end = window\n    simulator.run(0, end)\n    # Slice in metrics computation rather than running from start\n    # downstream code should slice y_pred/y_true using [start:end]",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "avg_risk = sum(p.risk_perception for p in persons) / max(1, population_size)\navg_misinfo = sum(p.misinformation_belief for p in persons) / max(1, population_size)",
+      "after": "epi = state.get(\"epi\")\nif epi is not None:\n    sens = params.get(\"risk_perception_sensitivity_to_prevalence\", 0.6)\n    # nudge each person's risk toward current prevalence\n    for i, p in enumerate(persons):\n        risk_deltas[i] += sens * (epi.prevalence - p.risk_perception) * 0.1\navg_risk = sum(p.risk_perception for p in persons) / max(1, population_size)\navg_misinfo = sum(p.misinformation_belief for p in persons) / max(1, population_size)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "diffs = []\nfor d in ses_series:\n    if isinstance(d, dict) and \"low\" in d and \"high\" in d:\n        diffs.append(d[\"high\"] - d[\"low\"])\nadoption_inequality_index = sum(diffs) / max(1, len(diffs)) if diffs else 0.0",
+      "after": "# Compute Gini across SES quintile adoption rates\nquintile_rates = []\nfor d in ses_series:\n    if isinstance(d, dict):\n        quintile_rates.append([d.get(\"q1\", d.get(\"low\", 0.0)), d.get(\"q2\", 0.0), d.get(\"q3\", 0.0), d.get(\"q4\", 0.0), d.get(\"q5\", d.get(\"high\", 0.0))])\nif quintile_rates:\n    daily_ginis = [gini(rates) for rates in quintile_rates]\n    adoption_inequality_index = sum(daily_ginis) / max(1, len(daily_ginis))\nelse:\n    adoption_inequality_index = 0.0",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def load_ground_truth() -> Dict[str, Any]:\n    pass\n    gt: Dict[str, Any] = {}\n    # Placeholder: implement CSV parsing if needed. For now, empty to degrade gracefully.\n    return gt",
+      "after": "def load_ground_truth() -> Dict[str, Any]:\n    gt: Dict[str, Any] = {}\n    # Try CSV first\n    csv_path = os.path.join(DATA_DIR, \"adoption.csv\")\n    json_path = os.path.join(DATA_DIR, \"adoption.json\")\n    try:\n        if os.path.exists(csv_path):\n            import csv\n            days, series = [], []\n            with open(csv_path, \"r\", encoding=\"utf-8\") as f:\n                reader = csv.DictReader(f)\n                for row in reader:\n                    if \"adoption\" in row:\n                        series.append(float(row[\"adoption\"]))\n            if series:\n                gt[\"adoption_rate\"] = series\n        elif os.path.exists(json_path):\n            with open(json_path, \"r\", encoding=\"utf-8\") as f:\n                data = json.load(f)\n                if isinstance(data, dict) and \"adoption_rate\" in data:\n                    gt[\"adoption_rate\"] = list(map(float, data[\"adoption_rate\"]))\n    except Exception as e:\n        print(f\"[GroundTruth] Failed to load: {e}\")\n    return gt",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration replaces a stub with a full, runnable simulation that meets the spec at a high level. The code includes modules for information, policy, behavior, market, contacts, disease, and aggregation, with calibration scaffolding and artifacts handling. Minor divergences and placeholders remain.",
+    "positive_impacts": [
+      "Restored full functionality with a coherent ABM and scheduler.",
+      "Implemented modules and metrics aligned with the task: adoption over time, mandate, market, and optional epidemiology.",
+      "Added calibration scaffolding and persistence of artifacts and parameters.",
+      "Included QUICK_TEST mode to reduce runtime during verification."
+    ],
+    "negative_impacts": [
+      "Metric accuracy issues (Brier, baseline seed/network differences).",
+      "Spec misalignments (parameter naming, unused Household, inequality metric).",
+      "Behavior-price feedback loop timing is unclear; price base resets daily.",
+      "Evaluator runs from start_day without warm-up, which can bias fits."
+    ],
+    "suggestions": [
+      "Implement parameter aliasing to align with the spec and reduce friction.",
+      "Fix metric calculations as noted (Brier, incidence baseline).",
+      "Clarify daily loop timing or add a two-phase loop; base price on vendor.price.",
+      "Add prevalence-driven risk update to tie behavior with epidemiology.",
+      "Replace inequality proxy with Gini across SES bins.",
+      "Implement ground truth loader to enable meaningful calibration workflows."
+    ]
+  }
+}

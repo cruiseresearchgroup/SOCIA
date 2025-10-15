@@ -1,0 +1,1119 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based social adoption model on a weighted community-structured social network. Individuals update a binary behavior (e.g., public health practice) via peer influence, personal propensity, and policy campaign signals. Contacts are generated daily based on network structure and mobility biases; adoption dynamics include habit formation and fatigue.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "age",
+        "community_id",
+        "risk_perception",
+        "susceptibility_to_influence",
+        "trust_in_authorities",
+        "baseline_adoption_propensity",
+        "adoption_threshold",
+        "habit_strength",
+        "fatigue",
+        "is_adopting"
+      ],
+      "behaviors": [
+        "evaluate_peer_exposure",
+        "respond_to_campaign",
+        "update_adoption_state",
+        "habit_formation_and_decay"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "population_size": 5000,
+          "initial_adoption_fraction": 0.15,
+          "age_mean": 40.0,
+          "age_std": 12.0,
+          "risk_perception_mean": 0.5,
+          "risk_perception_std": 0.2,
+          "trust_in_authorities_mean": 0.6,
+          "trust_in_authorities_std": 0.25,
+          "susceptibility_to_influence_mean": 0.5,
+          "susceptibility_to_influence_std": 0.2,
+          "baseline_adoption_propensity_mean": 0.3,
+          "baseline_adoption_propensity_std": 0.15,
+          "threshold_mean": 0.5,
+          "threshold_std": 0.15
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Generates a weighted, community-structured small-world social network with homophily and strong/weak ties.",
+      "inputs": [],
+      "outputs": [
+        "state.network.edges",
+        "state.network.weights",
+        "state.network.community_labels"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  assign community_id to each person ~ categorical(net_community_count) with near-equal sizes\n  initialize base ring lattice with average degree ~ net_avg_degree\n  with probability net_rewiring_prob, rewire edges to random nodes (Watts\u2013Strogatz style)\n  apply homophily: increase connection probability within same community by net_homophily_strength; adjust to maintain degree\n  assign edge weights w ~ LogNormal(mean=net_weight_mean, std=net_weight_std)\n  mark a fraction net_fraction_strong_ties of edges as strong and multiply their weights by 2\n  store edges and weights in state.network\nelse:\n  no-op",
+        "notes": [
+          "Runs only at t=0; subsequent ticks are no-ops.",
+          "Homophily targeting within-community edges; maintain average degree via proportional adjustment."
+        ]
+      },
+      "requirements": [
+        "rng",
+        "graph_library"
+      ],
+      "module_parameters": [
+        "net_avg_degree",
+        "net_rewiring_prob",
+        "net_homophily_strength",
+        "net_community_count",
+        "net_weight_mean",
+        "net_weight_std",
+        "net_fraction_strong_ties"
+      ]
+    },
+    {
+      "name": "PolicyCampaign",
+      "description": "Produces a time-varying campaign intensity signal with ramp-up, pulses, and decay; interacts with agent trust.",
+      "inputs": [
+        "time.day"
+      ],
+      "outputs": [
+        "signal.campaign_intensity"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day < campaign_start_day:\n  I = campaign_base_intensity\nelif campaign_start_day <= day < campaign_start_day + campaign_ramp_days:\n  r = (day - campaign_start_day) / max(1, campaign_ramp_days)\n  I = campaign_base_intensity + r * (campaign_max_intensity - campaign_base_intensity)\nelse:\n  t_since_peak = day - (campaign_start_day + campaign_ramp_days)\n  I = campaign_max_intensity * exp(- t_since_peak / max(1, campaign_decay_days))\nif campaign_pulse_interval > 0 and day % campaign_pulse_interval == 0:\n  I = min(1.0, I + campaign_pulse_magnitude)\nemit signal.campaign_intensity = clamp(I, 0, 1)",
+        "notes": [
+          "Agent-level effect is I * trust_i; trust heterogeneity is embedded in Person.trust_in_authorities.",
+          "Intensity is bounded to [0,1]."
+        ]
+      },
+      "requirements": [
+        "math_exp"
+      ],
+      "module_parameters": [
+        "campaign_base_intensity",
+        "campaign_start_day",
+        "campaign_ramp_days",
+        "campaign_max_intensity",
+        "campaign_decay_days",
+        "campaign_pulse_interval",
+        "campaign_pulse_magnitude",
+        "trust_modifier_mean",
+        "trust_modifier_std"
+      ]
+    },
+    {
+      "name": "MobilityContact",
+      "description": "Generates daily peer exposure per person via stochastic contact sampling biased by tie strength and day-type; includes occasional mobility shocks.",
+      "inputs": [
+        "state.network.edges",
+        "state.network.weights",
+        "time.day",
+        "Person.is_adopting"
+      ],
+      "outputs": [
+        "signal.peer_exposure"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "is_weekend = (day % 7 in {5,6})\nmult = weekend_multiplier if is_weekend else 1.0\nif rand() < shock_probability:\n  mult = mult * shock_magnitude\nfor each person i:\n  k ~ Poisson(lambda = max(0.1, contact_rate_per_day) * mult * (1 + Normal(0, mobility_variance)))\n  neighbors = N(i)\n  p_j \u221d weight_ij ^ (1 + contact_bias_toward_strong_ties)\n  sample min(k, |neighbors|) contacts without replacement by p_j\n  exposure_i = mean(is_adopting of sampled neighbors) if k>0 else mean(is_adopting of neighbors) (fallback)\nemit signal.peer_exposure[i] = exposure_i",
+        "notes": [
+          "Exposure is a fraction in [0,1].",
+          "Fallback to static neighbor mean ensures defined exposure when k=0.",
+          "Weights emphasize strong ties when contact_bias_toward_strong_ties > 0."
+        ]
+      },
+      "requirements": [
+        "rng",
+        "poisson_sampler"
+      ],
+      "module_parameters": [
+        "contact_rate_per_day",
+        "contact_bias_toward_strong_ties",
+        "mobility_variance",
+        "weekend_multiplier",
+        "shock_probability",
+        "shock_magnitude"
+      ]
+    },
+    {
+      "name": "BehaviorAdoption",
+      "description": "Updates agent adoption states based on peer exposure, campaign intensity, personal propensity, habit formation, fatigue, and stochasticity.",
+      "inputs": [
+        "signal.peer_exposure",
+        "signal.campaign_intensity",
+        "Person.risk_perception",
+        "Person.susceptibility_to_influence",
+        "Person.trust_in_authorities",
+        "Person.baseline_adoption_propensity",
+        "Person.adoption_threshold",
+        "Person.habit_strength",
+        "Person.fatigue",
+        "Person.is_adopting"
+      ],
+      "outputs": [
+        "Person.is_adopting",
+        "signal.adoption_events"
+      ],
+      "dependencies": [
+        "MobilityContact",
+        "PolicyCampaign"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  social_term = influence_weight_social * susceptibility_to_influence_i * (peer_exposure_i - adoption_threshold_i)\n  policy_term = influence_weight_policy * trust_in_authorities_i * signal.campaign_intensity\n  personal_term = influence_weight_personal * (baseline_adoption_propensity_i + risk_perception_i - 0.5)\n  habit_term = habit_strength_i\n  fatigue_term = - fatigue_i\n  linear_score = social_term + policy_term + personal_term + habit_term + fatigue_term + logistic_intercept + Normal(0, noise_scale)\n  p_adopt = sigmoid(logistic_slope * linear_score)\n  if is_adopting_i == False:\n    new_state = Bernoulli(p_adopt)\n  else:\n    p_drop = sigmoid(logistic_slope * (-(social_term + policy_term + personal_term) + dropout_bias))\n    new_state = Bernoulli(1 - p_drop)\n  # habit and fatigue updates\n  if new_state == True:\n    habit_strength_i = habit_strength_i + habit_formation_rate * (1 - habit_strength_i)\n    fatigue_i = max(0.0, fatigue_i + fatigue_rate)\n  else:\n    habit_strength_i = max(0.0, habit_strength_i - forgetting_rate)\n    fatigue_i = max(0.0, fatigue_i - fatigue_rate)\n  record adoption_events: +1 if (old_state=False and new_state=True), -1 if (old_state=True and new_state=False)",
+        "notes": [
+          "Sigmoid(x) = 1 / (1 + exp(-x)); all probabilities clipped to [0,1].",
+          "Threshold acts as a personal tipping point relative to peer exposure.",
+          "Dropout uses a distinct bias to capture asymmetry."
+        ]
+      },
+      "requirements": [
+        "rng",
+        "math_exp"
+      ],
+      "module_parameters": [
+        "influence_weight_social",
+        "influence_weight_policy",
+        "influence_weight_personal",
+        "logistic_slope",
+        "logistic_intercept",
+        "noise_scale",
+        "habit_formation_rate",
+        "fatigue_rate",
+        "forgetting_rate",
+        "threshold_mean",
+        "threshold_std",
+        "dropout_bias",
+        "peer_window_days"
+      ]
+    },
+    {
+      "name": "ObservationAggregator",
+      "description": "Computes daily observables: overall adoption rate, community adoption rates, churn, and new adoptions.",
+      "inputs": [
+        "Person.is_adopting",
+        "Person.community_id",
+        "signal.adoption_events",
+        "signal.campaign_intensity"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.adoption_rate_by_community",
+        "observable.adoption_churn_daily",
+        "observable.new_adoptions_daily",
+        "observable.campaign_intensity_daily"
+      ],
+      "dependencies": [
+        "BehaviorAdoption"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "rate_overall = mean(Person.is_adopting)\nrate_by_comm = group_mean(Person.is_adopting by Person.community_id)\nchurn = count(adoption_events == -1) / population_size\nnew_adopt = count(adoption_events == +1) / population_size\nemit observable.adoption_rate_daily = smooth(rate_overall, window=smoothing_window_days)\nemit observable.adoption_rate_by_community = smooth_by_group(rate_by_comm, window=smoothing_window_days)\nemit observable.adoption_churn_daily = churn\nemit observable.new_adoptions_daily = new_adopt\nemit observable.campaign_intensity_daily = signal.campaign_intensity",
+        "notes": [
+          "Smoothing is moving average with window >= 1 day.",
+          "Community reporting subset can be applied to sample a fraction of agents when < 1.0."
+        ]
+      },
+      "requirements": [
+        "rolling_window"
+      ],
+      "module_parameters": [
+        "smoothing_window_days",
+        "community_reporting_subset"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of Person agents in the simulation.",
+      "frozen": false
+    },
+    {
+      "key": "sim_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulation days.",
+      "frozen": false
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG to ensure reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Simulation time step in days.",
+      "frozen": true
+    },
+    {
+      "key": "initial_adoption_fraction",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.9
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of agents adopting the behavior at t=0.",
+      "frozen": false
+    },
+    {
+      "key": "age_mean",
+      "dtype": "float",
+      "default": 40.0,
+      "bounds": {
+        "low": 15.0,
+        "high": 80.0
+      },
+      "owner_module": "global",
+      "description": "Mean of age distribution for initialization (years).",
+      "frozen": true
+    },
+    {
+      "key": "age_std",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 25.0
+      },
+      "owner_module": "global",
+      "description": "Std dev of age distribution.",
+      "frozen": true
+    },
+    {
+      "key": "risk_perception_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial risk perception in [0,1].",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_std",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std dev of initial risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "trust_in_authorities_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial trust in authorities in [0,1].",
+      "frozen": false
+    },
+    {
+      "key": "trust_in_authorities_std",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std dev of initial trust.",
+      "frozen": false
+    },
+    {
+      "key": "susceptibility_to_influence_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial susceptibility to peer influence.",
+      "frozen": false
+    },
+    {
+      "key": "susceptibility_to_influence_std",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std dev of initial susceptibility.",
+      "frozen": false
+    },
+    {
+      "key": "baseline_adoption_propensity_mean",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of baseline adoption propensity.",
+      "frozen": false
+    },
+    {
+      "key": "baseline_adoption_propensity_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std dev of baseline adoption propensity.",
+      "frozen": false
+    },
+    {
+      "key": "net_avg_degree",
+      "dtype": "float",
+      "default": 10.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 50.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target average degree of the social network.",
+      "frozen": false
+    },
+    {
+      "key": "net_rewiring_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Probability of rewiring edges (small-world).",
+      "frozen": false
+    },
+    {
+      "key": "net_homophily_strength",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Strength of within-community connection bias.",
+      "frozen": false
+    },
+    {
+      "key": "net_community_count",
+      "dtype": "int",
+      "default": 8,
+      "bounds": {
+        "low": 2,
+        "high": 50
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of communities.",
+      "frozen": false
+    },
+    {
+      "key": "net_weight_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 5.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Mean of log-normal edge weight distribution (log-space mean).",
+      "frozen": false
+    },
+    {
+      "key": "net_weight_std",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Std dev of log-normal edge weight distribution (log-space std).",
+      "frozen": false
+    },
+    {
+      "key": "net_fraction_strong_ties",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Fraction of edges designated as strong ties (weight multiplier).",
+      "frozen": false
+    },
+    {
+      "key": "campaign_base_intensity",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Baseline campaign intensity prior to start day.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_start_day",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 0,
+        "high": 120
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Day campaign starts ramping.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_ramp_days",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 90
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Duration of ramp from base to max intensity.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_max_intensity",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Peak campaign intensity.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_decay_days",
+      "dtype": "int",
+      "default": 30,
+      "bounds": {
+        "low": 0,
+        "high": 180
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Exponential decay time constant (days) after peak.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_pulse_interval",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 0,
+        "high": 60
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Interval for periodic campaign pulses (0 disables).",
+      "frozen": false
+    },
+    {
+      "key": "campaign_pulse_magnitude",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Additive intensity during pulses.",
+      "frozen": false
+    },
+    {
+      "key": "trust_modifier_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Mean multiplicative modifier for trust's effect on campaign.",
+      "frozen": true
+    },
+    {
+      "key": "trust_modifier_std",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Std dev of multiplicative trust modifier.",
+      "frozen": true
+    },
+    {
+      "key": "contact_rate_per_day",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 40.0
+      },
+      "owner_module": "MobilityContact",
+      "description": "Expected number of daily contacts per person.",
+      "frozen": false
+    },
+    {
+      "key": "contact_bias_toward_strong_ties",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityContact",
+      "description": "Exponent bias favoring selection of strong ties in contact sampling.",
+      "frozen": false
+    },
+    {
+      "key": "mobility_variance",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityContact",
+      "description": "Std dev of day-level multiplicative noise on contact rate.",
+      "frozen": false
+    },
+    {
+      "key": "weekend_multiplier",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.2,
+        "high": 1.5
+      },
+      "owner_module": "MobilityContact",
+      "description": "Multiplier on contacts for weekends.",
+      "frozen": false
+    },
+    {
+      "key": "shock_probability",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "MobilityContact",
+      "description": "Probability of a mobility shock event on a given day.",
+      "frozen": false
+    },
+    {
+      "key": "shock_magnitude",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "MobilityContact",
+      "description": "Multiplier applied to contact rate during a shock.",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_social",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight of peer exposure in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_policy",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight of policy campaign signal.",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_personal",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight of personal propensity and risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "logistic_slope",
+      "dtype": "float",
+      "default": 4.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 10.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Slope of logistic function for adoption probability.",
+      "frozen": false
+    },
+    {
+      "key": "logistic_intercept",
+      "dtype": "float",
+      "default": -2.0,
+      "bounds": {
+        "low": -10.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Intercept in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "noise_scale",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Std dev of Gaussian noise in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "habit_formation_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Rate at which habit strengthens when adopting.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Daily increase/decrease in fatigue depending on adoption state.",
+      "frozen": false
+    },
+    {
+      "key": "forgetting_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Daily habit decay rate when not adopting.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Mean of adoption threshold distribution at initialization.",
+      "frozen": true
+    },
+    {
+      "key": "threshold_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Std dev of adoption threshold distribution at initialization.",
+      "frozen": true
+    },
+    {
+      "key": "dropout_bias",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Bias toward dropping behavior; higher increases dropout probability.",
+      "frozen": false
+    },
+    {
+      "key": "peer_window_days",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Window for smoothing peer exposure (operationalized inside signal.peer_exposure via moving average if implemented).",
+      "frozen": true
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "ObservationAggregator",
+      "description": "Moving average window for reported observables.",
+      "frozen": false
+    },
+    {
+      "key": "community_reporting_subset",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "ObservationAggregator",
+      "description": "Fraction of agents sampled to compute community rates (1.0 = full).",
+      "frozen": true
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.is_adopting)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "adoption_train.csv:adoption_rate_overall"
+    },
+    {
+      "id": "observable.adoption_rate_by_community",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.is_adopting) by_group(Person.community_id)",
+      "frequency": "daily",
+      "aggregation": "by_group(community_id)",
+      "target_data_field": "adoption_train_by_community.csv:adoption_rate"
+    },
+    {
+      "id": "observable.adoption_churn_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "count(drops)/N",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "adoption_train.csv:adoption_churn"
+    },
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "count(new_adoptions)/N",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "adoption_train.csv:new_adoptions"
+    },
+    {
+      "id": "observable.campaign_intensity_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "signal.campaign_intensity",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "adoption_train.csv:campaign_intensity"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_overall",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_by_community",
+      "inputs": [
+        "observable.adoption_rate_by_community"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "by_group": true,
+          "aggregate_groups": "mean"
+        }
+      }
+    },
+    {
+      "name": "DTW_overall",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "DTW",
+        "config": {
+          "window": 7
+        }
+      }
+    },
+    {
+      "name": "PeakError_overall",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "mode": "absolute"
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_overall",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeak",
+        "config": {
+          "absolute": true
+        }
+      }
+    },
+    {
+      "name": "RMSE_churn",
+      "inputs": [
+        "observable.adoption_churn_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "procedures": [
+      "Set RNG with random_seed.",
+      "Create Person agents with attributes drawn from specified distributions.",
+      "Assign community_id uniformly across net_community_count communities.",
+      "Initialize network via NetworkBuilder at t=0.",
+      "Initialize Person.is_adopting = True for a random sample of size initial_adoption_fraction * N.",
+      "Initialize habit_strength = 0.0 for non-adopters, 0.4 for initial adopters; fatigue = 0.0 for all."
+    ]
+  },
+  "algorithms": {
+    "NetworkGenerationWattsStrogatzHomophily": "Construct a Watts\u2013Strogatz small-world base and reweight edges to favor within-community ties per homophily strength; assign log-normal weights; mark strong ties.",
+    "PeerInfluenceComputation": "Daily Poisson contacts from neighbors sampled with probability proportional to weight^bias; exposure is mean adoption among sampled neighbors.",
+    "PolicySchedulePiecewise": "Piecewise campaign function with ramp, exponential decay, and periodic pulses; intensity bounded [0,1].",
+    "AdoptionLogitWithHabitFatigue": "Logistic adoption probability combining social, policy, personal, habit, and fatigue terms plus noise; asymmetric dropout; habit formation/decay updates.",
+    "SmoothingMovingAverage": "Compute moving average over specified window for selected observables."
+  },
+  "data_sources": [
+    {
+      "name": "adoption_train.csv",
+      "purpose": "Calibration and evaluation of overall adoption rate, churn, new adoptions, and campaign intensity for training/evaluation periods.",
+      "fields_used": [
+        "date",
+        "adoption_rate_overall",
+        "adoption_churn",
+        "new_adoptions",
+        "campaign_intensity"
+      ]
+    },
+    {
+      "name": "adoption_train_by_community.csv",
+      "purpose": "Calibration and evaluation of community-level adoption rates.",
+      "fields_used": [
+        "date",
+        "community_id",
+        "adoption_rate"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: parse config, instantiate model, run simulation, orchestrate modules."
+      },
+      {
+        "name": "entities.py",
+        "description": "Definitions for Person data structure and helper functions for attribute initialization."
+      },
+      {
+        "name": "environment.py",
+        "description": "Network environment construction and utilities; wraps networkx graph and edge weights."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder module."
+      },
+      {
+        "name": "modules/policy_campaign.py",
+        "description": "Implements PolicyCampaign module."
+      },
+      {
+        "name": "modules/mobility_contact.py",
+        "description": "Implements MobilityContact module."
+      },
+      {
+        "name": "modules/behavior_adoption.py",
+        "description": "Implements BehaviorAdoption module."
+      },
+      {
+        "name": "modules/observation_aggregator.py",
+        "description": "Implements ObservationAggregator module."
+      },
+      {
+        "name": "parameters.py",
+        "description": "Parameter schema, defaults, bounds, and validation."
+      },
+      {
+        "name": "runner.py",
+        "description": "Simulation loop, tick scheduling, dependency resolution, signal bus."
+      },
+      {
+        "name": "evaluation.py",
+        "description": "Metrics computation (RMSE, MAE, DTW, PeakError, TimeToPeak), and reporting."
+      },
+      {
+        "name": "io.py",
+        "description": "Data I/O: read target data, write observables, configuration management."
+      },
+      {
+        "name": "utils.py",
+        "description": "Common utilities: RNG wrapper, rolling averages, sampling helpers."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "scikit-learn",
+      "numba",
+      "dtw-python"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_overall",
+    "MAE_by_community",
+    "DTW_overall",
+    "PeakError_overall",
+    "TimeToPeak_overall",
+    "RMSE_churn"
+  ]
+}

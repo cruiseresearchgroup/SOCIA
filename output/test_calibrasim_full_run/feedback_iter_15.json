@@ -1,0 +1,183 @@
+{
+  "summary": "The current iteration substantially expands the model (media, risk, retailer, location compliance) and improves modularity, but a syntax error in Simulation.evaluate breaks execution, and several state-mutation and metric issues risk incorrect or duplicated results. Fix the IndentationError, remove duplicated metric assignments, centralize state mutation in Simulation.run (and remove it from AdoptionAggregator), and align evaluation metrics with the task specification (post-policy sustainability, exposure to misinformation, compliance under mandate).",
+  "critical_issues": [
+    {
+      "issue": "IndentationError in Simulation.evaluate caused by mis-indented metric assignments",
+      "impact": "Prevents the simulation from running at all; blocks any evaluation and artifact creation",
+      "solution": "Properly indent the lines assigning metrics[\"time_to_threshold_70\"] and remove the stray one-liner duplication of time_to_50_percent. See code_snippets[0].",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Duplicate and premature state mutations in AdoptionAggregator.forward",
+      "impact": "Double-appends enforcement/compliance histories per day and risks inconsistencies across series; prev_mask_use is set in the aggregator instead of the central commit phase, potentially corrupting churn calculations",
+      "solution": "Remove AdoptionAggregator updates to state (prev_mask_use, compliance_by_type_history, enforcement_actions_history); update prev_mask_use inside Simulation.run commit when current_mask_use is committed. See code_snippets[1] and [2].",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Duplicate assignment of time_to_50_percent metric in Simulation.evaluate",
+      "impact": "Confusing and error-prone metric computation that can hide bugs and contributes to the syntax issue",
+      "solution": "Delete the stray next(...) line and keep the single loop-based computation. See code_snippets[0].",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Evaluation metrics misaligned with task specification",
+      "impact": "Missing or inconsistently named metrics (e.g., post_policy_sustainability vs sustained_adoption_after_policy_lift, exposure_to_misinformation not reported, compliance_under_mandate not summarized) reduces the utility of outputs for analysis",
+      "solution": "Compute and expose the expected metrics: post_policy_sustainability, exposure_to_misinformation, compliance_under_mandate; ensure naming matches the specification. See code_snippets[3].",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "MAE_cumulative_adopters computed against a None series",
+      "impact": "Produces misleading or undefined comparisons; can confuse calibration/evaluation",
+      "solution": "Set MAE_cumulative_adopters to NaN when no simulator cumulative time series exists or compute a proper cumulative-by-day series; as a quick fix, set to NaN. See code_snippets[3].",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy compliance metric",
+      "current_approach": "Only daily compliance_by_type and daily compliance_under_mandate (None when inactive) exist; evaluation does not summarize compliance under mandate vs not",
+      "suggested_approach": "Aggregate compliance under mandate (average adoption rate during mandate days) and report separately from non-mandate periods; also compute the requested compliance_under_mandate metric",
+      "expected_benefit": "Clearer interpretability of policy effects and alignment with evaluation metrics"
+    },
+    {
+      "aspect": "Misinformation exposure",
+      "current_approach": "MediaBroadcast computes daily misinformation rate but evaluation does not summarize it",
+      "suggested_approach": "Compute exposure_to_misinformation as mean daily rate across full period and, optionally, by phase (pre/during/post mandate)",
+      "expected_benefit": "Improved tracking of media environments and better alignment with evaluation metrics"
+    },
+    {
+      "aspect": "Post-policy sustainability",
+      "current_approach": "Computed as sustained_adoption_after_policy_lift but with a non-standard name and limited window handling",
+      "suggested_approach": "Rename to post_policy_sustainability, ensure window bounds are valid, and fallback gracefully if series is short",
+      "expected_benefit": "Alignment with metric spec and robust computation on short runs"
+    },
+    {
+      "aspect": "Cumulative adopters metric",
+      "current_approach": "Only a single final cumulative count is tracked; MAE computed vs ground truth using a placeholder None series",
+      "suggested_approach": "Track cumulative unique adopters by day (already possible using ever_adopted in aggregator) and compute MAE only if such series is available; otherwise return NaN",
+      "expected_benefit": "Meaningful comparison to real data when provided; avoids misleading metrics"
+    },
+    {
+      "aspect": "Household formation",
+      "current_approach": "Poisson household sizes are created but overwritten by a round-robin assignment; household size distribution is not actually used",
+      "suggested_approach": "Either: (a) actually assign members according to sampled sizes; or (b) simplify and remove unused household size logic to avoid confusion",
+      "expected_benefit": "Cleaner model logic and potential to use household norms realistically later"
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Fix mis-indentation in Simulation.evaluate and remove duplicate time_to_50_percent next(...) assignment",
+      "reason": "Resolves a syntax error blocking execution and avoids redundant computations",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Stop AdoptionAggregator from mutating global state (prev_mask_use, compliance/enforcement histories)",
+      "reason": "Keeps state updates centralized, prevents double-counting, and stabilizes churn computation",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Update prev_mask_use in Simulation.run when committing current_mask_use_today",
+      "reason": "Ensures churn calculation in subsequent steps has a correct baseline without relying on aggregator",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Align evaluation metric names and add missing metrics: post_policy_sustainability (rename), exposure_to_misinformation (average), and compliance_under_mandate (average during mandate days)",
+      "reason": "Aligns with the task specification and makes outputs more actionable",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Set MAE_cumulative_adopters to NaN if no time series; remove placeholder comparison against None",
+      "reason": "Avoids misleading metrics and potential downstream confusion",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Optionally remove unused variables like chan_count; keep modules side-effect free",
+      "reason": "Cleaner code and reduced confusion; minor but helpful for maintenance",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "post_policy_sustainability",
+      "current_gap": "Metric is computed under a different name and may not handle short series well",
+      "suggestion": "Compute metrics[\"post_policy_sustainability\"] as average adoption in [mandate_end_day+1, +30], guard for available length, and name exactly as specified"
+    },
+    {
+      "metric": "exposure_to_misinformation",
+      "current_gap": "Daily rate exists but no summary metric is reported",
+      "suggestion": "Compute metrics[\"exposure_to_misinformation\"] = mean(misinformation_rate_history) over the simulation period"
+    },
+    {
+      "metric": "compliance_under_mandate",
+      "current_gap": "No explicit top-level metric summarizing mandate compliance",
+      "suggestion": "During evaluation, average adoption rates across days where policy was active; report as metrics[\"compliance_under_mandate\"]"
+    },
+    {
+      "metric": "group_adoption_disparity",
+      "current_gap": "Reported as inequality_index_by_group but not named per spec",
+      "suggestion": "Set metrics[\"group_adoption_disparity\"] = inequality_index_by_group to match the expected naming"
+    }
+  ],
+  "prioritized_actions": [
+    "Fix IndentationError and duplicate time_to_50_percent assignment in Simulation.evaluate",
+    "Remove state mutations from AdoptionAggregator (prev_mask_use, compliance/enforcement histories) and set prev_mask_use in Simulation.run commit",
+    "Add/rename evaluation metrics to match specification: post_policy_sustainability, exposure_to_misinformation, compliance_under_mandate, and group_adoption_disparity",
+    "Set MAE_cumulative_adopters to NaN unless a simulator cumulative-by-day series is available",
+    "Optional: Clean up unused variables (e.g., chan_count) and clarify household assignment logic"
+  ],
+  "additional_comments": "Do not add a standard if __name__ == \"__main__\" guard; the system requires a direct main() call at the end. The early stopping environment override is correctly set in evaluate_params; consider restoring the previous value afterward for cleanliness, but it's not critical. NetworkX and Matplotlib are handled robustly. The module dependency order is sound. After fixes, run a quick py_compile check to ensure no remaining indentation or syntax issues remain.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "        for i, v in enumerate(sim_adopt):\n            if v >= 0.70:\n                t70 = i\n                break\n        # FIXED: Applied feedback snippet from simulation.py\nmetrics[\"time_to_threshold_70\"] = t70\n# Additional required metric: time_to_50_percent\nmetrics[\"time_to_50_percent\"] = next((i for i, v in enumerate(sim_adopt) if v >= 0.50), None)\n        # Additional required metric: time_to_50_percent\n        t50 = None\n        for i, v in enumerate(sim_adopt):\n            if v >= 0.50:\n                t50 = i\n                break\n        metrics[\"time_to_50_percent\"] = t50",
+      "after": "        for i, v in enumerate(sim_adopt):\n            if v >= 0.70:\n                t70 = i\n                break\n        metrics[\"time_to_threshold_70\"] = t70\n        # Additional required metric: time_to_50_percent\n        t50 = None\n        for i, v in enumerate(sim_adopt):\n            if v >= 0.50:\n                t50 = i\n                break\n        metrics[\"time_to_50_percent\"] = t50",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Update state histories for evaluator\n        state[\"prev_mask_use\"] = [1 if x else 0 for x in today_mask_use]\n        # Persist compliance_by_type for metrics\n        state.setdefault(\"compliance_by_type_history\", [])\n        state[\"compliance_by_type_history\"].append(compliance_by_type)\n        state.setdefault(\"enforcement_actions_history\", [])\n        state[\"enforcement_actions_history\"].append(enforcement_actions_today)",
+      "after": "        # Note: Do not mutate global state here. Simulation.run will update prev_mask_use,\n        # compliance_by_type_history, and enforcement_actions_history during the commit phase.",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "            if \"signal.agent.current_mask_use_today\" in buffers:\n                today_use = buffers[\"signal.agent.current_mask_use_today\"]\n                self.state[\"current_mask_use_history\"].append([1 if x else 0 for x in today_use])\n                # Deduct one mask per day if used and inventory available\n                for idx, agent in enumerate(self.state[\"agents\"]):\n                    used = 1 if (idx < len(today_use) and today_use[idx]) else 0\n                    if used and agent.mask_inventory > 0:\n                        agent.mask_inventory -= 1\n                    agent.prev_mask_use = used",
+      "after": "            if \"signal.agent.current_mask_use_today\" in buffers:\n                today_use = buffers[\"signal.agent.current_mask_use_today\"]\n                self.state[\"current_mask_use_history\"].append([1 if x else 0 for x in today_use])\n                # Deduct one mask per day if used and inventory available\n                for idx, agent in enumerate(self.state[\"agents\"]):\n                    used = 1 if (idx < len(today_use) and today_use[idx]) else 0\n                    if used and agent.mask_inventory > 0:\n                        agent.mask_inventory -= 1\n                    agent.prev_mask_use = used\n                # Centralize prev_mask_use update for churn calculation\n                self.state[\"prev_mask_use\"] = [1 if x else 0 for x in today_use]",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Post-policy sustainability: average adoption rate after mandate end for 30 days\n        mend = int(self.params.get(\"policy_mandate_end_day\", 45))\n        post_window = list(range(mend + 1, min(mend + 31, len(sim_adopt))))\n        if post_window:\n            vals = [sim_adopt[i] for i in post_window if i < len(sim_adopt)]\n            metrics[\"sustained_adoption_after_policy_lift\"] = sum(vals) / max(1, len(vals))\n        else:\n            metrics[\"sustained_adoption_after_policy_lift\"] = None\n        # Average compliance by location type\n        avg_comp = {\"home\": None, \"work\": None, \"public\": None}\n        if sim_compliance_hist:\n            sums = {\"home\": 0.0, \"work\": 0.0, \"public\": 0.0}\n            cnt = 0\n            for d in sim_compliance_hist:\n                for k in [\"home\", \"work\", \"public\"]:\n                    if d.get(k) is not None:\n                        sums[k] += float(d.get(k))\n                cnt += 1\n            if cnt > 0:\n                avg_comp = {k: (sums[k] / cnt) for k in sums}\n        metrics[\"average_compliance_by_location_type\"] = avg_comp\n        ...\n        metrics[\"RMSE_adoption_rate\"] = rmse(sim_adopt, gt_adopt) if gt_adopt else float(\"nan\")\n        metrics[\"MAE_cumulative_adopters\"] = mae([None] * len(sim_adopt), gt_cum) if gt_cum else float(\"nan\")\n        metrics[\"PearsonR_adoption_rate\"] = pearsonr(sim_adopt, gt_adopt) if gt_adopt else float(\"nan\")",
+      "after": "        # Post-policy sustainability: average adoption rate after mandate end for 30 days\n        mend = int(self.params.get(\"policy_mandate_end_day\", 45))\n        post_window = list(range(mend + 1, min(mend + 31, len(sim_adopt))))\n        if post_window:\n            vals = [sim_adopt[i] for i in post_window if i < len(sim_adopt)]\n            metrics[\"post_policy_sustainability\"] = sum(vals) / max(1, len(vals))\n        else:\n            metrics[\"post_policy_sustainability\"] = None\n        # Average compliance by location type\n        avg_comp = {\"home\": None, \"work\": None, \"public\": None}\n        if sim_compliance_hist:\n            sums = {\"home\": 0.0, \"work\": 0.0, \"public\": 0.0}\n            cnt = 0\n            for d in sim_compliance_hist:\n                for k in [\"home\", \"work\", \"public\"]:\n                    if d.get(k) is not None:\n                        sums[k] += float(d.get(k))\n                cnt += 1\n            if cnt > 0:\n                avg_comp = {k: (sums[k] / cnt) for k in sums}\n        metrics[\"average_compliance_by_location_type\"] = avg_comp\n        # Compliance under mandate (average adoption rate during mandate days)\n        start_day = int(self.params.get(\"policy_mandate_start_day\", 20))\n        end_day = int(self.params.get(\"policy_mandate_end_day\", 45))\n        if sim_adopt and end_day < len(sim_adopt):\n            active_days = sim_adopt[start_day:end_day + 1] if start_day < len(sim_adopt) else []\n            metrics[\"compliance_under_mandate\"] = (sum(active_days) / len(active_days)) if active_days else None\n        else:\n            metrics[\"compliance_under_mandate\"] = None\n        # Exposure to misinformation (average)\n        mis_hist = self.state.get(\"misinformation_rate_history\", [])\n        metrics[\"exposure_to_misinformation\"] = (sum(mis_hist) / len(mis_hist)) if mis_hist else None\n        # Group adoption disparity (naming alignment)\n        metrics[\"group_adoption_disparity\"] = metrics.get(\"inequality_index_by_group\")\n        # Metrics vs ground truth\n        metrics[\"RMSE_adoption_rate\"] = rmse(sim_adopt, gt_adopt) if gt_adopt else float(\"nan\")\n        metrics[\"MAE_cumulative_adopters\"] = float(\"nan\")  # set to NaN unless a proper time series is implemented\n        metrics[\"PearsonR_adoption_rate\"] = pearsonr(sim_adopt, gt_adopt) if gt_adopt else float(\"nan\")",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "This iteration greatly enhances the simulation scope and modularity (network formation rewiring, communication decay, media/misinformation, risk signal, policy enforcement with mask requirements, retailer stock/purchases, location-level compliance, and improved aggregation). However, a copy/paste error introduced a syntax-breaking indentation issue, and aggregator-level state mutations now conflict with the centralized commit logic, causing duplicated histories and potential churn miscalculation.",
+    "positive_impacts": [
+      "Added MediaBroadcast and RiskSignal integrates key drivers (media stance, perceived risk) into adoption decisions",
+      "Retailer and stock dynamics introduce resource constraints, making desired vs observed behavior more realistic",
+      "LocationCompliance with enforcement bridges policy to actual observed compliance at work/public",
+      "Parameter registry and pluggable calibration architecture improved",
+      "Stronger robustness in file handling, seeding, and modular I/O persistence"
+    ],
+    "negative_impacts": [
+      "IndentationError in Simulation.evaluate prevents any run",
+      "AdoptionAggregator mutates global state creating double-counted histories and fragile churn baseline",
+      "Duplicated metric assignment and naming inconsistencies reduce clarity",
+      "Household sizing logic not actually used to control distribution"
+    ],
+    "suggestions": [
+      "Fix syntax and duplicated metric assignments immediately",
+      "Keep all state mutations in Simulation.run commit; modules should only read inputs and write to buffers",
+      "Align metric names and add missing aggregate metrics to match the task specification",
+      "Optionally rationalize household assignment (or remove unused complexity) to avoid confusion"
+    ]
+  }
+}

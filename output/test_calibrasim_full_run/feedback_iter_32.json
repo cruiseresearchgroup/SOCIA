@@ -1,0 +1,188 @@
+{
+  "summary": "The simulation is largely complete and robust, but default runtime behavior will likely time out due to expensive calibration, and a few implementation details need optimization and I/O guarding. Recent changes add valuable modules (small-world network, context, supply chain, inequality, awareness dynamics), but they also introduce new hot paths and I/O that should be constrained. Priority fixes: make the default calibrator 'none' or drastically reduce budget, guard all persistence with SKIP_IO, add unconditional time caps to calibrators, optimize homophily rewiring candidate selection, and ensure orchestrate() uses a reliable SKIP_IO flag rather than changing environment variables post-import.",
+  "critical_issues": [
+    {
+      "issue": "Default run triggers expensive calibration (random_search with budget=50) on a large population and horizon.",
+      "impact": "Very likely to exceed sandbox/CI time limits, preventing any results or JSON output.",
+      "solution": "Change default calibrator to 'none' and/or set a much smaller default budget; apply strict time caps inside calibrators regardless of FAST_MODE.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "ParameterManager.persist_used() writes to disk unconditionally.",
+      "impact": "Writes artifacts even when SKIP_IO is intended, risking failures in restricted environments.",
+      "solution": "Guard persist_used with SKIP_IO (and/or a passed-in flag) similar to other I/O operations.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Homophily rewiring scans all non-neighbors for each edge rewiring.",
+      "impact": "O(N) candidate search per rewiring step can become costly with large N and multiple rewiring attempts.",
+      "solution": "Sample a small random subset of candidate nodes (e.g., 32\u201364) instead of scanning all N; keep correctness while reducing complexity.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Calibrator time budget guards only apply under FAST_MODE.",
+      "impact": "Non-fast runs can still be unbounded and exceed runtime constraints.",
+      "solution": "Apply an unconditional time cap, possibly scaling with budget or using an environment variable override.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Setting os.environ['SKIP_IO'] in orchestrate() does not change the module-level SKIP_IO constant computed at import.",
+      "impact": "I/O may still occur because SKIP_IO remains true to its initial value; changing env var post-import is ineffective.",
+      "solution": "Use a local skip_io flag in orchestrate() and guard all I/O calls with it; or recompute a runtime SKIP_IO flag.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Supply-demand realism",
+      "current_approach": "Single retailer with constant restock rate and fixed lead time; purchases are independent with an elasticity-based probability.",
+      "suggested_approach": "Introduce backlogging or reservation queue during stockouts, and SES-dependent elasticity/income-based affordability heterogeneity.",
+      "expected_benefit": "More realistic stockout dynamics and SES disparities, improving fit to observed shortages and adoption disparities."
+    },
+    {
+      "aspect": "Policy counterfactual evaluation",
+      "current_approach": "Run a second simulation (sim2) with policy weights zeroed to estimate contribution.",
+      "suggested_approach": "Use a deterministic small-N, short-horizon counterfactual run in all cases, or compute analytic sensitivity from the current run when possible (e.g., reduce message intensity mid-run).",
+      "expected_benefit": "Reduces runtime while preserving informative estimates of policy impact."
+    },
+    {
+      "aspect": "Awareness and memory",
+      "current_approach": "Awareness decays daily and memory is a binary daily bump over a fixed window.",
+      "suggested_approach": "Make memory a decaying exponential average or combine recent bumps with geometric decay, and allow heterogeneity in memory decay by age/SES.",
+      "expected_benefit": "Smoother, more realistic responsiveness to repeated messaging; better alignment with empirical decay of message effects."
+    },
+    {
+      "aspect": "Network dynamics",
+      "current_approach": "Watts\u2013Strogatz ring with optional rewiring plus homophily-rewiring and optional triadic closure attempts.",
+      "suggested_approach": "Bound the number of closure attempts by edges and sample candidate closures from ego networks rather than random picks; allow degree-preserving rewiring with constraints.",
+      "expected_benefit": "Better control over clustering and assortativity without excessive runtime; improved match to social network statistics."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Set default calibrator to 'none' and reduce default budget in parse_args().",
+      "reason": "Prevents timeouts in default runs and in sandboxed environments.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Guard ParameterManager.persist_used() with SKIP_IO.",
+      "reason": "Avoids unintended writes in restricted environments.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use a local skip_io flag in orchestrate() to guard all I/O instead of changing os.environ mid-run.",
+      "reason": "Changing environment variables after import does not affect module-level constants; a local flag is reliable.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Optimize NetworkDynamics._homophily_rewire() by sampling a small candidate subset instead of scanning all non-neighbors each time.",
+      "reason": "Reduces O(N) per rewiring step to O(1)-amortized, improving scalability.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Apply unconditional time budgets to all calibrators (RandomSearch, LogitHead), not only under FAST_MODE.",
+      "reason": "Ensures calibration cannot exceed allowable time in any environment.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Skip policy counterfactual sim2 in evaluate() for large N or when a short time budget is exceeded.",
+      "reason": "Prevents extra full simulation from causing timeouts; retains quick assessment where feasible.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Stockout rate over time",
+      "current_gap": "Constant restock rate and simple affordability may not capture sharp early stockouts and gradual normalization.",
+      "suggestion": "Calibrate restock_rate and lead_time against observed retail data; add demand surge factor tied to policy messages and risk signal."
+    },
+    {
+      "metric": "Adoption inequality by SES",
+      "current_gap": "Income-linked affordability exists but adoption cost penalties are uniform.",
+      "suggestion": "Increase SES heterogeneity in compliance cost and awareness decay; calibrate to observed adoption disparities."
+    },
+    {
+      "metric": "Time to peak adoption",
+      "current_gap": "Peak timing may be off if awareness/policy cadence not aligned with empirical campaigns.",
+      "suggestion": "Use actual campaign frequencies and message reach data to parameterize message_frequency and policy_channel_reach."
+    }
+  ],
+  "prioritized_actions": [
+    "Change default calibrator to 'none' and reduce default calibration budget.",
+    "Guard all parameter persistence with SKIP_IO and use a local skip_io flag in orchestrate() for all I/O.",
+    "Optimize homophily rewiring candidate selection to avoid O(N) scans.",
+    "Apply unconditional time caps to calibration loops.",
+    "Skip or heavily throttle policy counterfactual sim2 for large N or when time budget is tight.",
+    "Optionally add SES-dependent elasticity and backlog in supply chain to better match data."
+  ],
+  "additional_comments": "Recent additions (ContextScheduler, SupplyChain, extended aggregator metrics, small-world networks) significantly improve realism and analytical capability. The main remaining risk is computational cost under default settings. With the proposed changes, the simulator will be safer to run in CI/sandbox while preserving model fidelity.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "parser.add_argument(\"--calibrator\", type=str, default=\"random_search\", help=\"Calibrator name (none, logit_head, random_search, snpe)\")\nparser.add_argument(\"--budget\", type=int, default=50, help=\"Calibration budget (iterations)\")",
+      "after": "parser.add_argument(\"--calibrator\", type=str, default=\"none\", help=\"Calibrator name (none, logit_head, random_search, snpe)\")\nparser.add_argument(\"--budget\", type=int, default=10, help=\"Calibration budget (iterations)\")",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def persist_used(self, path: str) -> None:\n    \"\"\"Persist parameters_used.json with final values.\"\"\"\n    pass\n    try:\n        ensure_dir(os.path.dirname(path))\n        payload = dict(parameters=self.values, warnings=self.warnings)\n        with open(path, \"w\", encoding=\"utf-8\") as f:\n            json.dump(sanitize_for_json(payload), f, indent=2)\n    except Exception:\n        # best-effort\n        pass",
+      "after": "def persist_used(self, path: str) -> None:\n    \"\"\"Persist parameters_used.json with final values (guarded by SKIP_IO).\"\"\"\n    pass\n    if SKIP_IO:\n        return\n    try:\n        ensure_dir(os.path.dirname(path))\n        payload = dict(parameters=self.values, warnings=self.warnings)\n        with open(path, \"w\", encoding=\"utf-8\") as f:\n            json.dump(sanitize_for_json(payload), f, indent=2)\n    except Exception:\n        pass",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _homophily_rewire(self, adj: List[set], persons: List[Person], rng: random.Random, fraction: float) -> None:\n    \"\"\"Rewire a fraction of edges to increase homophily.\"\"\"\n    pass\n    N = len(adj)\n    edges = []\n    for u in range(N):\n        for v in adj[u]:\n            if u < v:\n                edges.append((u, v))\n    if not edges:\n        return\n    rng.shuffle(edges)\n    K = max(0, int(round(fraction * len(edges))))\n    if K == 0:\n        return\n    homo_strength = float(self.params.get(\"homophily_strength\", 0.5))\n    for idx in range(min(K, len(edges))):\n        u, v = edges[idx]\n        current_score = self._homophily_score(u, v, persons)\n        if rng.random() < homo_strength * 0.5:\n            candidates = [w for w in range(N) if w != u and w not in adj[u]]\n            if not candidates:\n                continue\n            w = max(candidates, key=lambda c: self._homophily_score(u, c, persons) + rng.random() * 0.01)\n            new_score = self._homophily_score(u, w, persons)\n            if new_score > current_score:\n                if v in adj[u]:\n                    adj[u].remove(v)\n                    adj[v].remove(u)\n                adj[u].add(w)\n                adj[w].add(u)",
+      "after": "def _homophily_rewire(self, adj: List[set], persons: List[Person], rng: random.Random, fraction: float) -> None:\n    \"\"\"Rewire a fraction of edges to increase homophily (sampled candidates).\"\"\"\n    pass\n    N = len(adj)\n    edges = []\n    for u in range(N):\n        for v in adj[u]:\n            if u < v:\n                edges.append((u, v))\n    if not edges:\n        return\n    rng.shuffle(edges)\n    K = max(0, int(round(fraction * len(edges))))\n    if K == 0:\n        return\n    homo_strength = float(self.params.get(\"homophily_strength\", 0.5))\n    max_candidates = 64\n    for idx in range(min(K, len(edges))):\n        u, v = edges[idx]\n        current_score = self._homophily_score(u, v, persons)\n        if rng.random() < homo_strength * 0.5:\n            # Sample a small subset of non-neighbors\n            non_neighbors = []\n            attempts = 0\n            target = min(max_candidates, max(0, N - 1 - len(adj[u])))\n            seen = set()\n            while len(non_neighbors) < target and attempts < 5 * max_candidates:\n                attempts += 1\n                w = rng.randrange(N)\n                if w == u or w in adj[u] or w in seen:\n                    continue\n                seen.add(w)\n                non_neighbors.append(w)\n            if not non_neighbors:\n                continue\n            w = max(non_neighbors, key=lambda c: self._homophily_score(u, c, persons) + rng.random() * 0.01)\n            new_score = self._homophily_score(u, w, persons)\n            if new_score > current_score:\n                if v in adj[u]:\n                    adj[u].remove(v)\n                    adj[v].remove(u)\n                adj[u].add(w)\n                adj[w].add(u)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "time_cap = 2.0 if FAST_MODE else None\nfor i, (intercept, w_policy) in enumerate(candidates):\n    if time_cap is not None and (time.time() - start_time) > time_cap:\n        break",
+      "after": "time_cap = 2.0 if FAST_MODE else float(os.environ.get(\"CALIB_TIME_CAP_SEC\", \"10.0\"))\nfor i, (intercept, w_policy) in enumerate(candidates):\n    if (time.time() - start_time) > time_cap:\n        break",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "rng = random.Random(seed)\nadapter = params_adapter or ParamsAdapter(os.path.join(ARTIFACTS_DIR, \"results\", \"parameter_definitions.json\"))\ncurrent = adapter.capture(simulator)\nbest_params = current\nbest_score = float(\"inf\")\n# ...\nstart_time = time.time()\ntime_cap = 2.0 if FAST_MODE else None\nfor i in range(n_trials):\n    if time_cap is not None and (time.time() - start_time) > time_cap:\n        break",
+      "after": "rng = random.Random(seed)\nadapter = params_adapter or ParamsAdapter(os.path.join(ARTIFACTS_DIR, \"results\", \"parameter_definitions.json\"))\ncurrent = adapter.capture(simulator)\nbest_params = current\nbest_score = float(\"inf\")\n# ...\nstart_time = time.time()\ntime_cap = float(os.environ.get(\"CALIB_TIME_CAP_SEC\", \"10.0\")) if not FAST_MODE else 2.0\nfor i in range(n_trials):\n    if (time.time() - start_time) > time_cap:\n        break",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "if not SKIP_IO and not args.skip_io:\n    sim.save_results(os.path.join(ARTIFACTS_DIR, \"results\", \"simulation_results.json\"))\n    sim.save_all_io(os.path.join(ARTIFACTS_DIR, \"io\"))\n    sim.visualize(show=False, save_path=os.path.join(ARTIFACTS_DIR, \"figs\", \"overview.png\"))\n# Evaluation\ngt = load_ground_truth(DATA_DIR, sim.sim_days)\nmetrics = sim.evaluate(gt, window=None)\n# Persist parameters\npm.set_values(**sim.get_params())\npm.persist_used(os.path.join(ARTIFACTS_DIR, \"results\", \"parameters_used.json\"))",
+      "after": "skip_io = SKIP_IO or args.skip_io\nif not skip_io:\n    sim.save_results(os.path.join(ARTIFACTS_DIR, \"results\", \"simulation_results.json\"))\n    sim.save_all_io(os.path.join(ARTIFACTS_DIR, \"io\"))\n    sim.visualize(show=False, save_path=os.path.join(ARTIFACTS_DIR, \"figs\", \"overview.png\"))\n# Evaluation\ngt = load_ground_truth(DATA_DIR, sim.sim_days)\nmetrics = sim.evaluate(gt, window=None)\n# Persist parameters (guarded)\npm.set_values(**sim.get_params())\nif not skip_io:\n    pm.persist_used(os.path.join(ARTIFACTS_DIR, \"results\", \"parameters_used.json\"))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "try:\n    sim2 = Simulation(self.get_params(), rng_seed=self.seed)\n    sim2.set_params(policy_signal_weight=0.0, message_intensity=0.0, media_campaign_intensity=0.0)\n    sim2.run(0, None, time_budget_sec=1.0 if FAST_MODE else 2.0)\n    series2 = sim2.history.get(\"observable.adoption_rate_daily\", [])\n    metrics[\"policy_effect_contribution\"] = (pred_adopt[-1] - (series2[-1] if series2 else 0.0)) if pred_adopt else None\nexcept Exception:\n    metrics[\"policy_effect_contribution\"] = None",
+      "after": "try:\n    # Skip heavy counterfactual for large N\n    if self.N <= 2000:\n        sim2 = Simulation(self.get_params(), rng_seed=self.seed)\n        sim2.set_params(policy_signal_weight=0.0, message_intensity=0.0, media_campaign_intensity=0.0)\n        sim2.run(0, None, time_budget_sec=1.0 if FAST_MODE else 2.0)\n        series2 = sim2.history.get(\"observable.adoption_rate_daily\", [])\n        metrics[\"policy_effect_contribution\"] = (pred_adopt[-1] - (series2[-1] if series2 else 0.0)) if pred_adopt else None\n    else:\n        metrics[\"policy_effect_contribution\"] = None\nexcept Exception:\n    metrics[\"policy_effect_contribution\"] = None",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent update adds a small-world option, context assignment, supply chain/stockout modeling, expanded aggregator outputs, and better awareness/trust dynamics. These enhance realism and analytical coverage. However, they also introduce new costs and I/O that need guarding.",
+    "positive_impacts": [
+      "More realistic social network via Watts\u2013Strogatz with triadic closure.",
+      "Awareness decay and memory integration improve behavioral dynamics.",
+      "Context-aware scheduling and a minimal supply chain enable stockout metrics.",
+      "Extended aggregator metrics (inequality, contextual adoption, stockout rates)."
+    ],
+    "negative_impacts": [
+      "Higher computational cost in network rewiring and calibration loops.",
+      "Unconditional parameter persistence may perform I/O in restricted environments.",
+      "Policy counterfactual sim2 can add noticeable runtime for large N."
+    ],
+    "suggestions": [
+      "Optimize homophily rewiring and enforce unconditional time caps in calibration loops.",
+      "Guard parameter persistence and all artifacts under a reliable skip_io flag.",
+      "Skip policy counterfactual runs for large populations or reduce their scope."
+    ]
+  }
+}

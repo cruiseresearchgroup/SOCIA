@@ -1,0 +1,200 @@
+{
+  "summary": "The codebase has a solid modular skeleton (data loading, network handling, exposure, information diffusion, decision, market, aggregation), but it is missing the actual simulation loop, evaluation, and calibration. The main() function is a no-op, and the only main() call is inside a docstring, so nothing runs. Inventory, budgeting, and data alignment steps are incomplete. The next iteration should first make the simulation executable (implement run, main, evaluate), then address realism and calibration.",
+  "critical_issues": [
+    {
+      "issue": "Simulation loop is missing (Simulation.run is empty)",
+      "impact": "No state updates occur; no predictions or metrics can be produced. The system cannot fulfill its primary task of predicting mask-wearing in days 30\u201339.",
+      "solution": "Implement Simulation.run: iterate over days, call PolicyAndMedia.step, ExposureCalculator.compute, InformationDiffusion.step, RetailMarket.step, MaskAdoptionDecision.step, decrement inventory for wearers, aggregate results, and store daily outputs.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "main() does nothing and is not invoked at the end of the file",
+      "impact": "The simulation never starts, violating the sandbox requirement for a direct main() call and producing no output.",
+      "solution": "Implement main() to construct Simulation(MODEL_PLAN), call initialize(), run(), evaluate() and print/save results. Place a direct main() call at the end of the file outside any string literal.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No evaluation or calibration pipeline implemented",
+      "impact": "The model cannot be validated or tuned. Metrics like RMSE, MAE, peak, time-to-50% are defined but never computed, preventing performance assessment and out-of-sample predictions.",
+      "solution": "Add an evaluate() method to compute metrics using train_data.csv for days 0\u201329 and 30\u201339. Implement a minimal calibration routine (e.g., random search or optional CMA-ES) respecting bounds and tolerance; at least provide a stub with hooks.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Inventory and budget dynamics are incomplete",
+      "impact": "Agents can accumulate masks without budget deduction, and masks are never consumed. This breaks the inventory constraint and economic feedback, distorting adoption dynamics.",
+      "solution": "In RetailMarket.step, deduct price from buyers\u2019 budgets. In the daily loop, decrement inventory for agents who wear a mask that day. Optionally block purchases when budgets are insufficient.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Observed data are not used beyond day-0 initialization",
+      "impact": "No alignment to empirical trajectories; cannot compute in-sample/out-of-sample errors. Predictions for days 30\u201339 are ungrounded.",
+      "solution": "Aggregate observed daily adoption rates from train_data.csv and compare to simulated adoption_rate_true over training and validation windows to compute RMSE/MAE and validate.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "End-of-file main() call is embedded in a docstring",
+      "impact": "The global call to main() is not executed, violating the special requirement and preventing simulation in the sandbox.",
+      "solution": "Close the docstring properly and place `main()` at global scope as a standalone call at the end of the file.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "ExposureCalculator recomputes neighbor index lists in nested loops daily; info_contacts not scaled by mobility",
+      "impact": "Performance may degrade for large populations; info diffusion hazards are miscalibrated because 'contacts' are counts of informed neighbors without adjusting for daily activation (mobility).",
+      "solution": "Precompute neighbor index arrays once. Multiply info_contacts by mobility_rate (and optionally layer weights) to represent expected daily informed contacts.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "AdoptionAggregator adds observation noise to adoption_rate_daily and this could be mistakenly used for metrics",
+      "impact": "Evaluation can be biased if the noisy series is used. Metrics could over/understate model accuracy.",
+      "solution": "Use adoption_rate_true for all metric calculations; keep the noisy adoption_rate_daily only for synthetic observation output.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy effect and heterogeneity",
+      "current_approach": "Single additive policy_boost based on enforcement_level with exponential decay.",
+      "suggested_approach": "Modulate policy_boost by agent trust_in_institutions and compliance_propensity; separate mandate_active effect and enforcement_level effect in log-odds. Example: z += mandate_active * theta_mandate + enforcement_level * theta_enforce * trust.",
+      "expected_benefit": "Better heterogeneity and more realistic response to policy, improving fit around Day 10 shift."
+    },
+    {
+      "aspect": "Household influence",
+      "current_approach": "Placeholder only; not used.",
+      "suggested_approach": "Add a small intra-household boost when any household member wears a mask (e.g., z += beta_household * share_household_wearing).",
+      "expected_benefit": "Improves micro-level clustering and adoption within family units matching observed patterns."
+    },
+    {
+      "aspect": "Dropout dynamics",
+      "current_approach": "If dropout draw passes for previous wearers, cap adoption probability at 0.1.",
+      "suggested_approach": "Apply a separate Bernoulli dropout for previous wearers only when peer reinforcement and policy are weak (e.g., if peer_term < threshold and no mandate), then set state to 0.",
+      "expected_benefit": "More interpretable behavior and responsiveness to reinforcement, reducing oscillations."
+    },
+    {
+      "aspect": "Information diffusion contacts",
+      "current_approach": "Counts informed neighbors but not scaled by mobility or layer weights.",
+      "suggested_approach": "Use expected daily informed contacts = informed_neighbors * mobility_rate * layer_weight; pass these counts to InformationDiffusion.",
+      "expected_benefit": "Aligns hazards with contact frequency; improves timing of adoption growth."
+    },
+    {
+      "aspect": "Network fallback",
+      "current_approach": "If social_network.json missing/empty, exposures are zero.",
+      "suggested_approach": "Generate a small-world network using parameters (network_type, average_degree) when empirical network is unavailable.",
+      "expected_benefit": "Prevents degenerate runs and enables meaningful diffusion in the absence of empirical network data."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Implement Simulation.run with the full daily loop including policy, exposures, info diffusion, retail purchases, adoption decision, inventory consumption, and aggregation.",
+      "reason": "Core to executing the model and producing predictions and metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement main() to initialize, run, evaluate, and print/save results; add a direct main() call at EOF outside any docstring.",
+      "reason": "Ensures execution in the sandbox and produces outputs as required.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add Simulation.evaluate to compute RMSE/MAE on training and validation windows and summary metrics (peak, time_to_50_percent, final_adoption, gini).",
+      "reason": "Allows verification against data and reporting of required metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "RetailMarket.step: deduct budgets for buyers and prevent purchases when budgets < price; return updated budgets. In the daily loop, decrement mask_inventory for wearers.",
+      "reason": "Fixes economic and inventory dynamics, making the inventory constraint meaningful.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "ExposureCalculator.compute: scale info_contacts by mobility_rate and layer weights; optionally precompute neighbor index arrays in Simulation.initialize for performance.",
+      "reason": "Corrects hazard scaling and improves performance.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Ensure evaluation uses adoption_rate_true rather than noisy adoption_rate_daily.",
+      "reason": "Prevents metric bias due to observation noise.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "RMSE_adoption (training and validation)",
+      "current_gap": "Not computed; simulation not aligned to the observed trajectory over days 0\u201329 and 30\u201339.",
+      "suggestion": "Aggregate observed daily adoption rates from train_data.csv; compute RMSE/MAE vs simulated adoption_rate_true and calibrate key parameters (alpha_intercept, gamma_risk_perception, beta_peer_*, delta_received_info, phi_persistence, social_influence_weight) with bounds using a simple random search or CMA-ES."
+    },
+    {
+      "metric": "Time_to_50_percent",
+      "current_gap": "Not computed; model\u2019s adoption curve timing unvalidated.",
+      "suggestion": "Calibrate policy_start_day sensitivity (via mandate_strength/enforcement_probability/compliance_decay_rate) and information diffusion rates to match the observed time when adoption crosses 50%."
+    },
+    {
+      "metric": "Adoption inequality (gini across age groups)",
+      "current_gap": "Not computed; no household influence; limited heterogeneity in response.",
+      "suggestion": "Modulate social influence coefficients by age/occupation and add household effect; compute gini at a specific day (e.g., day 39) to ensure realistic inequality levels."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement Simulation.run with the daily loop and fix the EOF main() call so the simulation executes.",
+    "Add Simulation.evaluate and compute all required metrics using adoption_rate_true.",
+    "Fix RetailMarket budgets and mask consumption in the daily loop.",
+    "Aggregate observed daily adoption from train_data.csv and compute RMSE/MAE for training and validation windows.",
+    "Implement a minimal calibration (random search) with parameter bounds; stub or optional CMA-ES integration.",
+    "Improve ExposureCalculator to scale info_contacts by mobility and precompute neighbor indices.",
+    "Add household influence and policy heterogeneity (trust/compliance) as incremental model realism.",
+    "Consider fallback synthetic network generation if social_network.json is missing/empty."
+  ],
+  "additional_comments": "The current architecture is well-structured and ready for the execution loop and evaluation logic. Start by making the model runnable and reproducible; then iterate on calibration and realism. Keep adoption_rate_true separate from noisy observations in all metric calculations. Optional imports (networkx, matplotlib) can remain for diagnostics but are unused currently.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    ...\n    def run(self) -> None:\n        \"\"\"\n\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n\"\"\"",
+      "after": "class Simulation:\n    ...\n    def run(self) -> None:\n        daily = []\n        for day in range(0, self.sim_end_day + 1):\n            signals = self.policy_media.step(day)\n            exposures = self.exposure_calc.compute(\n                self.neighbors_by_layer,\n                self.is_mask_wearing,\n                self.received_info,\n                self.agent_index_map,\n            )\n            # Update information state\n            self.received_info = self.info_diffusion.step(\n                self.received_info,\n                exposures[\"info_contacts\"],\n                signals[\"guidance_intensity\"],\n            )\n            # Retail purchases (updates budgets and inventory)\n            if self.retail_market is not None:\n                stock, price, self.mask_inventory = self.retail_market.step(self.budgets, self.mask_inventory)\n            # Decide mask wearing\n            self.is_mask_wearing = self.mask_adoption.step(\n                day,\n                self.is_mask_wearing,\n                self.received_info,\n                self.risk_perception,\n                self.age_groups,\n                self.occupations,\n                exposures[\"peer_mask_fraction\"],\n                signals[\"mandate_active\"],\n                signals[\"enforcement_level\"],\n                self.mask_inventory,\n            )\n            # Consume one mask when wearing\n            wear_idx = np.where(self.is_mask_wearing == 1)[0]\n            if wear_idx.size > 0:\n                self.mask_inventory[wear_idx] = np.maximum(0, self.mask_inventory[wear_idx] - 1)\n            # Aggregate\n            agg = self.aggregator.aggregate(day, self.is_mask_wearing, self.received_info, self.age_groups)\n            daily.append(agg)\n        self.results_daily = daily\n        self.results_df = pd.DataFrame(daily)\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass",
+      "after": "def main():\n    try:\n        sim = Simulation(MODEL_PLAN)\n        sim.initialize()\n        sim.run()\n        eval_results = sim.evaluate() if hasattr(sim, 'evaluate') else {}\n        print(json.dumps({\n            \"summary\": \"Run complete\",\n            \"metrics\": eval_results,\n        }))\n    except Exception as e:\n        print(\"Simulation failed:\", e)\n        traceback.print_exc()",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class RetailMarket:\n    ...\n    def step(self, budgets: np.ndarray, mask_inventory: np.ndarray) -> Tuple[float, float, np.ndarray]:\n        ...\n        if actual_purchases > 0:\n            ...\n            mask_inventory[buyers] += 1\n            self.stock_level -= float(len(buyers))\n        ...\n        return self.stock_level, self.price, mask_inventory",
+      "after": "class RetailMarket:\n    ...\n    def step(self, budgets: np.ndarray, mask_inventory: np.ndarray) -> Tuple[float, float, np.ndarray]:\n        ...\n        if actual_purchases > 0:\n            ...\n            # Deduct budgets for buyers that can afford\n            affordable = buyers[budgets[buyers] >= self.price]\n            if affordable.size > 0:\n                mask_inventory[affordable] += 1\n                budgets[affordable] -= self.price\n                self.stock_level -= float(affordable.size)\n        ...\n        return self.stock_level, self.price, mask_inventory",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class ExposureCalculator:\n    ...\n    def compute(...):\n        ...\n                mask_count = float(np.sum(is_mask_wearing[n_idx]))\n                info_count = float(np.sum(received_info[n_idx]))\n                frac = 0.0\n                if len(n_idx) > 0:\n                    frac = (mask_count / float(len(n_idx))) * wL * self.mobility_rate\n                peer_mask_fraction[L][idx] = frac\n                info_contacts[L][idx] = info_count",
+      "after": "class ExposureCalculator:\n    ...\n    def compute(...):\n        ...\n                mask_count = float(np.sum(is_mask_wearing[n_idx]))\n                info_count = float(np.sum(received_info[n_idx]))\n                deg = float(len(n_idx))\n                frac = (mask_count / deg) * wL * self.mobility_rate if deg > 0 else 0.0\n                peer_mask_fraction[L][idx] = frac\n                # Expected informed contacts per day scaled by mobility and layer weights\n                info_contacts[L][idx] = info_count * self.mobility_rate * wL",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# No evaluation method\n",
+      "after": "class Simulation:\n    ...\n    def _observed_daily_adoption(self) -> Optional[np.ndarray]:\n        if self.train_df is None:\n            return None\n        df = self.train_df.copy()\n        grp = df.groupby('day')['wearing_mask'].mean().sort_index()\n        # Ensure full coverage from day 0 to sim_end_day\n        days = np.arange(0, self.sim_end_day + 1)\n        out = np.full(len(days), np.nan)\n        for d, val in grp.items():\n            if 0 <= d <= self.sim_end_day:\n                out[d] = float(val)\n        return out\n\n    def evaluate(self) -> Dict[str, Any]:\n        if self.results_df is None:\n            return {}\n        sim_series = self.results_df['adoption_rate_true'].to_numpy()\n        obs_series = self._observed_daily_adoption()\n        metrics = {}\n        if obs_series is not None:\n            # Training window\n            tr_s = self.train_start_day\n            tr_e = self.train_end_day\n            val_s = self.validation_start_day\n            val_e = self.validation_end_day\n            y_true_tr = obs_series[tr_s:tr_e+1]\n            y_pred_tr = sim_series[tr_s:tr_e+1]\n            y_true_val = obs_series[val_s:val_e+1]\n            y_pred_val = sim_series[val_s:val_e+1]\n            metrics['RMSE_train'] = Metrics.rmse(y_true_tr, y_pred_tr)\n            metrics['MAE_train'] = Metrics.mae(y_true_tr, y_pred_tr)\n            metrics['RMSE_val'] = Metrics.rmse(y_true_val, y_pred_val)\n            metrics['MAE_val'] = Metrics.mae(y_true_val, y_pred_val)\n        metrics['peak_adoption'] = Metrics.peak(sim_series)\n        metrics['time_to_50_percent'] = Metrics.threshold_crossing_time(sim_series, 0.5, start_day=0)\n        metrics['final_adoption'] = Metrics.value_at(sim_series, len(sim_series)-1)\n        # Inequality by age at final day\n        last_row = self.results_daily[-1] if self.results_daily else None\n        if last_row and 'adoption_rate_by_age' in last_row:\n            metrics['adoption_inequality_gini'] = Metrics.gini_across_groups(last_row['adoption_rate_by_age'])\n        else:\n            metrics['adoption_inequality_gini'] = float('nan')\n        return metrics",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "There were no recent code changes in this iteration. The code remains a strong skeleton but lacks execution, evaluation, and calibration. The most pressing functional gap is the missing Simulation.run implementation and a working main() entrypoint.",
+    "positive_impacts": [
+      "Clear modular design covering all major components (network, diffusion, decision, retail, aggregation).",
+      "Parameterization via MODEL_PLAN is comprehensive and aligned with task specification."
+    ],
+    "negative_impacts": [
+      "No runnable simulation (empty run loop and main).",
+      "Final main() call is trapped in a docstring, preventing execution.",
+      "Missing evaluation and calibration features required by the task."
+    ],
+    "suggestions": [
+      "Implement the daily simulation loop and evaluation immediately.",
+      "Fix the EOF main() call to satisfy sandbox requirements.",
+      "Add a minimal calibration routine or a stub with bounds and a simple optimizer to iteratively fit parameters to the training data."
+    ]
+  }
+}

@@ -1,0 +1,197 @@
+{
+  "summary": "The simulation has made solid progress in modularizing entities, markets, policy, and enforcement, but the current code is not runnable end-to-end and misses several required metrics and validation routines. The most critical issues are: an empty main() that does nothing while being called at import; a truncated compute_metrics() with missing validate()/results()/I/O functions; and incomplete tracking for misinformation and stockout metrics. Addressing these will enable execution without Docker, satisfy the spec\u2019s metrics/validation criteria, and improve model fidelity.",
+  "critical_issues": [
+    {
+      "issue": "Empty main() is called at import, preventing any execution and producing no output",
+      "impact": "The program runs but does nothing, returning no metrics or files; pipelines relying on stdout or artifacts will fail. It also blocks smoke testing without Docker.",
+      "solution": "Implement a real CLI-driven main() (or run_cli()), keep the required direct call to main(), and add argument parsing for smoke tests and JSON output. Ensure it calls sim.run(), serializes metrics/validation, and optionally plots.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "compute_metrics() is truncated and does not populate required metrics; validate(), results(), save_json(), save_results(), visualize(), parse_args() are missing",
+      "impact": "Spec-required metrics (time_to_70_percent_adoption, sustained_adoption_days_above_80, average_compliance_under_mandate, retailer_stockout_rate, misinformation_prevalence, etc.) aren\u2019t computed, making the simulation non-compliant and unusable for downstream evaluation.",
+      "solution": "Fully implement compute_metrics() to populate all spec metrics; reintroduce/implement validate() to enforce validation_criteria; add results(), save_json(), save_results(), visualize(), and parse_args().",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Misinformation prevalence metric not tracked",
+      "impact": "Cannot report a key metric (misinformation_prevalence), obscuring the role of misinformation in adoption dynamics.",
+      "solution": "Extend InformationSource.broadcast_message() to return misinfo_ids; aggregate daily in information_broadcast() into self.misinfo_exposure_log and compute a recent prevalence metric (e.g., 7-day mean or last-day share exposed).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "safe_div typed to return float is used with default=None",
+      "impact": "Potential type confusion and runtime errors if assumptions change; None may propagate unexpectedly into numeric contexts.",
+      "solution": "Add a safe_div_opt() that returns Optional[float] for contexts where None is meaningful (contextual compliance); use safe_div for pure numeric calculations.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Metrics naming and coverage diverge from spec",
+      "impact": "Downstream evaluation expects specific metric names and semantics; current partial metrics use different keys or thresholds (e.g., target vs 70/80%).",
+      "solution": "Standardize metric names and definitions: time_to_70_percent_adoption, sustained_adoption_days_above_80, average_compliance_under_mandate, retailer_stockout_rate, average_mask_price, penalties_collected, misinformation_prevalence, cases_averted_vs_baseline, etc. Include timeseries where appropriate.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Validation criteria not implemented (adoption_curve_stability, S-curve R^2, mandate_effect_directionality, no_negative_inventories, efficacy_consistency)",
+      "impact": "Inability to verify simulation behavior against specification; increases risk of silent model errors (e.g., negative inventories, wrong mandate effects).",
+      "solution": "Implement validate() with the specified checks, using a dependency-free logistic fit via logit regression and robust guards for edge cases.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Information and misinformation exposure tracking",
+      "current_approach": "Tracks exposure_ids but not misinformation exposure cohorts; no prevalence metric.",
+      "suggested_approach": "Return misinfo_ids per source/day, union across sources per day, store in self.misinfo_exposure_log, and compute a 7-day moving average share exposed.",
+      "expected_benefit": "Enables the required misinformation_prevalence metric and supports causal analyses (e.g., DiD) of message impact."
+    },
+    {
+      "aspect": "Compliance under mandates",
+      "current_approach": "Computes daily compliance for 'required' contexts during mandates but exposes a custom 'compliance_in_mandated_locations' metric.",
+      "suggested_approach": "Aggregate average_compliance_under_mandate = sum(masked)/sum(visitors) on mandate days; also compute compliance without mandate for validation.",
+      "expected_benefit": "Aligns with spec and supports mandate_effect_directionality validation."
+    },
+    {
+      "aspect": "Retailer stockout rate",
+      "current_approach": "Tracks outage_days_by_type but no metric derived.",
+      "suggested_approach": "Compute retailer_stockout_rate = sum(outage_days_by_type.values()) / (days * number_of_types).",
+      "expected_benefit": "Captures supply constraints\u2019 severity, informing adoption bottlenecks."
+    },
+    {
+      "aspect": "Adoption curve validation",
+      "current_approach": "No S-curve or stability check.",
+      "suggested_approach": "Fit logit(p_t) ~ a + b t with closed-form OLS on clipped p_t in (1e-6, 1-1+1e-6); compute R^2 and stability (|\u0394| < 1% over last 14 days).",
+      "expected_benefit": "Ensures behavioral trajectory plausibility and convergence."
+    },
+    {
+      "aspect": "Parameter mapping to spec keys",
+      "current_approach": "Internal keys differ (e.g., 'policy_effect_strength' vs 'policy_effectiveness'); not all spec params are mapped.",
+      "suggested_approach": "Map spec parameters directly when present (e.g., social_influence_weight -> base_influence_strength; enforcement_strength -> enforcement_level_default; subsidy_per_mask -> subsidy_amount).",
+      "expected_benefit": "Simplifies configuration and comparability across runs."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Implement a functional CLI and main() (or run_cli()) that runs the sim, prints JSON metrics, writes artifacts, and supports a Docker-free --smoke path.",
+      "reason": "Enables execution without Docker and satisfies pipeline expectations for stdout JSON.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Complete compute_metrics() to populate all required metrics; re-add validate(), results(), save_json(), save_results(), visualize(), parse_args().",
+      "reason": "Meets the specification\u2019s metrics and validation requirements.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Extend InformationSource.broadcast_message() to return misinfo_ids and aggregate them in information_broadcast().",
+      "reason": "Supports misinformation_prevalence metric.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add safe_div_opt() for Optional[float] returns and use it in contextual compliance; keep safe_div for numeric-only paths.",
+      "reason": "Prevents type confusion and None leaking into numeric calculations.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Standardize metric names to spec (e.g., time_to_70_percent_adoption, sustained_adoption_days_above_80, average_compliance_under_mandate) and ensure disease metrics are None/omitted when module disabled.",
+      "reason": "Improves evaluation compatibility and avoids misleading zeros.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove stray pass statements preceding executable code in functions and __init__ methods.",
+      "reason": "Reduces confusion and clarifies that methods are fully implemented.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_equity_gap",
+      "current_gap": "SES-based adoption disparities may be too small/large depending on default price/income elasticity.",
+      "suggestion": "Calibrate price_elasticity and subsidy_amount by income quintile; consider increasing cost_sensitivity variance and applying targeted subsidies to low-SES agents to match empirical adoption gaps."
+    },
+    {
+      "metric": "effective_reproduction_number_Re",
+      "current_gap": "Observed Re reduction may deviate from theoretical mask efficacy reduction at high adoption.",
+      "suggestion": "Compute a theoretical reduction using adoption-weighted efficacy and compare to observed Rt; tune mask_efficacy_by_type or situational masking probability to align within \u00b15%."
+    },
+    {
+      "metric": "average_compliance_under_mandate",
+      "current_gap": "Context pooling may obscure differences between 'required' vs 'recommended' contexts.",
+      "suggestion": "Ensure only 'required' contexts during mandate contribute to the metric and verify directional increase vs non-mandate periods."
+    },
+    {
+      "metric": "misinformation_prevalence",
+      "current_gap": "Currently unreported.",
+      "suggestion": "Track daily misinfo-exposed share and report a recent average (7-day) to align with media monitoring snapshots."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement CLI and executable main() that runs the simulation and prints metrics JSON (keep the required direct main() call).",
+    "Complete compute_metrics() with all spec metrics; re-add/implement validate(), results(), save_json(), save_results(), visualize(), parse_args().",
+    "Add misinformation tracking (misinfo_ids) and compute misinformation_prevalence.",
+    "Implement retailer_stockout_rate and average_mask_price aggregation.",
+    "Add logistic S-curve fit and all validation checks per spec.",
+    "Map spec parameters to internal keys (social_influence_weight, policy_effectiveness, enforcement_strength, subsidy_per_mask, etc.).",
+    "Tidy stray pass statements and add safe_div_opt()."
+  ],
+  "additional_comments": "Note: The verification suggestion to replace the direct main() call with an if __name__ == '__main__' guard conflicts with the system\u2019s STANDARD REQUIREMENT to call main() directly at file end. Keep the direct call, but make main() a proper CLI entry that respects flags and avoids side-effects beyond running the sim. Provide a --smoke path for Docker-free checks.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass\n...\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()",
+      "after": "def run_cli() -> None:\n    args = parse_args()\n    pop = 50 if getattr(args, \"smoke_test\", False) else args.population_size\n    days = 3 if getattr(args, \"smoke_test\", False) else args.time_horizon_days\n    include_disease = False if getattr(args, \"smoke_test\", False) else args.include_disease_module\n    config: Dict[str, Any] = {}\n    if getattr(args, \"config\", None):\n        try:\n            with open(args.config, \"r\", encoding=\"utf-8\") as f:\n                config = json.load(f)\n        except Exception as e:\n            print(f\"Warning: failed to read config {args.config}: {e}\", file=sys.stderr)\n    sim = SocialAdoptionSimulation(population_size=pop, time_horizon_days=days, random_seed=args.random_seed,\n                                   include_disease_module=include_disease, config_params=config,\n                                   network_mean_degree=args.network_mean_degree,\n                                   network_rewiring_prob=args.network_rewiring_prob)\n    sim.run()\n    out_json = args.output\n    csv_path = os.path.splitext(out_json)[0] + \".csv\"\n    sim.save_json(out_json, metadata={\"args\": vars(args)})\n    sim.save_results(csv_path)\n    if not getattr(args, \"no_stdout\", False):\n        payload = {\"metrics\": sim.metrics}\n        if getattr(args, \"with_validation\", False):\n            payload[\"validation\"] = sim.validation_report\n        print(json.dumps(payload, indent=2, sort_keys=True))\n    if getattr(args, \"plot\", False):\n        sim.visualize()\n\ndef main() -> None:\n    run_cli()\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def compute_metrics(self) -> None:\n    \"\"\"\n    Compute required metrics, including equity and information campaign impact metrics.\n\n    Returns:\n        None\n    \"\"\"\n    pass\n    adoption_series = self.adoption_rate_over_time[:]\n    final_rate = adoption_series[-1] if adoption_series else 0.0\n\n    # FIXED: Target adoption threshold parameterized and correct metric",
+      "after": "def compute_metrics(self) -> None:\n    adoption_series = self.adoption_rate_over_time[:]\n    final_rate = adoption_series[-1] if adoption_series else 0.0\n    # Time to 70% adoption\n    time_to_70 = next((i for i, v in enumerate(adoption_series) if v >= 0.70), None)\n    # Sustained days >= 80%\n    sustained_80 = sum(1 for v in adoption_series if v >= 0.80)\n    # Compliance under mandate\n    total_mand_masked = sum(m for (m, t) in self.daily_compliance if t > 0)\n    total_mand_visitors = sum(t for (m, t) in self.daily_compliance if t > 0)\n    avg_comp_mandate = safe_div(total_mand_masked, total_mand_visitors, 0.0)\n    # SES equity gap\n    by_ses = self._group_rates_by_ses()\n    equity_gap = abs(by_ses.get(\"5\", 0.0) - by_ses.get(\"1\", 0.0))\n    # Retailer stockout rate\n    types_n = max(1, len(self.mask_market.types_available))\n    stockout_rate = safe_div(sum(self.mask_market.outage_days_by_type.values()), types_n * max(1, self.days), 0.0)\n    # Average mask price over time\n    prices = [p for p in self.avg_price_over_time if p > 0.0]\n    avg_mask_price = safe_div(sum(prices), len(prices), 0.0) if prices else 0.0\n    # Penalties collected\n    penalties_collected = self.total_fines_value\n    # Misinformation prevalence (7-day mean or last-day)\n    mis_prev = None\n    if hasattr(self, \"misinfo_exposure_log\") and self.misinfo_exposure_log:\n        window = self.misinfo_exposure_log[-7:] if len(self.misinfo_exposure_log) >= 7 else self.misinfo_exposure_log\n        shares = [safe_div(len(s), self.population_size, 0.0) for s in window]\n        mis_prev = safe_div(sum(shares), len(shares), 0.0)\n    # Disease metrics\n    incidence_per_100k = None\n    effective_Re = None\n    cases_averted_vs_baseline = None\n    if self.include_disease_module:\n        incidence_per_100k = [(x / max(1, self.population_size)) * 100000.0 for x in self.new_infections_over_time]\n        effective_Re = self.Rt_over_time[-1] if self.Rt_over_time else None\n        total_obs = sum(self.new_infections_over_time)\n        total_cf = sum(self.counterfactual_infections_over_time)\n        cases_averted_vs_baseline = max(0, total_cf - total_obs)\n    self.metrics = {\n        \"mask_adoption_rate\": adoption_series,  # timeseries\n        \"time_to_70_percent_adoption\": time_to_70,\n        \"sustained_adoption_days_above_80\": sustained_80,\n        \"average_compliance_under_mandate\": avg_comp_mandate,\n        \"incidence_per_100k\": incidence_per_100k,\n        \"effective_reproduction_number_Re\": effective_Re,\n        \"cases_averted_vs_baseline\": cases_averted_vs_baseline,\n        \"adoption_equity_gap\": equity_gap,\n        \"retailer_stockout_rate\": stockout_rate,\n        \"average_mask_price\": avg_mask_price,\n        \"penalties_collected\": penalties_collected,\n        \"misinformation_prevalence\": mis_prev\n    }"
+    },
+    {
+      "file": "simulation.py",
+      "before": "class InformationSource:\n    ...\n    def broadcast_message(self, day: int, persons: List[\"Person\"], rng: random.Random, params: Dict[str, Any]) -> Dict[str, Any]:\n        ...\n        exposures = 0\n        exposed_ids: Set[int] = set()\n        pro_sign = 1.0 if self.message_type == \"pro_mask\" else -1.0\n        msg_effect_size = float(params.get(\"message_effect_size\", 0.3))\n        for p in persons:\n            ...\n                exposures += 1\n                exposed_ids.add(p.pid)\n                misinformation_hit = rng.random() < self.misinformation_prob\n                sign = pro_sign if not misinformation_hit else -pro_sign\n                delta = msg_effect_size * sign * self.credibility * (0.5 + 0.5 * p.trust)\n                p.risk = clamp(p.risk + delta, 0.0, 1.0)\n                p.trust = clamp(p.trust + 0.01 * sign * self.credibility, 0.0, 1.0)\n        return {\"source_id\": self.sid, \"exposures\": exposures, \"exposed_ids\": exposed_ids}",
+      "after": "def broadcast_message(self, day: int, persons: List[\"Person\"], rng: random.Random, params: Dict[str, Any]) -> Dict[str, Any]:\n    exposures = 0\n    exposed_ids: Set[int] = set()\n    misinfo_ids: Set[int] = set()\n    pro_sign = 1.0 if self.message_type == \"pro_mask\" else -1.0\n    msg_effect_size = float(params.get(\"message_effect_size\", 0.3))\n    for p in persons:\n        weight = float(p.media_consumption_profile.get(self.sid, 0.0))\n        if weight <= 0:\n            continue\n        if rng.random() < self.reach * weight:\n            exposures += 1\n            exposed_ids.add(p.pid)\n            misinformation_hit = rng.random() < self.misinformation_prob\n            if misinformation_hit:\n                misinfo_ids.add(p.pid)\n            sign = pro_sign if not misinformation_hit else -pro_sign\n            delta = msg_effect_size * sign * self.credibility * (0.5 + 0.5 * p.trust)\n            p.risk = clamp(p.risk + delta, 0.0, 1.0)\n            p.trust = clamp(p.trust + 0.01 * sign * self.credibility, 0.0, 1.0)\n    return {\"source_id\": self.sid, \"exposures\": exposures, \"exposed_ids\": exposed_ids, \"misinfo_ids\": misinfo_ids}"
+    },
+    {
+      "file": "simulation.py",
+      "before": "def information_broadcast(self, day: int) -> None:\n    ...\n    daily_exposed: Set[int] = set()\n    for src in self.info_sources:\n        stats = src.broadcast_message(day, self.people, self.rng, self.params)\n        exposed_ids = stats.get(\"exposed_ids\", set())\n        if exposed_ids:\n            daily_exposed |= set(exposed_ids)\n    self.exposure_log.append(daily_exposed)\n    self.ever_exposed |= daily_exposed\n    avg_risk = safe_div(sum(p.risk for p in self.people), self.population_size, 0.0)\n    self.average_perceived_risk_over_time.append(avg_risk)",
+      "after": "def information_broadcast(self, day: int) -> None:\n    daily_exposed: Set[int] = set()\n    daily_misinfo: Set[int] = set()\n    for src in self.info_sources:\n        stats = src.broadcast_message(day, self.people, self.rng, self.params)\n        exposed_ids = stats.get(\"exposed_ids\", set())\n        misinfo_ids = stats.get(\"misinfo_ids\", set())\n        if exposed_ids:\n            daily_exposed |= set(exposed_ids)\n        if misinfo_ids:\n            daily_misinfo |= set(misinfo_ids)\n    self.exposure_log.append(daily_exposed)\n    self.ever_exposed |= daily_exposed\n    if not hasattr(self, \"misinfo_exposure_log\"):\n        self.misinfo_exposure_log = []\n    self.misinfo_exposure_log.append(daily_misinfo)\n    avg_risk = safe_div(sum(p.risk for p in self.people), self.population_size, 0.0)\n    self.average_perceived_risk_over_time.append(avg_risk)"
+    },
+    {
+      "file": "simulation.py",
+      "before": "def safe_div(n: float, d: float, default: float = 0.0) -> float:\n    if d == 0:\n        return default\n    return n / d",
+      "after": "def safe_div(n: float, d: float, default: float = 0.0) -> float:\n    if d == 0:\n        return default\n    return n / d\n\ndef safe_div_opt(n: float, d: float, default: Optional[float] = None) -> Optional[float]:\n    if d == 0:\n        return default\n    return n / d"
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.contextual_compliance_ts.append({\n    \"required\": safe_div(req_masked, req_total, None) if req_total > 0 else None,\n    \"recommended\": safe_div(rec_masked, rec_total, None) if rec_total > 0 else None,\n    \"optional\": safe_div(opt_masked, opt_total, None) if opt_total > 0 else None,\n})",
+      "after": "self.contextual_compliance_ts.append({\n    \"required\": safe_div_opt(req_masked, req_total, None) if req_total > 0 else None,\n    \"recommended\": safe_div_opt(rec_masked, rec_total, None) if rec_total > 0 else None,\n    \"optional\": safe_div_opt(opt_masked, opt_total, None) if opt_total > 0 else None,\n})"
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes significantly improved structure (locations by type, enforcement capacity/budget, typed market restocking/shocks, rng usage in decisions) but introduced regressions by truncating critical functions and leaving an empty main() that is still called.",
+    "positive_impacts": [
+      "Introduced location mix with differentiated enforcement and entry policies",
+      "Added restock interval and supply shock controls; per-visit purchase limits",
+      "Adoption probability refactored to parameterized function and reproducible RNG",
+      "Contextual compliance tracking and improved norms smoothing"
+    ],
+    "negative_impacts": [
+      "compute_metrics(), validate(), results(), and CLI were removed or left incomplete, making the simulation non-functional",
+      "Empty main() is still called at import, leading to no execution or outputs",
+      "safe_div used with default=None despite float return type (type inconsistency)",
+      "Some metrics naming diverges from spec (e.g., target-based thresholds vs fixed 70/80)"
+    ],
+    "suggestions": [
+      "Restore and finalize compute_metrics(), validate(), parse_args(), results(), save_json(), save_results(), visualize(), and a functional main()",
+      "Add misinformation exposure tracking and compute misinformation_prevalence",
+      "Introduce safe_div_opt for optional returns and standardize metric names to spec",
+      "Keep the required direct main() call, but make main() a real CLI entry that can run a Docker-free smoke test"
+    ]
+  }
+}

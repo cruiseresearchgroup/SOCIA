@@ -1,0 +1,218 @@
+{
+  "summary": "The simulation architecture is generally coherent and modular, but it currently fails at syntax due to an unmatched parenthesis in main(). There are also smaller correctness and robustness issues: environment variable leakage, duplicate state assignments, an undeclared module output, and evaluation metrics not aligned with the task specification. Additionally, the household formation logic is incorrect, leading to unrealistic household structures. Addressing these issues will restore execution, improve result validity, and align outputs with the required metrics.",
+  "critical_issues": [
+    {
+      "issue": "Syntax error in main(): unmatched parenthesis in seed_all call",
+      "impact": "Prevents the simulation from running at all.",
+      "solution": "Remove the extra closing parenthesis in main(). Change seed_all(int(params.get(\"random_seed\", 42)))) to seed_all(int(params.get(\"random_seed\", 42))).",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Environment variable leakage: DISABLE_EARLY_STOP not restored in evaluate_params()",
+      "impact": "Subsequent runs use unintended early stop config, corrupting calibration and evaluation consistency.",
+      "solution": "Save the previous value of DISABLE_EARLY_STOP, set it to \"1\" only during evaluation, and restore it in a finally block.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Duplicate prev_mask_use assignment in Simulation.run commit phase",
+      "impact": "Redundant state writes increase the risk of subtle bugs and make debugging harder.",
+      "solution": "Remove the duplicate line and update prev_mask_use exactly once after processing current_mask_use_today.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "CommunicationDynamics produces signal.agent.exposures_memory_next but does not declare it in outputs",
+      "impact": "I/O tracing and debugging are inconsistent; downstream assumptions about declared outputs may break tooling.",
+      "solution": "Add \"signal.agent.exposures_memory_next\" to CommunicationDynamics.outputs.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Evaluation metrics not aligned with specification",
+      "impact": "Missing required outputs (e.g., overall_adoption_rate, sustained_adoption_rate, dropout_rate, compliance_rate, adoption_disparity_index, policy_effect_size) makes the simulation non-compliant with the task.",
+      "solution": "Add the specified metrics to Simulation.evaluate(), reusing existing state where possible and adding a short policy counterfactual to compute policy_effect_size.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Household formation logic ignores intended Poisson household sizes",
+      "impact": "Generates unrealistic household structures, undermining within-household norm effects and potential location-dependent behaviors.",
+      "solution": "Assign members to households based on the sampled Poisson sizes rather than flattening to ~N/len(households) per household.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy effect estimation",
+      "current_approach": "No explicit policy effect size metric; only adoption history and compliance averages.",
+      "suggested_approach": "Run matched-seed counterfactuals: a mandate+enforcement-on scenario vs. a mandate-off (and enforcement=0) scenario over the same horizon to compute policy_effect_size as delta in final adoption rate.",
+      "expected_benefit": "Directly quantifies policy impact while holding stochastic factors constant."
+    },
+    {
+      "aspect": "Compliance aggregation",
+      "current_approach": "Only per-type compliance is tracked; no single compliance_rate is produced.",
+      "suggested_approach": "Derive an overall compliance_rate as a weighted mean of per-type compliance. Ideally, output per-type visitor counts from LocationCompliance and use them as weights; otherwise use a simple mean.",
+      "expected_benefit": "Produces a single interpretable compliance_rate aligned with the task specification."
+    },
+    {
+      "aspect": "Household norm realism",
+      "current_approach": "Households are created but member assignment ignores sampled sizes, creating near-uniform sizes.",
+      "suggested_approach": "Assign members strictly according to sampled sizes, respecting remaining population; store household size distribution.",
+      "expected_benefit": "Improves realism of within-household interactions and any norm/home compliance effects."
+    },
+    {
+      "aspect": "Evaluation coverage",
+      "current_approach": "Partial metrics; lacks sustained_adoption_rate, dropout_rate (as defined), and adoption_disparity_index under the specified names.",
+      "suggested_approach": "Add sustained_adoption_rate as last 14-day average of adoption_rate_history; dropout_rate as last 14-day average of churn_rate_history; adoption_disparity_index equal to the inequality_index_by_group already computed.",
+      "expected_benefit": "Brings outputs in line with the required evaluation metrics without heavy refactoring."
+    },
+    {
+      "aspect": "Social influence and exposure modeling transparency",
+      "current_approach": "Exposures_memory influences decisions but not declared in outputs; exposures_today is unused in BehaviorAdoption.",
+      "suggested_approach": "Declare exposures_memory_next output properly; optionally include a small direct weight on exposures_today or remove it from inputs if intentionally unused.",
+      "expected_benefit": "Improves traceability and avoids confusion in debugging and calibration."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Fix unmatched parenthesis in main(): seed_all(int(params.get(\"random_seed\", 42)))",
+      "reason": "Restores runnability; removes SyntaxError.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Wrap DISABLE_EARLY_STOP override in evaluate_params() with save/restore in a finally block.",
+      "reason": "Prevents environment leakage between trials and runs, ensuring reproducibility.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove duplicate self.state[\"prev_mask_use\"] assignment in Simulation.run commit phase.",
+      "reason": "Avoid redundant writes and potential confusion.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add \"signal.agent.exposures_memory_next\" to CommunicationDynamics.outputs.",
+      "reason": "Align declared outputs with what forward() produces for clarity and tooling.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add task-specified metrics in Simulation.evaluate(): overall_adoption_rate, time_to_50_percent_adoption, sustained_adoption_rate (last 14 days), dropout_rate (avg churn last 14 days), compliance_rate (weighted or simple mean), adoption_disparity_index (reuse inequality_index_by_group), policy_effect_size (counterfactual). Preserve existing metrics for backward compatibility.",
+      "reason": "Align outputs with the Task Specification metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Correct household formation to use sampled sizes for member assignment.",
+      "reason": "Ensures realistic household structure and consistent use of sampled sizes.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Optionally output visitor counts from LocationCompliance, e.g., buffer key signal.visitor_counts_by_type, and use them to weight compliance_rate in evaluate().",
+      "reason": "Improves accuracy of compliance_rate aggregation.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "overall_adoption_rate",
+      "current_gap": "Reported as final_adoption_rate only; lacking full time series alignment under expected name.",
+      "suggestion": "Expose overall_adoption_rate as the last value and optionally provide full series under the same naming for clarity."
+    },
+    {
+      "metric": "sustained_adoption_rate",
+      "current_gap": "No metric with this name; a similar metric (post_policy_sustainability) exists with a different window.",
+      "suggestion": "Compute sustained_adoption_rate as the average over the last 14 days of adoption_rate_history to match the specification."
+    },
+    {
+      "metric": "dropout_rate",
+      "current_gap": "Churn is computed daily but not summarized as dropout_rate.",
+      "suggestion": "Define dropout_rate as the average of churn_rate_history over the last 14 days."
+    },
+    {
+      "metric": "compliance_rate",
+      "current_gap": "Only per-type compliance is reported; no single compliance_rate.",
+      "suggestion": "Aggregate per-type compliance into a single compliance_rate (weighted by visitor counts if available, else mean)."
+    },
+    {
+      "metric": "adoption_disparity_index",
+      "current_gap": "Computed under inequality_index_by_group and mirrored as group_adoption_disparity.",
+      "suggestion": "Expose adoption_disparity_index equal to inequality_index_by_group for naming consistency."
+    },
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "Not computed.",
+      "suggestion": "Run matched-seed counterfactuals with mandates on vs. off to compute the difference in final adoption rates."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix the syntax error in main() by removing the extra parenthesis.",
+    "Wrap and restore DISABLE_EARLY_STOP around evaluate_params() calls.",
+    "Remove the duplicate prev_mask_use assignment in Simulation.run.",
+    "Declare signal.agent.exposures_memory_next in CommunicationDynamics.outputs.",
+    "Add the task-specified evaluation metrics, including policy_effect_size via counterfactuals.",
+    "Fix household formation to respect sampled sizes.",
+    "Optionally emit visitor counts from LocationCompliance and compute a weighted compliance_rate."
+  ],
+  "additional_comments": "Keep the direct main() call at the end as required by the sandbox, even though it runs on import. Consider also pruning trailing pass statements after returns to reduce noise, but this is optional.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "seed_all(int(params.get(\"random_seed\", 42))))",
+      "after": "seed_all(int(params.get(\"random_seed\", 42)))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "os.environ[\"DISABLE_EARLY_STOP\"] = \"1\"\nsimulator.run(start, end)\nmetrics = simulator.evaluate()",
+      "after": "old_early = os.environ.get(\"DISABLE_EARLY_STOP\", \"0\")\nos.environ[\"DISABLE_EARLY_STOP\"] = \"1\"\ntry:\n    simulator.run(start, end)\n    metrics = simulator.evaluate()\nfinally:\n    os.environ[\"DISABLE_EARLY_STOP\"] = old_early",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.state[\"prev_mask_use\"] = [1 if x else 0 for x in today_use]\n# FIXED: Centralize prev_mask_use update for churn calculation\nself.state[\"prev_mask_use\"] = [1 if x else 0 for x in today_use]",
+      "after": "self.state[\"prev_mask_use\"] = [1 if x else 0 for x in today_use]",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.outputs = [\"signal.agent.exposures_today\", \"signal.exposure_rate_daily\"]",
+      "after": "self.outputs = [\"signal.agent.exposures_today\", \"signal.exposure_rate_daily\", \"signal.agent.exposures_memory_next\"]",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "metrics[\"final_adoption_rate\"] = float(sim_adopt[-1]) if sim_adopt else 0.0\nmetrics[\"time_to_50_percent\"] = t50\n# ... no sustained_adoption_rate, dropout_rate, compliance_rate, policy_effect_size under required names",
+      "after": "metrics[\"overall_adoption_rate\"] = float(sim_adopt[-1]) if sim_adopt else 0.0\nmetrics[\"time_to_50_percent_adoption\"] = t50\n# sustained over last 14 days\nlastN = 14\nif sim_adopt:\n    N = min(lastN, len(sim_adopt))\n    metrics[\"sustained_adoption_rate\"] = sum(sim_adopt[-N:]) / float(N)\nelse:\n    metrics[\"sustained_adoption_rate\"] = None\n# dropout_rate as average churn over last 14 days\nif sim_churn := self.state.get(\"churn_rate_history\", []):\n    N = min(lastN, len(sim_churn))\n    metrics[\"dropout_rate\"] = sum(sim_churn[-N:]) / float(N)\nelse:\n    metrics[\"dropout_rate\"] = None\n# compliance_rate: simple mean of per-type compliance if visitor weights not available\nif sim_compliance_hist:\n    s = 0.0; c = 0\n    for d in sim_compliance_hist:\n        vals = [d.get(k) for k in (\"home\",\"work\",\"public\") if d.get(k) is not None]\n        if vals:\n            s += sum(vals)/len(vals)\n            c += 1\n    metrics[\"compliance_rate\"] = (s/c) if c>0 else None\nelse:\n    metrics[\"compliance_rate\"] = None\n# disparity index naming\nmetrics[\"adoption_disparity_index\"] = metrics.get(\"inequality_index_by_group\")\n# policy_effect_size via counterfactuals\ntry:\n    horizon = len(sim_adopt) if sim_adopt else int(self.params.get(\"time_steps\", 60))\n    base_seed = int(self.params.get(\"random_seed\", 42))\n    # On scenario\n    sim_on = Simulation(self.get_params(), self.param_defs)\n    sim_on.reset(reseed=base_seed)\n    sim_on.set_params(policy_mandate_start_day=0, policy_mandate_end_day=max(1, horizon), policy_enforcement_probability=1.0)\n    os.environ[\"DISABLE_EARLY_STOP\"] = \"1\"\n    sim_on.run(0, horizon)\n    on_rate = sim_on.state.get(\"adoption_rate_history\", [0.0])[-1]\n    # Off scenario\n    sim_off = Simulation(self.get_params(), self.param_defs)\n    sim_off.reset(reseed=base_seed)\n    sim_off.set_params(policy_mandate_start_day=-1, policy_mandate_end_day=-1, policy_enforcement_probability=0.0)\n    sim_off.run(0, horizon)\n    off_rate = sim_off.state.get(\"adoption_rate_history\", [0.0])[-1]\n    metrics[\"policy_effect_size\"] = on_rate - off_rate\nexcept Exception:\n    metrics[\"policy_effect_size\"] = None",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Households: random sizes around mean ~ 2.6\nmean_size = 2.6\nhouseholds: _t.List[Household] = []\nremaining = N\nhid = 0\nwhile remaining > 0:\n    if np is not None:\n        size = int(max(1, np.random.poisson(mean_size)))\n    else:\n        size = max(1, int(round(random.random() * 2 + 1)))\n    size = min(size, remaining)\n    member_indices: _t.List[int] = []\n    households.append(Household(id=hid, members=member_indices, norm_strength=0.5 + 0.2 * (random.random() - 0.5)))\n    hid += 1\n    remaining -= size\n# ... later: fill households approximately uniformly with N/len(households) members",
+      "after": "# Households: random sizes around mean ~ 2.6\nmean_size = 2.6\nhouseholds: _t.List[Household] = []\nremaining = N\nhid = 0\nsizes: _t.List[int] = []\nwhile remaining > 0:\n    if np is not None:\n        sz = int(max(1, np.random.poisson(mean_size)))\n    else:\n        sz = max(1, int(round(random.random() * 2 + 1)))\n    sz = min(sz, remaining)\n    sizes.append(sz)\n    households.append(Household(id=hid, members=[], norm_strength=0.5 + 0.2 * (random.random() - 0.5)))\n    hid += 1\n    remaining -= sz\n# Assign members respecting sizes\nidx = 0\nfor h, sz in zip(households, sizes):\n    for _ in range(sz):\n        if idx >= N: break\n        h.members.append(idx)\n        idx += 1\n# ... then use these actual household memberships",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent iteration introduced valuable fixes (e.g., aggregator no longer mutates global state, added several evaluator metrics), but also a critical syntax error and a redundant state assignment. The metric naming is closer to spec but still incomplete.",
+    "positive_impacts": [
+      "Aggregator no longer mutates state; updates centralized in Simulation.run.",
+      "Evaluation now includes time_to_threshold_70, time_to_50_percent, post_policy_sustainability, compliance_under_mandate, exposure_to_misinformation, and group_adoption_disparity.",
+      "Commit phase now deducts daily mask usage from inventory \u2014 consistent with desired behavior."
+    ],
+    "negative_impacts": [
+      "Syntax error in main() prevents execution.",
+      "Duplicate prev_mask_use assignment increases code noise and risks confusion.",
+      "Some required outputs are still missing (e.g., sustained_adoption_rate per spec, policy_effect_size).",
+      "CommunicationDynamics outputs are still incomplete for I/O trace (missing exposures_memory_next)."
+    ],
+    "suggestions": [
+      "Fix the syntax error in main() immediately.",
+      "Restore DISABLE_EARLY_STOP after evaluate_params() to prevent leakage.",
+      "Tighten evaluation to add all task-specified metrics with correct naming.",
+      "Finish the CommunicationDynamics outputs declaration and consider using exposures_today or remove it from BehaviorAdoption inputs if intentionally unused.",
+      "Correct the household formation logic to use the sampled Poisson sizes."
+    ]
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "passed": false,
+  "summary": "The code is syntactically valid and contains a reasonably detailed agent-based simulation scaffold with households, people, locations, a policy authority, media, and a supply chain. However, it does not fully implement the specified task: several required entities and metrics are missing or renamed, important validation criteria are absent, mandate end-day handling is unsafe (None handling), a validation function contains a critical runtime error ('mean' stray token), and multiple required outputs/behaviors (e.g., free mask distribution, policy cost) are not implemented.",
+  "issues": [
+    {
+      "type": "implementation",
+      "severity": "critical",
+      "description": "The implementation diverges from the required specification: missing or renamed entities (Retailer and Authority with free mask distribution), missing behaviors (free_mask_distribution, host_contacts), and multiple required metrics are not computed (e.g., average_adoption_rate, sustained_adoption_last_14_days, compliance_in_mandated_locations, subgroup_adoption_gap_income, masks_purchased_per_capita, policy_cost). Returned metric names also differ from the spec (e.g., adoption_rate instead of adoption_rate_over_time).",
+      "location": "Overall design (Person/Location/SupplyChain/PolicyAuthority/MediaChannel/Simulation classes, Simulation.run return)",
+      "solution": "Add the specified entities and behaviors: implement Retailer with stock/price/restock and rationing, Authority with free_mask_distribution_rate and campaign/enforcement budget, and InformationChannel with reliability/misinformation_rate. Compute required metrics under the exact names: adoption_rate_over_time, average_adoption_rate, sustained_adoption_last_14_days, compliance_in_mandated_locations, subgroup_adoption_gap_income, masks_purchased_per_capita, policy_cost, stockout_days. Align return keys and internal tracking accordingly."
+    },
+    {
+      "type": "logic",
+      "severity": "critical",
+      "description": "validate_replicate_consistency ends with a stray 'mean' expression and never returns. This will raise a NameError if the function is called.",
+      "location": "Simulation.validate_replicate_consistency (last line: 'mean')",
+      "solution": "Remove the stray 'mean', compute coefficient of variation of 'finals' via statistics.pstdev/mean, compare to cv_threshold, and return (ok, msg). For example: cv = pstdev(finals)/(mean(finals)+1e-12); return cv <= cv_threshold, f\"replicate_consistency: cv={cv:.3f}\"."
+    },
+    {
+      "type": "logic",
+      "severity": "major",
+      "description": "Mandate end day handling assumes mandate_end_day is an int. The spec allows null (None). int(None) will raise a TypeError during initialization.",
+      "location": "Simulation.__init__ -> PolicyAuthority(mandate_end_day=int(self.p.get('mandate_end_day', 120))) and PolicyAuthority.issue_mandates",
+      "solution": "Allow mandate_end_day to be None. Store it as Optional[int] and in issue_mandates handle open-ended mandates: return self.mandate_enabled and day >= start and (self.mandate_end_day is None or day <= self.mandate_end_day)."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "Required validation criteria are not implemented (adoption_bounds, convergence_last_14_days with per-day changes, mandate_effect_sanity_check, nonnegative_inventory, reproducibility_fixed_seed). Existing validation helpers differ in logic.",
+      "location": "Validation methods under Simulation.*",
+      "solution": "Implement the specified validation checks: (1) adoption_bounds: verify all adoption_rate_over_time in [0,1]; (2) convergence_last_14_days: count days among last 14 where abs(diff day-to-day) < 0.005 and require >=10; (3) mandate_effect_sanity_check: ensure adoption increases by >=5 percentage points within 14 days after mandate_start_day with enforcement_probability > 0; (4) nonnegative_inventory: verify all retailer/supply stock and agent inventories stay >=0; (5) reproducibility_fixed_seed: two runs with same seed produce identical time series."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "Policy cost and fines are not modeled. The spec requires policy_cost and fines collected; only enforcement_actions_count is returned.",
+      "location": "Simulation.step (enforcement interactions) and Simulation.run (metrics aggregation)",
+      "solution": "Track fines assessed (= incident count * fine_amount when enforcement applies and mandate active), enforcement spending (e.g., per-check cost from enforcement_budget or per-incident cost), and campaign costs (campaign_intensity * cost per day). Compute policy_cost = enforcement + campaign - fines_collected. Return policy_cost and fines_collected metrics."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "No implementation of free mask distribution, which is required by the spec (free_mask_distribution_rate).",
+      "location": "PolicyAuthority and Simulation.step",
+      "solution": "Add a daily loop where the authority distributes min(rate, available stock) masks to eligible persons (e.g., randomly among low-income or those with zero inventory), incrementing their mask_inventory accordingly, and decrementing supply or a separate distribution stock."
+    },
+    {
+      "type": "logic",
+      "severity": "major",
+      "description": "Reproducibility validation not implemented to guarantee identical outputs for same seed; a counterfactual run inside Simulation.run changes state but uses a different seed and is unnecessary.",
+      "location": "Simulation.run (policy_effectiveness_index counterfactual run)",
+      "solution": "Move counterfactual analysis outside core run or make it optional. Implement a dedicated reproducibility test that runs Simulation twice with the same params and seed and checks series equality. Avoid side-effect-prone global state."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "Income subgroup adoption gap metric (top vs bottom quintile) is missing; a Gini across quintiles is provided but not the requested gap.",
+      "location": "Simulation.run (metrics computations)",
+      "solution": "Compute subgroup_adoption_gap_income: adoption rate in top income quintile minus bottom income quintile and include it in results under the exact name."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "The simulation replaces the Retailer with a SupplyChain. The spec mandates purchase_and_supply with Retailer stock, price, daily_restock, rationing. This affects stockout_days and masks_purchased_per_capita.",
+      "location": "SupplyChain class and purchase flow in Simulation.step",
+      "solution": "Introduce one or more Retailer entities with stock, price, restock, rationing_policy, and region. Route purchases through retailers, track per-retailer stockouts to compute stockout_days, and track masks_purchased_per_capita."
+    },
+    {
+      "type": "logic",
+      "severity": "minor",
+      "description": "compliance_in_mandated_locations metric is not explicitly computed; only overall compliance and under_mandate averages are reported.",
+      "location": "Simulation.step and Simulation.run (metrics)",
+      "solution": "When mandate_active, compute fraction wearing masks among those present in mandated locations (public/work that are policy_eligible) and record as compliance_in_mandated_locations. Aggregate over time as needed."
+    },
+    {
+      "type": "error_handling",
+      "severity": "minor",
+      "description": "Parameter validation is minimal. Several parameters expected in [0,1] are not validated, and unsafe casts (e.g., int(None)) may occur.",
+      "location": "Simulation.__init__, PolicyAuthority, and usage sites",
+      "solution": "Add defensive normalization and checks (clamp or defaults) for probabilities, handle None values safely, and raise informative errors or coerce to defaults where appropriate."
+    },
+    {
+      "type": "performance",
+      "severity": "minor",
+      "description": "With population_size=10000, iterating over all persons and all public locations daily and sampling contacts per person may be slow in pure Python.",
+      "location": "Simulation.step (visits and _peer_share sampling)",
+      "solution": "Consider reducing default population or venues for typical runs, vectorizing some computations (e.g., use numpy), caching neighbor samples, or sub-sampling visits for performance. Provide parameters to downscale simulation for validation/CI."
+    },
+    {
+      "type": "imports",
+      "severity": "minor",
+      "description": "Unused imports (argparse, json, DATA_DIR constants) and environment path setup are present but unused.",
+      "location": "Top of file",
+      "solution": "Remove unused imports and constants or implement CLI/IO that uses them."
+    },
+    {
+      "type": "implementation",
+      "severity": "minor",
+      "description": "Main function is empty; while the system requires a direct main() call, having it do nothing impairs usability.",
+      "location": "main()",
+      "solution": "Optionally add a simple demo runner or CLI parsing to run the simulation with default params and print/save results. Keep the direct main() call to satisfy the system requirement."
+    }
+  ],
+  "verification_details": {
+    "syntax_check": true,
+    "imports_check": true,
+    "implementation_check": false,
+    "logic_check": false,
+    "error_handling_check": false,
+    "performance_check": true
+  }
+}

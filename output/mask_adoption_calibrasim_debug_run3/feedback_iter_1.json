@@ -1,0 +1,224 @@
+{
+  "summary": "The simulation is modular and syntactically sound, but it diverges from key requirements: it forecasts days 30\u201339 without initializing from the last observed training day, lacks any calibration (despite specifying CMA-ES), and only outputs aggregates instead of agent-level predictions. There are also smaller logic and performance issues. Addressing initialization, calibration, and output granularity should be the highest priorities.",
+  "critical_issues": [
+    {
+      "issue": "Forecast initialization uses day 0 instead of the last observed training day",
+      "impact": "Forecasts for days 30\u201339 do not condition on the actual agent-level state at the end of training, leading to biased and potentially large RMSE against observed data.",
+      "solution": "Initialize mask/info states from the last available training day (e.g., day 29), and compute time_since_first_info from training history. Start the forward simulation from day 30. Alternatively, replay days 0\u201329 with observed states to align latent counters and then forecast.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No calibration despite specification of calibration_method=CMA-ES",
+      "impact": "Default parameters are not tuned to data, causing suboptimal fit (high RMSE) and undermining the predictive validity of the model.",
+      "solution": "Add a calibration loop minimizing RMSE against the training series by tuning a subset of parameters (e.g., base_adoption_rate, beta_* weights, messaging_effect_size). Implement a lightweight random/Nelder-Mead optimizer with an optional PyCMA (CMA-ES) fallback.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Predictions are aggregate-only, not agent-level",
+      "impact": "The task asks to predict agents\u2019 mask-wearing behavior for days 30\u201339. Aggregate-only outputs miss this requirement and limit downstream analyses.",
+      "solution": "Record agent-level mask states for each forecast day and output a per-agent prediction file (day, agent_id, predicted_wearing_mask).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "time_to_threshold returns indices, not actual simulation days",
+      "impact": "Reported threshold times are misleading, particularly if simulation days are not zero-based or if the forecast starts after the training period.",
+      "solution": "Modify time_to_thresholds to accept the days array and return actual day values.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Forecast initialization and latent state alignment",
+      "current_approach": "Initialize from day 0 states; simulate through day 39.",
+      "suggested_approach": "Initialize from last observed training day; compute per-agent time_since_first_info from training records and start forecast at day 30.",
+      "expected_benefit": "Substantially improved predictive accuracy and RMSE by conditioning on realized history."
+    },
+    {
+      "aspect": "Calibration",
+      "current_approach": "No calibration (fixed defaults).",
+      "suggested_approach": "Implement a parameter search (random/Nelder-Mead) with optional PyCMA. Calibrate on days 0\u201329, re-run the simulation for forecasting with best parameters.",
+      "expected_benefit": "Lower RMSE and more realistic dynamics (e.g., adoption peak timing and levels)."
+    },
+    {
+      "aspect": "Agent-level predictions",
+      "current_approach": "Only aggregate adoption rates per day.",
+      "suggested_approach": "Export per-agent mask states for days 30\u201339.",
+      "expected_benefit": "Meets task requirements and enables micro-level evaluation."
+    },
+    {
+      "aspect": "Threshold timing metric",
+      "current_approach": "Returns index within array.",
+      "suggested_approach": "Return actual day values using the recorded days array.",
+      "expected_benefit": "Correct, interpretable threshold timing outputs."
+    },
+    {
+      "aspect": "Performance of neighbor computations",
+      "current_approach": "Nested Python loops per agent per day.",
+      "suggested_approach": "Optional scipy.sparse adjacency to vectorize neighbor fractions and peer transmission, with loop fallback.",
+      "expected_benefit": "Scales better for 10,000 agents with moderate-high degree."
+    },
+    {
+      "aspect": "Inequality metrics",
+      "current_approach": "Only by age on last day.",
+      "suggested_approach": "Add SES inequality if available; otherwise add by occupation consistently.",
+      "expected_benefit": "Better coverage of disparity metrics aligned with the specification."
+    },
+    {
+      "aspect": "Synthetic data size",
+      "current_approach": "Default synthetic n=2000.",
+      "suggested_approach": "Default synthetic n=10000 or make it configurable.",
+      "expected_benefit": "Closer to the specified population size and more realistic network effects."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Initialize from last observed training day and forecast only prediction window",
+      "reason": "Aligns forecasts with observed trajectory, reducing bias and improving RMSE.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute time_since_first_info using training history and inject into adoption module before forecasting",
+      "reason": "Correctly models minimum lags and hysteresis effects of information on adoption.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add calibration loop (random search with optional PyCMA) optimizing RMSE on training period",
+      "reason": "Meets the calibration requirement and improves fit.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Export agent-level predictions for days 30\u201339",
+      "reason": "Meets requirement to predict agents\u2019 behavior, not just aggregates.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Fix time_to_thresholds to return day values",
+      "reason": "Corrects metric interpretation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Optional performance optimization using scipy.sparse for neighbor fractions; fallback to loops if SciPy unavailable",
+      "reason": "Improves scalability for large networks.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute adoption inequality by SES (if present) in addition to age, and document when not available",
+      "reason": "Better alignment with specification's inequality metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Set synthetic population default to 10000 or tie to parameter",
+      "reason": "Aligns synthetic defaults with the specified population size.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "RMSE",
+      "current_gap": "No calibration; forecasts initialized from day 0, causing mismatch with observed trajectory.",
+      "suggestion": "Calibrate parameters against days 0\u201329, initialize forecast from day 29, and include enforcement/policy dynamics starting day 10 as specified."
+    },
+    {
+      "metric": "Peak timing and magnitude",
+      "current_gap": "Peak adoption may occur at unrealistic times due to uncalibrated betas and policy effects.",
+      "suggestion": "Tune beta_family/work/community, messaging_effect_size, and enforcement_elasticity; consider subgroup-specific susceptibility if present in attributes."
+    },
+    {
+      "metric": "Adoption inequality",
+      "current_gap": "Only variance by age on last day is reported.",
+      "suggestion": "Add SES-based inequality when socioeconomic_status exists; compute over the forecast window or as time series."
+    }
+  ],
+  "prioritized_actions": [
+    "Initialize forecast from the last observed training day and adjust simulation loop to run only the prediction window.",
+    "Implement a calibration routine to minimize RMSE on the training period and re-run forecast with calibrated parameters.",
+    "Export agent-level predictions for days 30\u201339.",
+    "Fix time_to_thresholds to return actual day values.",
+    "Optionally optimize neighbor computations using sparse matrices for performance.",
+    "Compute inequality metrics by SES (if available) in addition to age.",
+    "Align synthetic population size with 10000 or make it configurable."
+  ],
+  "additional_comments": "The modular architecture (NetworkLayerEngine, InformationDiffusion, SocialInfluenceAdoption) is solid and should support calibration and forecast initialization changes without major refactoring. Ensure any new dependencies (e.g., PyCMA, SciPy) are optional with graceful fallbacks.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "    # Initial states from day 0\n    max_day_train = int(train_df[\"day\"].max()) if not train_df.empty else -1\n    day0_df = train_df[train_df[\"day\"] == 0] if max_day_train >= 0 else pd.DataFrame(columns=[\"agent_id\", \"wearing_mask\", \"received_info\"])\n    initial_mask = np.zeros(n_agents, dtype=np.int8)\n    initial_info = np.zeros(n_agents, dtype=np.int8)\n    if not day0_df.empty:\n        for _, r in day0_df.iterrows():\n            a_id = int(r[\"agent_id\"])\n            idx = id_to_index.get(a_id, None)\n            if idx is not None:\n                initial_mask[idx] = int(r[\"wearing_mask\"])\n                initial_info[idx] = int(r[\"received_info\"])",
+      "after": "    # Initialize states from the last observed training day\n    latest_train_day = int(train_df[\"day\"].max()) if not train_df.empty else -1\n    last_df = train_df[train_df[\"day\"] == latest_train_day] if latest_train_day >= 0 else pd.DataFrame(columns=[\"agent_id\", \"wearing_mask\", \"received_info\"])\n    initial_mask = np.zeros(n_agents, dtype=np.int8)\n    initial_info = np.zeros(n_agents, dtype=np.int8)\n    if not last_df.empty:\n        for _, r in last_df.iterrows():\n            idx = id_to_index.get(int(r[\"agent_id\"]))\n            if idx is not None:\n                initial_mask[idx] = int(r[\"wearing_mask\"])  # force to observed state on last day\n                initial_info[idx] = int(r[\"received_info\"])  # observed info on last day\n    # Compute time_since_first_info from training history\n    time_since_first_info = np.full(n_agents, 10**6, dtype=int)\n    if not train_df.empty:\n        first_info = train_df[train_df[\"received_info\"] == 1].groupby(\"agent_id\")[\"day\"].min()\n        for a_id, d_first in first_info.items():\n            idx = id_to_index.get(int(a_id))\n            if idx is not None:\n                time_since_first_info[idx] = max(0, latest_train_day - int(d_first))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    adoption_module = SocialInfluenceAdoption(adoption_params, n_agents, people)\n    adoption_module.reset_mask(initial_mask, initial_info)",
+      "after": "    adoption_module = SocialInfluenceAdoption(adoption_params, n_agents, people)\n    adoption_module.reset_mask(initial_mask, initial_info)\n    # Inject computed time_since_first_info to honor observed history\n    if 'time_since_first_info' in locals():\n        adoption_module.time_since_first_info = time_since_first_info.copy()\n\n    # Reset info module to the observed info state on the last training day\n    info_module.reset_info(initial_info)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    # Run simulation loop\n    days = list(range(0, time_horizon_days, timestep_days))",
+      "after": "    # Run simulation loop only for prediction window starting after the last training day\n    pred_start = int(plan.get(\"prediction_period\", {}).get(\"start_day\", latest_train_day + 1 if latest_train_day >= 0 else 30))\n    pred_end = int(plan.get(\"prediction_period\", {}).get(\"end_day\", pred_start + 9))\n    days = list(range(pred_start, pred_end + 1, timestep_days))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def time_to_thresholds(series: List[float], thresholds: List[float]) -> Dict[float, Optional[int]]:\n    res: Dict[float, Optional[int]] = {}\n    arr = np.asarray(series, dtype=float)\n    for th in thresholds:\n        idxs = np.where(arr >= th)[0]\n        res[float(th)] = int(idxs[0]) if idxs.size > 0 else None\n    return res",
+      "after": "def time_to_thresholds(series: List[float], days: List[int], thresholds: List[float]) -> Dict[float, Optional[int]]:\n    res: Dict[float, Optional[int]] = {}\n    arr = np.asarray(series, dtype=float)\n    day_arr = np.asarray(days, dtype=int)\n    for th in thresholds:\n        idxs = np.where(arr >= th)[0]\n        res[float(th)] = int(day_arr[idxs[0]]) if idxs.size > 0 else None\n    return res",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        metrics = {\n            \"RMSE\": rmse(y_true, y_pred),\n            \"MAE\": mae(y_true, y_pred),\n            \"R_squared\": r2(y_true, y_pred),\n            \"PeakAdoption\": peak(list(sim_adoption_series)),\n            \"TimeToThresholds\": time_to_thresholds(list(sim_adoption_series), [0.4, 0.6, 0.8])  # based on overall series\n        }",
+      "after": "        metrics = {\n            \"RMSE\": rmse(y_true, y_pred),\n            \"MAE\": mae(y_true, y_pred),\n            \"R_squared\": r2(y_true, y_pred),\n            \"PeakAdoption\": peak(list(sim_adoption_series)),\n            \"TimeToThresholds\": time_to_thresholds(list(results_daily[\"adoption_rate\"]), list(results_daily[\"day\"]), [0.4, 0.6, 0.8])\n        }",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    # Extract predictions for days 30-39\n    pred_start = int(plan.get(\"prediction_period\", {}).get(\"start_day\", 30))\n    pred_end = int(plan.get(\"prediction_period\", {}).get(\"end_day\", 39))\n    predictions = []\n    for d, val in zip(results_daily[\"day\"], results_daily[\"adoption_rate\"]):\n        if pred_start <= d <= pred_end:\n            predictions.append({\"day\": int(d), \"predicted_adoption_rate\": float(val)})",
+      "after": "    # Extract aggregate predictions and agent-level predictions for forecast window\n    predictions = []\n    agent_predictions = []\n    for day_idx, d in enumerate(results_daily[\"day\"]):\n        if pred_start <= d <= pred_end:\n            predictions.append({\"day\": int(d), \"predicted_adoption_rate\": float(results_daily[\"adoption_rate\"][day_idx])})\n            # Capture agent-level states from adoption_module after each step (store during loop)\n    # Save agent-level predictions\n    try:\n        agent_pred_path = os.path.join(out_dir, \"agent_predictions_day30_39.csv\")\n        # Build a long-form dataframe collected during the loop (see loop modification below)\n        if 'agent_daily_states' in locals():\n            pd.concat(agent_daily_states, ignore_index=True).to_csv(agent_pred_path, index=False)\n    except Exception as e:\n        print(\"Warning: Failed to save agent-level predictions:\", e)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    for day in days:\n        # Current states\n        current_mask = adoption_module.mask_state.copy()\n        policy_state = policy_module.step(day)\n        info_out = info_module.step(current_mask, policy_state)\n        adoption_out = adoption_module.step(\n            day=day,\n            received_info_state=info_out[\"received_info_state\"],\n            neighbor_frac_family=info_out[\"neighbor_frac_family\"],\n            neighbor_frac_work=info_out[\"neighbor_frac_work\"],\n            neighbor_frac_comm=info_out[\"neighbor_frac_comm\"],\n            policy_state=policy_state\n        )\n        agg_out = aggregator.step(adoption_out[\"mask_adoption_state\"], info_out[\"received_info_state\"])",
+      "after": "    agent_daily_states = []\n    for day in days:\n        current_mask = adoption_module.mask_state.copy()\n        policy_state = policy_module.step(day)\n        info_out = info_module.step(current_mask, policy_state)\n        adoption_out = adoption_module.step(\n            day=day,\n            received_info_state=info_out[\"received_info_state\"],\n            neighbor_frac_family=info_out[\"neighbor_frac_family\"],\n            neighbor_frac_work=info_out[\"neighbor_frac_work\"],\n            neighbor_frac_comm=info_out[\"neighbor_frac_comm\"],\n            policy_state=policy_state\n        )\n        agg_out = aggregator.step(adoption_out[\"mask_adoption_state\"], info_out[\"received_info_state\"]) \n        # Record agent-level predictions\n        agent_daily_states.append(pd.DataFrame({\n            'day': day,\n            'agent_id': [p.id for p in people],\n            'predicted_wearing_mask': adoption_out['mask_adoption_state'].astype(int)\n        }))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def _create_synthetic_agents(self, n: int = 2000) -> pd.DataFrame:",
+      "after": "    def _create_synthetic_agents(self, n: int = 10000) -> pd.DataFrame:",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class InformationDiffusion:\n    ...\n    def _compute_neighbor_fraction(self, state: np.ndarray, adj: List[List[int]], activation_rate: float) -> np.ndarray:\n        n = self.n\n        frac = np.zeros(n, dtype=float)\n        for i in range(n):\n            neigh = adj[i]\n            if not neigh:\n                frac[i] = 0.0\n                continue\n            active = [j for j in neigh if np.random.random() < activation_rate]\n            if not active:\n                frac[i] = 0.0\n                continue\n            vals = state[active].astype(float)\n            frac[i] = float(np.mean(vals))\n        return frac",
+      "after": "class InformationDiffusion:\n    ...\n    def _compute_neighbor_fraction(self, state: np.ndarray, adj: List[List[int]], activation_rate: float) -> np.ndarray:\n        # Optional sparse vectorization if SciPy is available\n        try:\n            from scipy.sparse import csr_matrix\n            n = self.n\n            rows = []\n            cols = []\n            data = []\n            for i in range(n):\n                for j in adj[i]:\n                    if np.random.random() < activation_rate:\n                        rows.append(i); cols.append(j); data.append(1.0)\n            if not rows:\n                return np.zeros(n, dtype=float)\n            A = csr_matrix((data, (rows, cols)), shape=(n, n))\n            neigh_sum = A.dot(state.astype(float))\n            deg = np.array(A.getnnz(axis=1), dtype=float)\n            with np.errstate(divide='ignore', invalid='ignore'):\n                frac = np.divide(neigh_sum, deg, out=np.zeros_like(neigh_sum, dtype=float), where=deg>0)\n            return frac\n        except Exception:\n            # Fallback to loop\n            n = self.n\n            frac = np.zeros(n, dtype=float)\n            for i in range(n):\n                neigh = adj[i]\n                if not neigh:\n                    frac[i] = 0.0\n                    continue\n                active = [j for j in neigh if np.random.random() < activation_rate]\n                frac[i] = float(np.mean(state[active].astype(float))) if active else 0.0\n            return frac",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "No recent changes were applied. The current version maintains a clean modular structure but misses critical requirements: proper forecast initialization, calibration, and agent-level outputs.",
+    "positive_impacts": [
+      "Modular architecture enables targeted enhancements without large refactors.",
+      "Reasonable default parameters and clear separation of policy, information diffusion, and adoption logic."
+    ],
+    "negative_impacts": [
+      "Forecasts do not reflect actual end-of-training states, biasing predictions.",
+      "Calibration is missing, so model fit is likely suboptimal.",
+      "Metrics and outputs are not fully aligned with requirements (threshold timing, agent-level predictions)."
+    ],
+    "suggestions": [
+      "Implement forecast initialization from the last training day and limit simulation to the prediction window.",
+      "Add a calibration routine with optional PyCMA support.",
+      "Export agent-level predictions for the forecast days.",
+      "Correct time_to_thresholds to use day values and consider performance optimizations."
+    ]
+  }
+}

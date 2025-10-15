@@ -1,0 +1,766 @@
+{
+  "model_type": "network",
+  "description": "Network-based agent simulation of social adoption dynamics driven by peer influence, intrinsic attitudes, costs, and a time-varying policy incentive. Uses small-world contact network with daily influence and adoption decisions.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "opinion",
+        "adopted",
+        "cost",
+        "compliance_prop",
+        "intrinsic_utility",
+        "neighbors",
+        "contacts_today",
+        "peer_pressure"
+      ],
+      "behaviors": [
+        "interact_with_neighbors",
+        "update_opinion",
+        "decide_adoption",
+        "respond_to_policy"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "opinion_distribution": "Normal(mean=0.4, std=0.15) clipped to [0,1]",
+          "adopted_fraction": 0.05,
+          "cost_distribution": "Normal(mean=0.4, std=0.15) clipped to [0,1]",
+          "compliance_distribution": "Beta(mean=compliance_base, kappa=8.0)",
+          "intrinsic_utility": "drawn as opinion at t0"
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "ContactNetwork",
+      "description": "Generates and updates the social contact network and samples daily contacts.",
+      "inputs": [],
+      "outputs": [
+        "signal.network_graph",
+        "signal.contacts_today_counts"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  if network_type == 'watts_strogatz':\n    G = watts_strogatz_graph(N, k=mean_degree, p=rewiring_prob)\n  elif network_type == 'barabasi_albert':\n    G = barabasi_albert_graph(N, m=max(1, int(mean_degree/2)))\n  else:\n    G = watts_strogatz_graph(N, k=mean_degree, p=rewiring_prob)\n  emit signal.network_graph = G\nfor each edge (u,v) in G:\n  with prob=edge_churn_rate: rewire edge to random node preserving degree\nfor each node i in G:\n  deg_i = degree(i)\n  lambda_i = max(0.0, contact_rate_scale) * deg_i\n  contacts_today_i ~ Poisson(lambda_i)\nemit signal.contacts_today_counts = {i: contacts_today_i for all i}",
+        "notes": [
+          "Edge churn introduces temporal variation in contacts.",
+          "Poisson sampling produces daily variability in interactions."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy.random"
+      ],
+      "module_parameters": [
+        "network_type",
+        "mean_degree",
+        "rewiring_prob",
+        "edge_churn_rate",
+        "contact_rate_scale"
+      ]
+    },
+    {
+      "name": "SocialInfluence",
+      "description": "Updates opinions using DeGroot-style averaging with intrinsic anchoring and noise; computes peer pressure.",
+      "inputs": [
+        "signal.network_graph",
+        "state.person.opinion",
+        "state.person.adopted"
+      ],
+      "outputs": [
+        "signal.updated_opinions",
+        "signal.peer_pressure"
+      ],
+      "dependencies": [
+        "ContactNetwork"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  N_i = neighbors(i) from signal.network_graph\n  if |N_i| > 0:\n    neighbor_mean = mean(opinion_j for j in N_i)\n  else:\n    neighbor_mean = opinion_i\n  eps ~ Normal(0, opinion_noise_std)\n  opinion_new_i = stubbornness * opinion_i + (1 - stubbornness) * (influence_weight_neighbors * neighbor_mean + influence_weight_intrinsic * opinion_i)\n  opinion_new_i = clip(opinion_new_i + eps, 0, 1)\n  peer_pressure_i = mean(1.0 if adopted_j else 0.0 for j in N_i) if |N_i|>0 else 0.0\nemit signal.updated_opinions = {i: opinion_new_i}\nemit signal.peer_pressure = {i: peer_pressure_i}",
+        "notes": [
+          "stubbornness in [0,1] controls self-retention.",
+          "peer_pressure is fraction of adopted neighbors."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "influence_weight_neighbors",
+        "influence_weight_intrinsic",
+        "stubbornness",
+        "opinion_noise_std"
+      ]
+    },
+    {
+      "name": "PolicyScheduler",
+      "description": "Generates a time-varying policy incentive and maps to agent-level effective pressure via compliance.",
+      "inputs": [],
+      "outputs": [
+        "signal.policy_incentive_global",
+        "signal.policy_pressure_per_agent"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t < policy_start_day:\n  inc = 0.0\nelif t < policy_start_day + policy_ramp_days:\n  inc = max_policy_incentive * (t - policy_start_day + 1) / policy_ramp_days\nelse:\n  inc = max_policy_incentive\ninc = clip(inc, 0, 1)\nfor each person i:\n  effective_i = inc * max(0.0, min(1.0, compliance_prop_i * (0.5 + 0.5 * compliance_base)))\nemit signal.policy_incentive_global = inc\nemit signal.policy_pressure_per_agent = {i: effective_i}",
+        "notes": [
+          "Linear ramp from start_day to full incentive.",
+          "Compliance scales the policy at the agent level."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "policy_start_day",
+        "policy_ramp_days",
+        "max_policy_incentive",
+        "compliance_base"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Applies a soft-threshold utility model to update adoption states.",
+      "inputs": [
+        "signal.updated_opinions",
+        "signal.peer_pressure",
+        "signal.policy_pressure_per_agent",
+        "state.person.cost",
+        "state.person.adopted"
+      ],
+      "outputs": [
+        "signal.updated_adoption_state",
+        "signal.new_adoptions_flag"
+      ],
+      "dependencies": [
+        "SocialInfluence",
+        "PolicyScheduler"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  U_i = alpha_opinion_weight * opinion_i + beta_peer_weight * peer_pressure_i + gamma_policy_weight * policy_pressure_i - delta_cost_weight * cost_i + habit_persistence * (1 if adopted_i else 0)\n  p_adopt_i = sigmoid((U_i - decision_threshold) / max(1e-6, decision_temperature))\n  if adopted_i == 1:\n    # persistence: allow drop with very low probability if U_i << threshold (optional; here disabled)\n    adopted_new_i = 1\n  else:\n    adopted_new_i ~ Bernoulli(p_adopt_i)\n  new_adopt_i = 1 if (adopted_new_i == 1 and adopted_i == 0) else 0\nemit signal.updated_adoption_state = {i: adopted_new_i}\nemit signal.new_adoptions_flag = {i: new_adopt_i}",
+        "notes": [
+          "Soft decision via logistic; habit_persistence locks-in adoption.",
+          "Drop-out disabled for stability; can be enabled if needed."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "alpha_opinion_weight",
+        "beta_peer_weight",
+        "gamma_policy_weight",
+        "delta_cost_weight",
+        "habit_persistence",
+        "decision_threshold",
+        "decision_temperature"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily observables across the population.",
+      "inputs": [
+        "signal.updated_adoption_state",
+        "signal.new_adoptions_flag",
+        "signal.contacts_today_counts",
+        "signal.policy_incentive_global"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adoptions_daily",
+        "observable.mean_contacts_daily",
+        "observable.policy_incentive_daily"
+      ],
+      "dependencies": [
+        "AdoptionDecision",
+        "ContactNetwork",
+        "PolicyScheduler"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adopt_rate = mean(adopted_new_i over i)\nnew_adopts = sum(new_adopt_i over i)\nmean_contacts = mean(contacts_today_counts[i] over i)\npol_inc = signal.policy_incentive_global\nif smoothing_window_days > 1:\n  apply moving average to each series over last smoothing_window_days\nemit observable.adoption_rate_daily = adopt_rate\nemit observable.new_adoptions_daily = new_adopts\nemit observable.mean_contacts_daily = mean_contacts\nemit observable.policy_incentive_daily = pol_inc",
+        "notes": [
+          "Optionally smooths observables for robust calibration."
+        ]
+      },
+      "requirements": [
+        "pandas (optional for smoothing)"
+      ],
+      "module_parameters": [
+        "smoothing_window_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "watts_strogatz",
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "ContactNetwork",
+      "description": "Type of network generator: watts_strogatz or barabasi_albert",
+      "frozen": false
+    },
+    {
+      "key": "mean_degree",
+      "dtype": "int",
+      "default": 8,
+      "bounds": {
+        "low": 2,
+        "high": 30
+      },
+      "owner_module": "ContactNetwork",
+      "description": "Average degree used by the generator",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.08,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "ContactNetwork",
+      "description": "Rewiring probability for Watts-Strogatz",
+      "frozen": false
+    },
+    {
+      "key": "edge_churn_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "ContactNetwork",
+      "description": "Daily probability to rewire an existing edge",
+      "frozen": false
+    },
+    {
+      "key": "contact_rate_scale",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "ContactNetwork",
+      "description": "Scales Poisson mean contacts_today = scale * degree",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_neighbors",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Weight on neighbor mean in opinion update",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_intrinsic",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Weight on own prior opinion in opinion update",
+      "frozen": false
+    },
+    {
+      "key": "stubbornness",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.9
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Retention of previous opinion before mixing",
+      "frozen": false
+    },
+    {
+      "key": "opinion_noise_std",
+      "dtype": "float",
+      "default": 0.03,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Std dev of Gaussian noise added to opinion",
+      "frozen": false
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 0,
+        "high": 60
+      },
+      "owner_module": "PolicyScheduler",
+      "description": "Day when policy starts ramping",
+      "frozen": false
+    },
+    {
+      "key": "policy_ramp_days",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 1,
+        "high": 60
+      },
+      "owner_module": "PolicyScheduler",
+      "description": "Number of days to ramp to full incentive",
+      "frozen": false
+    },
+    {
+      "key": "max_policy_incentive",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyScheduler",
+      "description": "Maximal normalized policy pressure at full ramp",
+      "frozen": false
+    },
+    {
+      "key": "compliance_base",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyScheduler",
+      "description": "Population-average compliance anchor used in generating effective pressure",
+      "frozen": false
+    },
+    {
+      "key": "alpha_opinion_weight",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Utility weight on updated opinion",
+      "frozen": false
+    },
+    {
+      "key": "beta_peer_weight",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Utility weight on peer pressure (fraction adopted neighbors)",
+      "frozen": false
+    },
+    {
+      "key": "gamma_policy_weight",
+      "dtype": "float",
+      "default": 0.9,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Utility weight on policy pressure",
+      "frozen": false
+    },
+    {
+      "key": "delta_cost_weight",
+      "dtype": "float",
+      "default": 1.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Utility penalty on individual cost",
+      "frozen": false
+    },
+    {
+      "key": "habit_persistence",
+      "dtype": "float",
+      "default": 2.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Lock-in utility added if already adopted",
+      "frozen": false
+    },
+    {
+      "key": "decision_threshold",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Threshold around which the logistic is centered",
+      "frozen": false
+    },
+    {
+      "key": "decision_temperature",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Controls stochasticity of adoption decisions",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Window for moving-average smoothing of observables",
+      "frozen": false
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of agents",
+      "frozen": false
+    },
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 10,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total simulation length",
+      "frozen": true
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Seed for reproducibility",
+      "frozen": true
+    },
+    {
+      "key": "initial_adopter_frac",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of adopters at t=0",
+      "frozen": false
+    },
+    {
+      "key": "initial_opinion_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial opinion distribution",
+      "frozen": false
+    },
+    {
+      "key": "initial_opinion_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std of initial opinion distribution",
+      "frozen": false
+    },
+    {
+      "key": "cost_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial cost distribution",
+      "frozen": false
+    },
+    {
+      "key": "cost_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std of initial cost distribution",
+      "frozen": false
+    },
+    {
+      "key": "compliance_kappa",
+      "dtype": "float",
+      "default": 8.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 20.0
+      },
+      "owner_module": "global",
+      "description": "Concentration parameter to generate Beta distribution around compliance_base",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "sum(Person.new_adoption_flag)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:new_adoptions"
+    },
+    {
+      "id": "observable.mean_contacts_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.contacts_today)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:mean_contacts"
+    },
+    {
+      "id": "observable.policy_incentive_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "policy_incentive_global",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:policy_incentive"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "PeakError_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "by": "value"
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeak",
+        "config": {
+          "unit": "days"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "network": {
+      "type": "watts_strogatz",
+      "mean_degree": 8,
+      "rewiring_prob": 0.08
+    },
+    "initial_states": {
+      "adopted_fraction": 0.05,
+      "opinion_mean": 0.4,
+      "opinion_std": 0.15,
+      "cost_mean": 0.4,
+      "cost_std": 0.15,
+      "compliance_mean": 0.6,
+      "compliance_kappa": 8.0
+    }
+  },
+  "algorithms": {
+    "WattsStrogatz": "Generates a small-world network with mean_degree and rewiring_prob.",
+    "BarabasiAlbert": "Generates a scale-free network with preferential attachment parameter m \u2248 mean_degree/2.",
+    "DeGrootOpinionUpdate": "Blends prior opinion with neighbor mean under stubbornness and adds Gaussian noise.",
+    "LogisticAdoptionDecision": "Computes adoption probability via a logistic transform of utility and samples Bernoulli.",
+    "EdgeChurn": "Iteratively rewires edges with small probability to random nodes, preserving degree sequence.",
+    "PoissonContactSampling": "Daily contacts drawn from Poisson(lambda = contact_rate_scale * degree).",
+    "MovingAverageSmoothing": "Applies centered or trailing moving average over observables for noise reduction."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and evaluation of adoption dynamics and policy signal.",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "new_adoptions",
+        "mean_contacts",
+        "policy_incentive"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point; parses config, runs simulation, orchestrates modules, and computes metrics."
+      },
+      {
+        "name": "entities.py",
+        "description": "Defines Person entity dataclass and population initialization helpers."
+      },
+      {
+        "name": "modules/contact_network.py",
+        "description": "Implements ContactNetwork module, network generation, edge churn, and contact sampling."
+      },
+      {
+        "name": "modules/social_influence.py",
+        "description": "Implements SocialInfluence module and opinion updates."
+      },
+      {
+        "name": "modules/policy_scheduler.py",
+        "description": "Implements PolicyScheduler module with ramp logic."
+      },
+      {
+        "name": "modules/adoption_decision.py",
+        "description": "Implements AdoptionDecision module with utility and logistic decision."
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "Implements AdoptionAggregator and smoothing utilities."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Implements metric computations (RMSE, MAE, PeakError, TimeToPeak)."
+      },
+      {
+        "name": "config_schema.py",
+        "description": "Pydantic or dataclass schemas for parameters and validation."
+      },
+      {
+        "name": "io.py",
+        "description": "Data loading for train_data.csv and results serialization."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "networkx",
+      "pandas",
+      "scipy",
+      "pydantic"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption",
+    "MAE_new_adoptions",
+    "PeakError_adoption",
+    "TimeToPeak_adoption"
+  ]
+}

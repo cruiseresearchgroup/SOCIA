@@ -1,0 +1,203 @@
+{
+  "summary": "Overall, the simulation is syntactically robust and functionally coherent, with clear improvements in metrics coverage, module ordering, and reproducibility. However, a major logic issue in retailer restocking causes unrealistic, unbounded stock growth. The run output occasionally fails JSON parsing due to extra output mixed with the final JSON. Several smaller consistency and modeling improvements (policy updates via buffers, aligning stockout observables with final stock, optional policy-effect computation, and better leveraging mobility in disease dynamics) will increase realism, stability, and evaluation reliability.",
+  "critical_issues": [
+    {
+      "issue": "Retail restock logic grows stock unboundedly even when inventory exceeds the target",
+      "impact": "Causes unrealistic accumulation of inventory, downward price spirals, distorted purchasing behavior and adoption dynamics, and biases downstream metrics (stockout/availability, enforcement via mobility decisions).",
+      "solution": "Compute restock_amount with a zero floor and only enforce a minimum of 1 unit when recovering from zero stock. Also clamp restock when stock already exceeds the target.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Final printed JSON sometimes includes extra non-JSON output (warnings or library messages), causing parsing errors",
+      "impact": "The execution harness expects a single valid JSON object; extra stdout text results in errors like 'Extra data'. This breaks automation and scoring.",
+      "solution": "Ensure all warnings/logs go to stderr or logging; avoid any stdout prints except the final JSON. Add an explicit 'quiet' mode to suppress prints and conditionally skip visualization. Use sys.stdout.write/flush for the final JSON only.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Policy and venue attributes are mutated directly in PolicyAndEnforcementModule rather than via the buffers-commit pattern",
+      "impact": "Inconsistent write semantics can cause surprise interactions if module order changes, and complicates auditing and reproducibility of state changes.",
+      "solution": "Write venue mask_required and enforcement_strictness to buffers (e.g., state_updates.venues) and apply in _commit_buffers, same-day. Keep authority.mandate_level changes in buffers too for consistency.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Stockout observable uses pre-commit new_stock, which may disagree with final stock after unpurchased allocations are returned",
+      "impact": "Mismatched observables can confuse downstream analysis (stockout_rate_daily may indicate stockout while final stock is not zero).",
+      "solution": "Move stockout_rate_daily computation to commit after final stock is known or adjust RetailSupplyModule to compute a 'preliminary' indicator and replace it in commit using final stock.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Policy-effect counterfactual evaluation always runs a full-size, full-length second simulation",
+      "impact": "Can be expensive for large N/T, increasing runtime and potentially causing timeouts in constrained environments.",
+      "solution": "Add a parameter compute_policy_effect (default false) and a downscaling option (e.g., reduce population_size and days) for the internal counterfactual.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Disease transmission integration with mobility and venue risk",
+      "current_approach": "DiseaseTransmissionModule uses static social network contacts only, not the venue visit schedule or local_outbreak_level.",
+      "suggested_approach": "Augment infection hazard with per-venue exposure when a person visits locations, modulated by venue-specific mask requirements, enforcement, and local_outbreak_level. Optionally track proximity through co-visitation (capacity-based sampling).",
+      "expected_benefit": "More realistic infection dynamics and a stronger mechanistic link between policy, mobility, mask use, and reduced transmission."
+    },
+    {
+      "aspect": "Policy application semantics",
+      "current_approach": "Mandate level and venue settings are updated in place within forward, diverging from the buffers \u2192 commit pattern.",
+      "suggested_approach": "Emit state_updates for both authority and per-venue fields and apply in _commit_buffers, ensuring consistent write semantics and easier debugging.",
+      "expected_benefit": "Improved consistency, maintainability, and ease of testing; easier future reordering without hidden side effects."
+    },
+    {
+      "aspect": "Stockout and availability metrics coherence",
+      "current_approach": "Stockout indicator computed before budget reconciliation, then stock and masks_sold corrected during commit.",
+      "suggested_approach": "Recompute stockout_rate_daily in commit using final stock; or compute a stockout_pre_commit and replace it in commit, ensuring the published observable reflects the final state.",
+      "expected_benefit": "Metrics consistency across modules and reduced confusion for downstream analyses."
+    },
+    {
+      "aspect": "Calibration runtime control",
+      "current_approach": "Counterfactual evaluation always runs at full scale inside evaluate().",
+      "suggested_approach": "Add compute_policy_effect flag and optional downscaling, e.g., reduce population_size and simulation_days only for the counterfactual, or skip if SKIP_CALIB/QUICK_TEST is set.",
+      "expected_benefit": "Reduced runtime and fewer timeouts during evaluation without sacrificing baseline outputs."
+    },
+    {
+      "aspect": "Misinformation dynamics and messaging",
+      "current_approach": "Misinformation belief is updated via media exposure and simple decay; not tied to observed misinformation_prevalence targets or heterogeneity in trust.",
+      "suggested_approach": "Introduce group-specific responsiveness and separate misinformation exposure channels; calibrate to external survey targets; add saturation effects and recovery paths via counter-messaging campaigns.",
+      "expected_benefit": "Closer alignment with survey data and richer policy levers to control misinformation."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "RetailSupplyModule.forward",
+      "modification": "Fix restock_amount to prevent positive restocking when stock exceeds target; only ensure minimum restock when recovering from zero stock.",
+      "reason": "Prevents unrealistic stock accumulation and maintains calibrated price dynamics and adoption behaviors.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "Simulation._commit_buffers",
+      "modification": "Recompute stockout_rate_daily after applying retailer allocations and returned stock; set observables.stockout_rate_daily based on final retailer.stock.",
+      "reason": "Ensures observable metrics match final committed state and downstream analytics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "PolicyAndEnforcementModule.forward and Simulation._commit_buffers",
+      "modification": "Route authority.mandate_level, venue.mask_required, and venue.enforcement_strictness changes through buffers (state_updates) and apply in commit.",
+      "reason": "Aligns with the buffer\u2192commit pattern for consistency and reordering safety.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "Simulation.evaluate",
+      "modification": "Guard counterfactual policy_effect_contribution behind a parameter (compute_policy_effect) and downscale N/T when enabled; default to disabled.",
+      "reason": "Reduces runtime overhead and avoids timeouts in constrained environments.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "main",
+      "modification": "Silence non-critical warnings and ensure no stdout prints except final JSON; optionally add a --quiet flag that sets warnings to error or redirects to stderr only; skip visualization when quiet.",
+      "reason": "Prevents JSON parser errors caused by stray stdout lines and improves reliability in automated pipelines.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "DiseaseTransmissionModule.forward",
+      "modification": "Optionally incorporate venue visit information to modulate transmission probability, e.g., extra hazard terms from visited venues weighted by local_outbreak_level and mask_required enforcement.",
+      "reason": "Improves realism by leveraging MobilityAndLocationModule outputs.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "effective_Rt and new_infections",
+      "current_gap": "Rt is a simple ratio of weekly sums without generation-time adjustments; venue-based risk not included.",
+      "suggestion": "Use a serial interval or generation time to estimate Rt (e.g., Cori method) and include venue-based infection hazards."
+    },
+    {
+      "metric": "adoption_by_group (income, age)",
+      "current_gap": "Simple terciles and broad age bins; limited empirical anchoring.",
+      "suggestion": "Use empirical distributions (e.g., ACS for income/age) and calibrate adoption disparities to survey data or observed compliance by demographics."
+    },
+    {
+      "metric": "misinformation_prevalence",
+      "current_gap": "Simple drift model without external calibration targets.",
+      "suggestion": "Calibrate to survey-based prevalence targets; incorporate campaign counter-messaging events that reduce prevalence for high-trust subgroups."
+    },
+    {
+      "metric": "mask_supply_shortage_days",
+      "current_gap": "Single threshold; may not reflect local availability variations or retailer heterogeneity.",
+      "suggestion": "Model multiple retailers and compute shortage days by region/retailer; set thresholds based on historical stockout rates."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix retailer restock logic to prevent unbounded stock growth.",
+    "Ensure final printed JSON is clean by silencing stdout noise and adding a quiet mode.",
+    "Move policy and venue updates to buffers and commit for consistency.",
+    "Recompute stockout observable post-commit using final stock.",
+    "Add compute_policy_effect flag and downscale options for counterfactual evaluation.",
+    "Integrate venue-based exposure into DiseaseTransmissionModule.",
+    "Add unit tests for retail restocking, stockout coherence, and final JSON output purity."
+  ],
+  "additional_comments": "Recent changes substantially improve spec alignment (metric aliases, enforcement costs, misinfo prevalence, calibration gating). The module DAG reordering (Mobility before Disease) is forward-looking but its benefits will materialize only after DiseaseTransmissionModule starts consuming venue-based exposure. Consolidating the write pattern via buffers across policy-venue updates will reduce future integration bugs.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "restock_amount = int(max(1.0, restock_gap * base_restock_rate * stochastic_factor))\nnew_stock = max(0, remaining_stock + max(0, restock_amount))",
+      "after": "restock_amount = int(max(0.0, restock_gap * base_restock_rate * stochastic_factor))\n# Ensure minimal recovery from zero stock\nif remaining_stock == 0 and base_target > 0:\n    restock_amount = max(restock_amount, 1)\n# Do not restock if above target\nif remaining_stock >= base_target:\n    restock_amount = 0\nnew_stock = max(0, remaining_stock + restock_amount)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "obs = buffers.setdefault(\"observables\", {})\nobs[\"stockout_rate_daily\"] = stockout_indicator",
+      "after": "# Defer final stockout computation to commit after allocations are reconciled\nobs = buffers.setdefault(\"observables\", {})\nobs[\"stockout_rate_daily_precommit\"] = stockout_indicator",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Observables from aggregator and modules\nobs = self.buffers.get(\"observables\", {})\nif \"stockout_rate_daily\" in obs:\n    self.results[\"stockout_rate_daily\"].append(float(obs[\"stockout_rate_daily\"]))",
+      "after": "# Observables from aggregator and modules\nobs = self.buffers.get(\"observables\", {})\n# Replace with final stockout based on committed retailer.stock\nfinal_stockout = 1.0 if self.state[\"retailer\"].stock == 0 else 0.0\nself.results[\"stockout_rate_daily\"].append(final_stockout)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "for v in venues:\n    v.mask_required = random.random() < clip01(rate)\n    base_staff = v.staff_enforcement_level if hasattr(v, \"staff_enforcement_level\") else staff_enforcement_level_mean\n    v.enforcement_strictness = clip01(\n        base_staff * authority.enforcement_probability * gatekeeping_weight\n    )",
+      "after": "venue_updates = []\nfor v in venues:\n    mask_required = random.random() < clip01(rate)\n    base_staff = getattr(v, \"staff_enforcement_level\", staff_enforcement_level_mean)\n    enforcement = clip01(base_staff * authority.enforcement_probability * gatekeeping_weight)\n    venue_updates.append({\"id\": v.id, \"mask_required\": mask_required, \"enforcement_strictness\": enforcement})\n\nbuffers.setdefault(\"state_updates\", {})[\"venues\"] = venue_updates",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Apply free distributions\npolicy_cost_today = 0.0\nfines_collected_today = 0.0  # FIXED: Track fines collected for net enforcement cost.\nfree_events: List[Tuple[int, int]] = self.buffers.get(\"events\", {}).get(\"free_distribution\", [])",
+      "after": "# Apply policy and venue updates\nvenue_updates = upd.get(\"venues\", [])\nif venue_updates:\n    venue_by_id = {v.id: v for v in self.state.get(\"venues\", [])}\n    for vu in venue_updates:\n        v = venue_by_id.get(vu.get(\"id\"))\n        if v is not None:\n            if \"mask_required\" in vu:\n                v.mask_required = bool(vu[\"mask_required\"])\n            if \"enforcement_strictness\" in vu:\n                v.enforcement_strictness = clip01(float(vu[\"enforcement_strictness\"]))\n# Continue with policy costs and distributions\npolicy_cost_today = 0.0\nfines_collected_today = 0.0\nfree_events: List[Tuple[int, int]] = self.buffers.get(\"events\", {}).get(\"free_distribution\", [])",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "metrics = sim.evaluate(load_ground_truth(DATA_DIR), window=val_window)\n\n# Visualization\nsim.visualize(show=False, save_path=os.path.join(ARTIFACTS_DIR, \"figs\", \"overview.png\"))\n\n# Concise summary print\nfinal_adopt = sim.results[\"adoption_rate\"][-1] if sim.results.get(\"adoption_rate\") else 0.0\nprint(json.dumps({ ... }))",
+      "after": "# Evaluate\nmetrics = sim.evaluate(load_ground_truth(DATA_DIR), window=val_window)\n\n# Optional visualization (skip if quiet)\nif not bool(os.environ.get(\"QUIET\", \"0\") == \"1\") and not bool(args.get(\"no_viz\", False)):\n    sim.visualize(show=False, save_path=os.path.join(ARTIFACTS_DIR, \"figs\", \"overview.png\"))\n\n# Final JSON-only stdout\nimport warnings as _warnings\nimport sys as _sys\n_warnings.filterwarnings('default', category=UserWarning)\n_sys.stdout.write(json.dumps({ ... }))\n_sys.stdout.flush()",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "enable = bool(params.get(\"enable_disease\", False))\n...\n# Transmission for S\nfor i, p in enumerate(persons):\n    if p.health_state != \"S\":\n        continue\n    neighbors = adj[i]\n    ...",
+      "after": "enable = bool(params.get(\"enable_disease\", False))\nvenue_exposure_weight = float(params.get(\"venue_exposure_weight\", 0.0))\n...\n# Transmission for S\nfor i, p in enumerate(persons):\n    if p.health_state != \"S\":\n        continue\n    neighbors = adj[i]\n    # Baseline network hazard\n    ...\n    # Add venue-based hazard approximation\n    if venue_exposure_weight > 0.0:\n        # Use today's venue compliance and outbreak levels as a proxy exposure\n        venue_hazard = 0.0\n        for v in state.get(\"venues\", []):\n            if v.daily_visitors > 0:\n                base = v.local_outbreak_level\n                # Lower hazard if mask_required and enforcement/compliance higher\n                mitig = (1.0 - v.enforcement_strictness) if v.mask_required else 1.0\n                venue_hazard += base * mitig / max(1, len(state.get(\"venues\", [])))\n        p_infection_actual = clip01(1.0 - (1.0 - p_infection_actual) * (1.0 - venue_exposure_weight * venue_hazard))",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest changes improve parameter aliasing, add new required metrics, introduce enforcement and misinformation dynamics, reorder modules to support future venue-based transmission, and gate calibration to reduce default runtime. Most modifications enhance spec compliance and extensibility.",
+    "positive_impacts": [
+      "Added metric aliases (adoption_rate_over_time, effective_Rt, inequity_index) improve downstream compatibility.",
+      "Introduced enforcement costs/fines and misinformation prevalence tracking.",
+      "Reordered modules so Mobility runs before Disease, enabling venue-aware transmission extensions.",
+      "Calibration is opt-in by default, reducing runtime/timeout risk in typical runs.",
+      "Improved parameter alias support (avg_degree, price_per_mask, policy_start_day, supply_chain_disruption_prob)."
+    ],
+    "negative_impacts": [
+      "Restock bug persists and continues to distort market dynamics.",
+      "Stockout indicator computed pre-commit can be inconsistent with final stock.",
+      "Direct state mutation in PolicyAndEnforcementModule remains inconsistent with buffer commit pattern.",
+      "Counterfactual policy effect in evaluate() still runs full scale, potentially heavy."
+    ],
+    "suggestions": [
+      "Implement the restock fix immediately and add a unit test to prevent regression.",
+      "Move stockout calculation post-commit and unify policy updates via buffers.",
+      "Add compute_policy_effect flag and downscaling inside evaluate() for the counterfactual.",
+      "Leverage reordering by incorporating venue-based exposure in DiseaseTransmissionModule."
+    ]
+  }
+}

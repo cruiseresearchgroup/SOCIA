@@ -1,0 +1,1848 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based, networked simulation of mask adoption and wearing behavior with social influence, policy, media, and market constraints. Individuals are nodes in a small-world social network interacting with households, locations, retailers, media, and policy enforcement.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age",
+        "household_id",
+        "income",
+        "risk_perception",
+        "trust_in_authorities",
+        "social_influence_susceptibility",
+        "mask_attitude",
+        "mask_wearing_probability",
+        "mask_stock",
+        "compliance_propensity",
+        "fatigue",
+        "information_sources",
+        "network_neighbors",
+        "mobility_pattern",
+        "group_memberships",
+        "mask_wearing",
+        "habit_strength",
+        "last_purchase_day",
+        "last_campaign_exposure_day"
+      ],
+      "behaviors": [
+        "decide_wear_mask",
+        "update_beliefs_from_peers",
+        "update_beliefs_from_media",
+        "respond_to_policy",
+        "purchase_masks",
+        "share_opinion",
+        "move_between_locations",
+        "experience_fatigue_or_habit"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "age_distribution": "Triangular(age_tri_min, age_tri_mode, age_tri_max)",
+          "income_distribution": "Lognormal(income_lognorm_mu, income_lognorm_sigma)",
+          "initial_adoption_rate": 0.15,
+          "initial_attitude_mean": 0.2,
+          "initial_trust_mean": 0.5,
+          "initial_personal_stock_mean": 1.0,
+          "susceptibility_distribution": "TruncatedNormal(mean=susceptibility_mean, sd=susceptibility_std, [0,1])",
+          "compliance_propensity_distribution": "TruncatedNormal(mean=compliance_propensity_mean, sd=compliance_propensity_std, [0,1])",
+          "risk_perception_base": 0.3
+        }
+      }
+    },
+    {
+      "name": "Household",
+      "attributes": [
+        "id",
+        "size",
+        "income_level",
+        "norms_mask_use",
+        "mask_stock"
+      ],
+      "behaviors": [
+        "share_masks",
+        "influence_members"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "size_distribution": "Poisson(lambda=household_size_mean) truncated at >=1",
+          "income_aggregation": "Mean of members with correlation household_income_correlation",
+          "norms_mask_use": "Mean initial mask_attitude of members"
+        }
+      }
+    },
+    {
+      "name": "Location",
+      "attributes": [
+        "id",
+        "type",
+        "capacity",
+        "foot_traffic",
+        "policy_requirement",
+        "enforcement_level"
+      ],
+      "behaviors": [
+        "enforce_mask_policy",
+        "host_visits"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "types": [
+            "home",
+            "work",
+            "school",
+            "retail",
+            "transit"
+          ],
+          "counts": {
+            "work": 200,
+            "school": 100,
+            "retail": 80,
+            "transit": 50
+          },
+          "capacity_rule": "capacity_utilization * population_size / count_per_type"
+        }
+      }
+    },
+    {
+      "name": "Retailer",
+      "attributes": [
+        "id",
+        "inventory",
+        "price",
+        "restock_rate",
+        "rationing_policy"
+      ],
+      "behaviors": [
+        "sell_masks",
+        "adjust_price",
+        "restock"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "num_retailers": 25,
+          "initial_inventory": "initial_inventory_per_capita * population_size / num_retailers",
+          "price": 1.5,
+          "restock_rate": 0.2,
+          "rationing_policy": "limit=rationing_limit_per_purchase"
+        }
+      }
+    },
+    {
+      "name": "PolicyMaker",
+      "attributes": [
+        "policy_state",
+        "mandate_start_day",
+        "mandate_end_day",
+        "enforcement_intensity",
+        "fine_amount",
+        "campaign_schedule",
+        "campaign_message_effect"
+      ],
+      "behaviors": [
+        "issue_or_update_policy",
+        "enforce_policy",
+        "run_information_campaign"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_state": "recommendation",
+          "mandate_start_day": -1,
+          "mandate_end_day": -1,
+          "enforcement_intensity": 0.5,
+          "fine_amount": 50.0,
+          "campaign_schedule": "campaign_start_day then every campaign_frequency_days",
+          "campaign_message_effect": 0.1
+        }
+      }
+    },
+    {
+      "name": "MediaSource",
+      "attributes": [
+        "id",
+        "credibility",
+        "bias",
+        "reach",
+        "misinformation_rate",
+        "message_frequency",
+        "message_valence"
+      ],
+      "behaviors": [
+        "broadcast_message"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "num_sources": 3,
+          "credibility": "Beta(5,2) scaled to [0.5,1]",
+          "bias": "Uniform(-media_bias_polarization, media_bias_polarization)",
+          "reach": "Dirichlet with dispersion media_reach_heterogeneity",
+          "misinformation_rate": 0.05,
+          "message_frequency": 1.0,
+          "message_valence": "Centered on campaign_effect_size when campaigns run, else 0"
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "SocialInfluenceModule",
+      "description": "Updates individual mask attitudes and wearing probability using observed peer behavior, household norms, and group influence on the social network.",
+      "inputs": [
+        "Person.mask_wearing",
+        "Person.network_neighbors",
+        "Household.norms_mask_use",
+        "Person.group_memberships"
+      ],
+      "outputs": [
+        "Person.mask_attitude",
+        "Person.mask_wearing_probability"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  observed = mean(mask_wearing of neighbors over last peer_observation_window days with decay neighbor_memory_decay)\n  noise = Normal(0, decision_noise)\n  group_influence = group_membership_influence_weight * mean(mask_wearing among same-group neighbors)\n  household_influence = household_norms_weight * Household[i.household_id].norms_mask_use\n  homophily_adj = homophily_bias * (mean(attitude of neighbors similar in income/age) - i.mask_attitude)\n  i.mask_attitude = clip(i.mask_attitude + i.social_influence_susceptibility * social_influence_weight * ((observed + group_influence + household_influence)/max(1e-6, (1+group_membership_influence_weight+household_norms_weight)) - i.mask_attitude) + homophily_adj + noise, 0, 1)\n  i.mask_wearing_probability = clip(0.5*i.mask_wearing_probability + 0.5*i.mask_attitude, 0, 1)",
+        "notes": [
+          "Decay weights recent observations more heavily.",
+          "network_observation_noise can be applied when constructing observed mask wearing from neighbors."
+        ]
+      },
+      "requirements": [
+        "GraphNetwork",
+        "RandomGenerator"
+      ],
+      "module_parameters": [
+        "social_influence_weight",
+        "decision_noise",
+        "peer_observation_window",
+        "neighbor_memory_decay",
+        "homophily_bias",
+        "susceptibility_mean",
+        "susceptibility_std",
+        "probability_of_information_sharing",
+        "group_membership_influence_weight",
+        "network_observation_noise",
+        "household_norms_weight"
+      ]
+    },
+    {
+      "name": "MediaAndCampaignModule",
+      "description": "Broadcasts media messages and campaign effects to update individuals' risk perception, trust, and mask attitudes.",
+      "inputs": [
+        "MediaSource.messages",
+        "PolicyMaker.campaign_schedule",
+        "Person.information_sources",
+        "Person.trust_in_authorities"
+      ],
+      "outputs": [
+        "Person.risk_perception",
+        "Person.trust_in_authorities",
+        "Person.mask_attitude"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day in campaign_schedule:\n  for each person i:\n    exposure_prob = sum(media.reach for media in i.information_sources) * media_message_frequency\n    if Bernoulli(exposure_prob):\n      net_valence = sum(media.credibility*(1 - media.misinformation_rate)*media.message_valence + media.misinformation_rate*(-abs(media.message_valence)) for media in i.information_sources)\n      i.trust_in_authorities = clip(Normal(i.trust_in_authorities, trust_in_authorities_std) + campaign_effect_size*net_valence, 0, 1)\n      i.risk_perception = clip(i.risk_perception + campaign_effect_size*net_valence, 0, 1)\n      i.mask_attitude = clip(i.mask_attitude + 0.5*campaign_effect_size*net_valence, 0, 1)\nelse:\n  for each person i, with probability media_message_frequency*reach:\n    apply smaller update: risk_perception += 0.25*campaign_effect_size*(message_valence - misinformation_effect)\n    trust_in_authorities regresses slightly toward trust_in_authorities_mean",
+        "notes": [
+          "Misinformation reduces effective message_valence or reverses it depending on rate.",
+          "media_bias_polarization shapes message_valence around campaigns; outside campaign, mean valence is 0."
+        ]
+      },
+      "requirements": [
+        "RandomGenerator"
+      ],
+      "module_parameters": [
+        "media_message_frequency",
+        "campaign_start_day",
+        "campaign_frequency_days",
+        "campaign_effect_size",
+        "misinformation_rate",
+        "trust_in_authorities_mean",
+        "trust_in_authorities_std",
+        "media_bias_polarization",
+        "media_reach_heterogeneity",
+        "num_media_sources"
+      ]
+    },
+    {
+      "name": "PolicyAndEnforcementModule",
+      "description": "Manages policy state transitions, computes policy pressure, and contributes to enforcement probability at locations.",
+      "inputs": [
+        "PolicyMaker.policy_state",
+        "Location.policy_requirement",
+        "Location.enforcement_level"
+      ],
+      "outputs": [
+        "global.policy_pressure",
+        "Location.enforcement_signal"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if policy_mandate_day >= 0 and day == policy_mandate_day: set policy_state='mandate'\nif policy_mandate_end_day >= 0 and day == policy_mandate_end_day: set policy_state='recommendation'\npolicy_pressure = 0\nif policy_state == 'mandate':\n  policy_pressure = enforcement_intensity * log(1 + fine_amount)\nfor each location L:\n  L.enforcement_signal = L.enforcement_level * enforcement_intensity",
+        "notes": [
+          "policy_pressure is used by DecisionAndActionModule to adjust wearing probability.",
+          "If no mandate (negative day), policy remains at initial state."
+        ]
+      },
+      "requirements": [
+        "Clock"
+      ],
+      "module_parameters": [
+        "policy_initial_state",
+        "policy_mandate_day",
+        "policy_mandate_end_day",
+        "enforcement_intensity",
+        "fine_amount",
+        "compliance_sensitivity",
+        "refusal_of_service_rate"
+      ]
+    },
+    {
+      "name": "RetailMarketModule",
+      "description": "Handles retailer inventory dynamics, pricing, and sales to agents under rationing.",
+      "inputs": [
+        "Retailer.inventory",
+        "Retailer.price",
+        "Retailer.restock_rate",
+        "Person.purchase_intent"
+      ],
+      "outputs": [
+        "Retailer.inventory",
+        "Retailer.price",
+        "Person.mask_stock",
+        "observable.supply_demand_gap_daily",
+        "observable.price_daily",
+        "observable.inventory_total"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "daily_demand = 0\nfor each retailer r:\n  r.inventory += Poisson(restock_rate_per_day * population_size/num_retailers)\n  r.inventory = max(r.inventory, 0)\nfor each person i with purchase_intent:\n  choose retailer r uniformly\n  qty = min(rationing_limit_per_purchase, max(0, purchase_threshold_stock - i.mask_stock))\n  sold = min(qty, r.inventory)\n  i.mask_stock += sold\n  r.inventory -= sold\n  daily_demand += qty\n# price adjustment\nfor each retailer r:\n  demand_signal = (daily_demand/num_retailers) - r.inventory\n  r.price = max(0.1, r.price * (1 + price_adjust_sensitivity * tanh(demand_signal / max(1, r.inventory))))\n# observables\nsupply = sum(r.inventory)\ndemand = daily_demand\nsupply_demand_gap_daily = demand - supply\nemit observables",
+        "notes": [
+          "Purchases are constrained by rationing and inventory.",
+          "Price elasticity impacts future purchase intent (used in DecisionAndActionModule)."
+        ]
+      },
+      "requirements": [
+        "RandomGenerator"
+      ],
+      "module_parameters": [
+        "mask_price",
+        "restock_rate_per_day",
+        "rationing_limit_per_purchase",
+        "initial_inventory_per_capita",
+        "price_adjust_sensitivity",
+        "price_elasticity",
+        "num_retailers"
+      ]
+    },
+    {
+      "name": "MobilityAndLocationModule",
+      "description": "Simulates daily movement across locations; applies access control and logs noncompliance events.",
+      "inputs": [
+        "Person.mobility_pattern",
+        "Location.capacity",
+        "Location.enforcement_signal",
+        "global.policy_pressure"
+      ],
+      "outputs": [
+        "Location.foot_traffic",
+        "observable.noncompliance_events_daily"
+      ],
+      "dependencies": [
+        "PolicyAndEnforcementModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "noncompliance_events = 0\nfor each person i:\n  # sample visited locations by mix\n  visits = sample_types_by_prob({home: location_mix_home, work: location_mix_work, school: location_mix_school, retail: location_mix_retail, transit: location_mix_transit})\n  for each visit v:\n    L = choose_location_of_type(v)\n    if L.policy_requirement == 'mask' or global policy_state == 'mandate':\n      if i.mask_wearing == false:\n        enforce_prob = clip(L.enforcement_signal * (1 - location_enforcement_noise), 0, 1)\n        if Bernoulli(enforce_prob):\n          noncompliance_events += 1\n          if Bernoulli(policy_access_denial_rate): deny entry; else allow with penalty Bernoulli(noncompliance_penalty_probability)\n    L.foot_traffic += 1",
+        "notes": [
+          "Access denial and penalties do not directly change stock but affect future compliance via DecisionAndActionModule through policy_pressure feedback."
+        ]
+      },
+      "requirements": [
+        "RandomGenerator",
+        "LocationRegistry"
+      ],
+      "module_parameters": [
+        "location_mix_home",
+        "location_mix_work",
+        "location_mix_school",
+        "location_mix_retail",
+        "location_mix_transit",
+        "work_locations_count",
+        "school_locations_count",
+        "retail_locations_count",
+        "transit_locations_count",
+        "capacity_utilization",
+        "location_enforcement_noise",
+        "policy_access_denial_rate",
+        "noncompliance_penalty_probability"
+      ]
+    },
+    {
+      "name": "DecisionAndActionModule",
+      "description": "Per-person decisions: wear mask, purchase masks, habit formation and fatigue dynamics, and response to policy pressure.",
+      "inputs": [
+        "Person.mask_attitude",
+        "Person.risk_perception",
+        "Person.habit_strength",
+        "Person.fatigue",
+        "Person.mask_stock",
+        "global.policy_pressure",
+        "Retailer.price"
+      ],
+      "outputs": [
+        "Person.mask_wearing",
+        "Person.mask_stock",
+        "Person.habit_strength",
+        "Person.fatigue",
+        "Person.purchase_intent",
+        "Household.mask_stock"
+      ],
+      "dependencies": [
+        "PolicyAndEnforcementModule",
+        "RetailMarketModule",
+        "SocialInfluenceModule",
+        "MediaAndCampaignModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  # habit and fatigue updates\n  i.habit_strength = clip(i.habit_strength + habit_formation_rate*(1 if i.mask_wearing else -1), 0, 1)\n  i.fatigue = clip(i.fatigue + fatigue_rate*(1 if i.mask_wearing else -0.5), 0, 1)\n  # wear decision logistic\n  x = wear_logit_coeff_attitude*i.mask_attitude + wear_logit_coeff_risk*i.risk_perception + wear_logit_coeff_policy*(global.policy_pressure*compliance_sensitivity*i.compliance_propensity) + wear_logit_coeff_habit*i.habit_strength + wear_logit_coeff_fatigue*i.fatigue\n  p_wear = sigmoid(x)\n  if i.mask_stock <= 0: p_wear = 0\n  i.mask_wearing = Bernoulli(p_wear)\n  if i.mask_wearing: i.mask_stock = max(0, i.mask_stock - 1/3)  # one mask used for ~3 days reuse\n  # household sharing\n  H = Household[i.household_id]\n  if i.mask_stock < 1 and H.mask_stock > 0 and Bernoulli(household_sharing_efficiency):\n    H.mask_stock -= 1\n    i.mask_stock += 1\n  # purchase intent\n  desired_stock = purchase_threshold_stock\n  affordability = sigmoid(-price_elasticity * mean_retail_price)\n  if i.mask_stock < desired_stock and day - i.last_purchase_day >= min_days_between_purchases and Bernoulli(affordability):\n    i.purchase_intent = true\n    i.last_purchase_day = day\n  else:\n    i.purchase_intent = false",
+        "notes": [
+          "Mask consumption rate approximated by one mask every three days if wearing.",
+          "affordability uses price_elasticity; more negative reduces purchase probabilities as price rises."
+        ]
+      },
+      "requirements": [
+        "RandomGenerator",
+        "HouseholdRegistry"
+      ],
+      "module_parameters": [
+        "fatigue_rate",
+        "habit_formation_rate",
+        "risk_perception_base",
+        "compliance_propensity_mean",
+        "compliance_propensity_std",
+        "purchase_threshold_stock",
+        "min_days_between_purchases",
+        "wear_logit_coeff_attitude",
+        "wear_logit_coeff_risk",
+        "wear_logit_coeff_policy",
+        "wear_logit_coeff_habit",
+        "wear_logit_coeff_fatigue",
+        "household_sharing_efficiency"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Computes daily observables and aggregates by groups for evaluation and calibration.",
+      "inputs": [
+        "Person.mask_wearing",
+        "Person.income",
+        "Retailer.inventory",
+        "Retailer.price",
+        "MobilityAndLocationModule.observable.noncompliance_events_daily",
+        "RetailMarketModule.observable.supply_demand_gap_daily"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.peak_adoption",
+        "observable.time_to_threshold",
+        "observable.adoption_by_income_quintile",
+        "observable.policy_effect_delta",
+        "observable.campaign_attitude_shift"
+      ],
+      "dependencies": [
+        "DecisionAndActionModule",
+        "RetailMarketModule",
+        "MobilityAndLocationModule",
+        "PolicyAndEnforcementModule",
+        "MediaAndCampaignModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate_daily = mean(Person.mask_wearing)\npeak_adoption = max(peak_adoption, adoption_rate_daily)\nif adoption_rate_daily >= adoption_threshold and time_to_threshold not set: time_to_threshold = day\n# disparity by income quantiles\nassign quantiles by income into disparity_group_quantiles\nadoption_by_income_quintile = group_mean(mask_wearing)\n# policy effect (difference-in-differences over 7-day windows)\nif policy_mandate_day >= 0:\n  pre = mean(adoption_rate_daily over days [policy_mandate_day-7, policy_mandate_day-1])\n  post = mean(adoption_rate_daily over days [policy_mandate_day+1, policy_mandate_day+7])\n  policy_effect_delta = post - pre\n# campaign attitude shift over 5-day windows after campaign days\nfor each campaign_day in campaign_schedule:\n  shift = mean(mask_attitude days [campaign_day+1..campaign_day+5]) - mean(mask_attitude days [campaign_day-5..campaign_day-1])\n  store campaign_attitude_shift as average over campaigns",
+        "notes": [
+          "Observables are persisted daily; peak metrics tracked incrementally.",
+          "If no mandate, policy_effect_delta remains null."
+        ]
+      },
+      "requirements": [
+        "TimeSeriesBuffer"
+      ],
+      "module_parameters": [
+        "adoption_threshold",
+        "disparity_group_quantiles",
+        "group_disparity_field"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Number of agents in the population.",
+      "frozen": "true"
+    },
+    {
+      "key": "simulation_days",
+      "dtype": "int",
+      "default": 120,
+      "bounds": {
+        "low": 1,
+        "high": 3650
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": "true"
+    },
+    {
+      "key": "seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Random seed.",
+      "frozen": "true"
+    },
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "small_world",
+      "bounds": {
+        "low": null,
+        "high": null
+      },
+      "owner_module": "global",
+      "description": "Type of social network topology.",
+      "frozen": "true"
+    },
+    {
+      "key": "average_degree",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 2,
+        "high": 200
+      },
+      "owner_module": "global",
+      "description": "Average node degree in the social network.",
+      "frozen": "false"
+    },
+    {
+      "key": "rewire_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Rewiring probability for small-world network generation.",
+      "frozen": "false"
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 7
+      },
+      "owner_module": "global",
+      "description": "Time step length in days.",
+      "frozen": "true"
+    },
+    {
+      "key": "household_size_mean",
+      "dtype": "float",
+      "default": 2.6,
+      "bounds": {
+        "low": 1.0,
+        "high": 6.0
+      },
+      "owner_module": "global",
+      "description": "Mean household size for Poisson distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "income_lognorm_mu",
+      "dtype": "float",
+      "default": 10.7,
+      "bounds": {
+        "low": 8.0,
+        "high": 12.0
+      },
+      "owner_module": "global",
+      "description": "Log-mean of income distribution (annual USD).",
+      "frozen": "false"
+    },
+    {
+      "key": "income_lognorm_sigma",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.5
+      },
+      "owner_module": "global",
+      "description": "Log-standard deviation of income distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "age_tri_min",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 100
+      },
+      "owner_module": "global",
+      "description": "Minimum age for triangular distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "age_tri_mode",
+      "dtype": "int",
+      "default": 35,
+      "bounds": {
+        "low": 0,
+        "high": 100
+      },
+      "owner_module": "global",
+      "description": "Mode age for triangular distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "age_tri_max",
+      "dtype": "int",
+      "default": 85,
+      "bounds": {
+        "low": 50,
+        "high": 110
+      },
+      "owner_module": "global",
+      "description": "Maximum age for triangular distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Initial fraction wearing masks on day 0.",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_attitude_mean",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean initial pro-mask attitude.",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_personal_stock_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "global",
+      "description": "Mean initial masks per person.",
+      "frozen": "false"
+    },
+    {
+      "key": "household_income_correlation",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Correlation of member incomes within households.",
+      "frozen": "false"
+    },
+    {
+      "key": "social_influence_weight",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Strength of peer influence on attitude updates.",
+      "frozen": "false"
+    },
+    {
+      "key": "decision_noise",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Gaussian noise applied to attitude update.",
+      "frozen": "false"
+    },
+    {
+      "key": "peer_observation_window",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Days of neighbor behavior history used.",
+      "frozen": "false"
+    },
+    {
+      "key": "neighbor_memory_decay",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Exponential decay of older observations.",
+      "frozen": "false"
+    },
+    {
+      "key": "homophily_bias",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Bias toward aligning with similar peers' attitudes.",
+      "frozen": "false"
+    },
+    {
+      "key": "susceptibility_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Mean social influence susceptibility.",
+      "frozen": "false"
+    },
+    {
+      "key": "susceptibility_std",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Std dev of susceptibility.",
+      "frozen": "false"
+    },
+    {
+      "key": "probability_of_information_sharing",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Probability an agent shares opinion to neighbors.",
+      "frozen": "false"
+    },
+    {
+      "key": "group_membership_influence_weight",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Weight for group-based peer influence.",
+      "frozen": "false"
+    },
+    {
+      "key": "network_observation_noise",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Noise in perceiving neighbors' mask wearing.",
+      "frozen": "false"
+    },
+    {
+      "key": "household_norms_weight",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Weight of household norms on attitudes.",
+      "frozen": "false"
+    },
+    {
+      "key": "media_message_frequency",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "Average daily frequency of media messages.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign_start_day",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 1000
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "First day of information campaign.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign_frequency_days",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 1,
+        "high": 180
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "Days between campaigns.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign_effect_size",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "Effect size per exposure on risk/attitude/trust.",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "Share of misinformation content.",
+      "frozen": "false"
+    },
+    {
+      "key": "trust_in_authorities_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "Mean trust baseline for reversion.",
+      "frozen": "false"
+    },
+    {
+      "key": "trust_in_authorities_std",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "Std dev for trust random walk.",
+      "frozen": "false"
+    },
+    {
+      "key": "media_bias_polarization",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "Controls spread of media bias.",
+      "frozen": "false"
+    },
+    {
+      "key": "media_reach_heterogeneity",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "Dirichlet dispersion for reach distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "num_media_sources",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 20
+      },
+      "owner_module": "MediaAndCampaignModule",
+      "description": "Number of distinct media sources.",
+      "frozen": "true"
+    },
+    {
+      "key": "policy_initial_state",
+      "dtype": "categorical",
+      "default": "recommendation",
+      "bounds": {
+        "low": null,
+        "high": null
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Initial policy mode.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_mandate_day",
+      "dtype": "int",
+      "default": -1,
+      "bounds": {
+        "low": -1,
+        "high": 10000
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Day to switch to mandate; -1 disables.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_mandate_end_day",
+      "dtype": "int",
+      "default": -1,
+      "bounds": {
+        "low": -1,
+        "high": 10000
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Day to end mandate; -1 disables.",
+      "frozen": "false"
+    },
+    {
+      "key": "enforcement_intensity",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Baseline enforcement strength.",
+      "frozen": "false"
+    },
+    {
+      "key": "fine_amount",
+      "dtype": "float",
+      "default": 50.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1000.0
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Fine for noncompliance when enforced.",
+      "frozen": "false"
+    },
+    {
+      "key": "compliance_sensitivity",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": 0.1,
+        "high": 5.0
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Sensitivity of compliance propensity to policy pressure.",
+      "frozen": "false"
+    },
+    {
+      "key": "refusal_of_service_rate",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Probability locations refuse entry when enforcing.",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_price",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 10.0
+      },
+      "owner_module": "RetailMarketModule",
+      "description": "Initial mask unit price ($).",
+      "frozen": "false"
+    },
+    {
+      "key": "restock_rate_per_day",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "RetailMarketModule",
+      "description": "Daily restock per capita to market (expected).",
+      "frozen": "false"
+    },
+    {
+      "key": "rationing_limit_per_purchase",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 1,
+        "high": 50
+      },
+      "owner_module": "RetailMarketModule",
+      "description": "Max masks per transaction.",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_inventory_per_capita",
+      "dtype": "float",
+      "default": 2.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 50.0
+      },
+      "owner_module": "RetailMarketModule",
+      "description": "Initial market inventory per capita across retailers.",
+      "frozen": "false"
+    },
+    {
+      "key": "price_adjust_sensitivity",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "RetailMarketModule",
+      "description": "Speed of price response to excess demand.",
+      "frozen": "false"
+    },
+    {
+      "key": "price_elasticity",
+      "dtype": "float",
+      "default": -0.3,
+      "bounds": {
+        "low": -5.0,
+        "high": 0.0
+      },
+      "owner_module": "RetailMarketModule",
+      "description": "Elasticity of purchase intent to price.",
+      "frozen": "false"
+    },
+    {
+      "key": "num_retailers",
+      "dtype": "int",
+      "default": 25,
+      "bounds": {
+        "low": 1,
+        "high": 10000
+      },
+      "owner_module": "RetailMarketModule",
+      "description": "Number of retailers in market.",
+      "frozen": "true"
+    },
+    {
+      "key": "location_mix_home",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Share of time at home.",
+      "frozen": "false"
+    },
+    {
+      "key": "location_mix_work",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Share of time at work.",
+      "frozen": "false"
+    },
+    {
+      "key": "location_mix_school",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Share of time at school.",
+      "frozen": "false"
+    },
+    {
+      "key": "location_mix_retail",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Share of time at retail.",
+      "frozen": "false"
+    },
+    {
+      "key": "location_mix_transit",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Share of time on transit.",
+      "frozen": "false"
+    },
+    {
+      "key": "work_locations_count",
+      "dtype": "int",
+      "default": 200,
+      "bounds": {
+        "low": 1,
+        "high": 100000
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Number of work locations.",
+      "frozen": "false"
+    },
+    {
+      "key": "school_locations_count",
+      "dtype": "int",
+      "default": 100,
+      "bounds": {
+        "low": 1,
+        "high": 100000
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Number of school locations.",
+      "frozen": "false"
+    },
+    {
+      "key": "retail_locations_count",
+      "dtype": "int",
+      "default": 80,
+      "bounds": {
+        "low": 1,
+        "high": 100000
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Number of retail locations.",
+      "frozen": "false"
+    },
+    {
+      "key": "transit_locations_count",
+      "dtype": "int",
+      "default": 50,
+      "bounds": {
+        "low": 1,
+        "high": 100000
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Number of transit hubs/lines.",
+      "frozen": "false"
+    },
+    {
+      "key": "capacity_utilization",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Target utilization for location capacities.",
+      "frozen": "false"
+    },
+    {
+      "key": "location_enforcement_noise",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Noise in enforcement application at locations.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_access_denial_rate",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Probability of denying entry during enforcement.",
+      "frozen": "false"
+    },
+    {
+      "key": "noncompliance_penalty_probability",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityAndLocationModule",
+      "description": "Probability of penalty when noncompliant but admitted.",
+      "frozen": "false"
+    },
+    {
+      "key": "fatigue_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Daily increase in fatigue when wearing; recovery otherwise.",
+      "frozen": "false"
+    },
+    {
+      "key": "habit_formation_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Daily change in habit strength depending on wearing.",
+      "frozen": "false"
+    },
+    {
+      "key": "risk_perception_base",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Baseline risk perception.",
+      "frozen": "false"
+    },
+    {
+      "key": "compliance_propensity_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Mean compliance propensity.",
+      "frozen": "false"
+    },
+    {
+      "key": "compliance_propensity_std",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Std dev of compliance propensity.",
+      "frozen": "false"
+    },
+    {
+      "key": "purchase_threshold_stock",
+      "dtype": "int",
+      "default": 2,
+      "bounds": {
+        "low": 0,
+        "high": 50
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Desired personal stock triggering purchases.",
+      "frozen": "false"
+    },
+    {
+      "key": "min_days_between_purchases",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 0,
+        "high": 60
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Cooldown between purchases.",
+      "frozen": "false"
+    },
+    {
+      "key": "wear_logit_coeff_attitude",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": -5.0,
+        "high": 5.0
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Coefficient on attitude in wear decision.",
+      "frozen": "false"
+    },
+    {
+      "key": "wear_logit_coeff_risk",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": -5.0,
+        "high": 5.0
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Coefficient on risk in wear decision.",
+      "frozen": "false"
+    },
+    {
+      "key": "wear_logit_coeff_policy",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": -5.0,
+        "high": 5.0
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Coefficient on policy pressure in wear decision.",
+      "frozen": "false"
+    },
+    {
+      "key": "wear_logit_coeff_habit",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": -5.0,
+        "high": 5.0
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Coefficient on habit strength.",
+      "frozen": "false"
+    },
+    {
+      "key": "wear_logit_coeff_fatigue",
+      "dtype": "float",
+      "default": -1.0,
+      "bounds": {
+        "low": -5.0,
+        "high": 5.0
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Coefficient on fatigue.",
+      "frozen": "false"
+    },
+    {
+      "key": "household_sharing_efficiency",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DecisionAndActionModule",
+      "description": "Probability that household-level sharing succeeds.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_threshold",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Threshold to measure time_to_threshold.",
+      "frozen": "false"
+    },
+    {
+      "key": "disparity_group_quantiles",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 2,
+        "high": 10
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Number of quantiles for group disparity.",
+      "frozen": "false"
+    },
+    {
+      "key": "group_disparity_field",
+      "dtype": "categorical",
+      "default": "income",
+      "bounds": {
+        "low": null,
+        "high": null
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Field used to group for disparity.",
+      "frozen": "true"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.mask_wearing)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_adoption_rate_daily.csv:adoption_rate"
+    },
+    {
+      "id": "observable.time_to_threshold",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "first day when adoption_rate_daily >= adoption_threshold",
+      "frequency": "once",
+      "aggregation": "none",
+      "target_data_field": "train_adoption_threshold.csv:time_to_70pct_days"
+    },
+    {
+      "id": "observable.peak_adoption",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "max over time of adoption_rate_daily",
+      "frequency": "once",
+      "aggregation": "max",
+      "target_data_field": "train_adoption_rate_daily.csv:peak_adoption"
+    },
+    {
+      "id": "observable.policy_effect_delta",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(post7) - mean(pre7) around policy_mandate_day",
+      "frequency": "once",
+      "aggregation": "difference_in_means",
+      "target_data_field": "policy_effects.csv:adoption_diff_pre_post"
+    },
+    {
+      "id": "observable.campaign_attitude_shift",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(mask_attitude post 5 days) - mean(mask_attitude pre 5 days) averaged across campaigns",
+      "frequency": "per_campaign",
+      "aggregation": "mean",
+      "target_data_field": "campaign_evals.csv:attitude_shift"
+    },
+    {
+      "id": "observable.supply_demand_gap_daily",
+      "source_module": "RetailMarketModule",
+      "formula_or_field": "demand - total_inventory",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "retail_supply_demand.csv:gap"
+    },
+    {
+      "id": "observable.adoption_by_income_quintile",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(mask_wearing) by income quintile",
+      "frequency": "daily",
+      "aggregation": "by_group(income_quintile)",
+      "target_data_field": "adoption_by_income.csv:rates"
+    },
+    {
+      "id": "observable.noncompliance_events_daily",
+      "source_module": "MobilityAndLocationModule",
+      "formula_or_field": "count of enforced non-mask entries",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "enforcement_log.csv:noncompliance_events"
+    },
+    {
+      "id": "observable.price_daily",
+      "source_module": "RetailMarketModule",
+      "formula_or_field": "mean(Retailer.price)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "retail_prices.csv:mean_price"
+    },
+    {
+      "id": "observable.inventory_total",
+      "source_module": "RetailMarketModule",
+      "formula_or_field": "sum(Retailer.inventory)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "retail_inventory.csv:total_inventory"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "adoption_rate_over_time",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "time_to_threshold",
+      "inputs": [
+        "observable.time_to_threshold"
+      ],
+      "definition": {
+        "type": "AbsoluteError",
+        "config": {
+          "unit": "days"
+        }
+      }
+    },
+    {
+      "name": "peak_adoption_level",
+      "inputs": [
+        "observable.peak_adoption"
+      ],
+      "definition": {
+        "type": "AbsoluteError",
+        "config": {
+          "unit": "fraction"
+        }
+      }
+    },
+    {
+      "name": "policy_effect_on_adoption",
+      "inputs": [
+        "observable.policy_effect_delta"
+      ],
+      "definition": {
+        "type": "AbsoluteError",
+        "config": {
+          "window_days": 7
+        }
+      }
+    },
+    {
+      "name": "campaign_effect_on_attitudes",
+      "inputs": [
+        "observable.campaign_attitude_shift"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "aggregate": "mean_over_campaigns"
+        }
+      }
+    },
+    {
+      "name": "supply_demand_gap",
+      "inputs": [
+        "observable.supply_demand_gap_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "adoption_disparity_by_group",
+      "inputs": [
+        "observable.adoption_by_income_quintile"
+      ],
+      "definition": {
+        "type": "MeanAbsoluteDisparity",
+        "config": {
+          "reference_group": "Q5",
+          "groups": [
+            "Q1",
+            "Q2",
+            "Q3",
+            "Q4",
+            "Q5"
+          ]
+        }
+      }
+    },
+    {
+      "name": "noncompliance_events",
+      "inputs": [
+        "observable.noncompliance_events_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "network_generation": "Watts-Strogatz small-world with average_degree and rewire_prob",
+    "household_assignment": "Sequentially pack agents into households using Poisson(household_size_mean), ensure sum equals population",
+    "person_attributes": "Sample age, income, compliance, susceptibility, initial attitude, trust; compute group_memberships (e.g., income quintile, age group), assign mask_stock ~ Poisson(initial_personal_stock_mean)",
+    "media_sources": "Instantiate num_media_sources with reach, credibility, bias; assign each person k sources (k ~ Poisson(1.5) truncated >=1) weighted by reach",
+    "locations": "Create work/school/retail/transit pools with capacities = capacity_utilization * population_size / count",
+    "retailers": "Create num_retailers with initial inventory = initial_inventory_per_capita * population_size / num_retailers and price = mask_price",
+    "policy": "Set policy_initial_state and schedule campaign_start_day + multiples of campaign_frequency_days"
+  },
+  "algorithms": {
+    "NetworkGeneration": "Watts\u2013Strogatz small-world graph G(N, k=average_degree, beta=rewire_prob)",
+    "AttitudeUpdate": "Weighted-averaging with decay, household norms and group influence, plus Gaussian noise",
+    "WearDecision": "Logistic regression on attitude, risk, policy pressure, habit, fatigue; constrained by stock",
+    "HabitFatigueDynamics": "Increment/decrement habit and fatigue based on wearing",
+    "MarketMechanism": "Inventory restocking via Poisson, rationed sales, price adaptation via tanh of excess demand",
+    "MobilityAndEnforcement": "Sampled visits by location mix, enforcement based on location signal and enforcement noise",
+    "MediaCampaign": "Campaign days boost risk and attitude; misinformation attenuates; baseline drift on other days",
+    "Aggregation": "Daily means and grouped means; time-to-threshold and difference-in-differences around policy"
+  },
+  "data_sources": [
+    {
+      "name": "train_adoption_rate_daily.csv",
+      "purpose": "Calibration/validation of daily mask adoption rate",
+      "fields_used": [
+        "date",
+        "adoption_rate"
+      ]
+    },
+    {
+      "name": "retail_supply_demand.csv",
+      "purpose": "Compare supply-demand gap time series",
+      "fields_used": [
+        "date",
+        "gap"
+      ]
+    },
+    {
+      "name": "retail_prices.csv",
+      "purpose": "Validate price dynamics",
+      "fields_used": [
+        "date",
+        "mean_price"
+      ]
+    },
+    {
+      "name": "retail_inventory.csv",
+      "purpose": "Validate inventory levels",
+      "fields_used": [
+        "date",
+        "total_inventory"
+      ]
+    },
+    {
+      "name": "enforcement_log.csv",
+      "purpose": "Validate noncompliance event counts",
+      "fields_used": [
+        "date",
+        "noncompliance_events"
+      ]
+    },
+    {
+      "name": "campaign_evals.csv",
+      "purpose": "Estimate campaign effect on attitudes",
+      "fields_used": [
+        "campaign_date",
+        "attitude_shift"
+      ]
+    },
+    {
+      "name": "policy_effects.csv",
+      "purpose": "Assess adoption change pre/post mandates",
+      "fields_used": [
+        "policy_date",
+        "adoption_diff_pre_post"
+      ]
+    },
+    {
+      "name": "adoption_by_income.csv",
+      "purpose": "Group disparity evaluation",
+      "fields_used": [
+        "date",
+        "income_quintile",
+        "adoption_rate"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point; parses config, seeds RNG, runs simulation loop, orchestrates modules."
+      },
+      {
+        "name": "entities.py",
+        "description": "Entity class definitions for Person, Household, Location, Retailer, PolicyMaker, MediaSource."
+      },
+      {
+        "name": "network.py",
+        "description": "Social network construction and utilities (Watts\u2013Strogatz)."
+      },
+      {
+        "name": "modules/social_influence.py",
+        "description": "Implements SocialInfluenceModule."
+      },
+      {
+        "name": "modules/media_campaign.py",
+        "description": "Implements MediaAndCampaignModule."
+      },
+      {
+        "name": "modules/policy_enforcement.py",
+        "description": "Implements PolicyAndEnforcementModule."
+      },
+      {
+        "name": "modules/retail_market.py",
+        "description": "Implements RetailMarketModule."
+      },
+      {
+        "name": "modules/mobility_location.py",
+        "description": "Implements MobilityAndLocationModule."
+      },
+      {
+        "name": "modules/decision_action.py",
+        "description": "Implements DecisionAndActionModule."
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "Implements AdoptionAggregator and observable generation."
+      },
+      {
+        "name": "utils/stats.py",
+        "description": "Random draws, distributions, truncated normals, logistic/sigmoid, quantiles."
+      },
+      {
+        "name": "utils/io.py",
+        "description": "Read/write observables, metrics, configuration."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric implementations and evaluation pipeline."
+      },
+      {
+        "name": "config/params.json",
+        "description": "Parameter defaults and bounds."
+      },
+      {
+        "name": "tests/test_modules.py",
+        "description": "Unit tests for module update rules."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "scipy",
+      "networkx",
+      "pandas",
+      "numba",
+      "pydantic"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 90,
+    "end_day": 119
+  },
+  "evaluation_metrics": [
+    "adoption_rate_over_time",
+    "time_to_threshold",
+    "peak_adoption_level",
+    "policy_effect_on_adoption",
+    "campaign_effect_on_attitudes",
+    "supply_demand_gap",
+    "adoption_disparity_by_group",
+    "noncompliance_events"
+  ]
+}

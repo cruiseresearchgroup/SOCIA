@@ -1,0 +1,195 @@
+{
+  "summary": "The simulation is functionally complete and generally robust, but there are a few critical integration and edge-case issues: JSON output behavior is not default-safe for harness parsing, population size is not validated causing potential sampling errors, and the ring-lattice rewiring can silently reduce node degree. Secondary improvements include guarding visualization, modest performance refinements, and clearer calibration pathways. Recent changes improved enforcement realism, network configurability, metrics breadth, and purchasing/logistics tracking.",
+  "critical_issues": [
+    {
+      "issue": "Stdout JSON is not emitted by default; harness parsing fails without --stdout-json or STDOUT_JSON env var",
+      "impact": "External harnesses expecting JSON on stdout fail to parse output, causing end-to-end pipeline errors such as 'Expecting property name enclosed in double quotes'.",
+      "solution": "Default to emitting JSON to stdout; add a suppress flag if needed. Keep file writes as optional side-effect.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No validation for non-positive population size",
+      "impact": "initialize_population may attempt rng.sample with k >= 1 from an empty range, raising ValueError and crashing.",
+      "solution": "Clamp population_size >= 1 in __init__ and ensure initial seeding handles size-1 consistently.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "ring_small_world rewiring can drop an edge without replacement",
+      "impact": "The 'len(adj[i]) >= n - 1' early-continue skips rewiring after removing the original edge, reducing degree and biasing network structure in dense cases.",
+      "solution": "Remove that early-continue; always attempt bounded rewiring and restore the original edge on failure (logic already present).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Visualization may block in headless CI and is unguarded by a CLI flag",
+      "impact": "When not using --stdout-json, visualize() may attempt to open a plotting window or cause backend warnings, disrupting automated runs.",
+      "solution": "Add a --plot/--no-plot switch defaulting to no plotting; call visualize only when explicitly requested.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Adoption behavior granularity (situational compliance)",
+      "current_approach": "Binary 'adopting' state; non-adopters neither wear masks nor behave situationally even under mandate with entry refusal.",
+      "suggested_approach": "Introduce a situational_masking probability when mandate is active, location enforces, or when entry refusal occurs. Allow non-adopters to temporarily comply without changing long-term 'adopting' state.",
+      "expected_benefit": "More realistic compliance under enforcement; better alignment with observed behavior where people comply situationally without fully adopting."
+    },
+    {
+      "aspect": "Norms/media dynamics",
+      "current_approach": "Prev-day norms feed a fixed 0.3*(norms-0.5) into adoption; media includes a one-day shock.",
+      "suggested_approach": "Use an exponentially decaying moving average for norms influence and multi-day media shock with decay (e.g., AR(1) for media topic salience).",
+      "expected_benefit": "Smoother and more realistic temporal dynamics, reducing sensitivity to single-day anomalies."
+    },
+    {
+      "aspect": "Network structure",
+      "current_approach": "Single small-world ring-lattice without cross-community structure.",
+      "suggested_approach": "Add optional community structure (stochastic block model layering) or degree heterogeneity (configuration model) with the same mean degree.",
+      "expected_benefit": "Captures segregation and cluster effects often observed in adoption cascades, improving realism of diffusion speed and plateaus."
+    },
+    {
+      "aspect": "Retail market frictions",
+      "current_approach": "Simple ration limits and affordability penalty; daily independent retailer visits.",
+      "suggested_approach": "Add retailer choice based on price/inventory expectations and distance/friction; allow stockouts to influence future choice (reinforcement/avoidance).",
+      "expected_benefit": "Richer market dynamics and more realistic access inequities across SES groups."
+    },
+    {
+      "aspect": "Disease-contact mapping",
+      "current_approach": "Risk per location proportional to infectious visitors and mask effectiveness, divided by total visitor count.",
+      "suggested_approach": "Model contact mixing based on location crowding with a non-linear contact function and add within-household transmission stub for background risk.",
+      "expected_benefit": "Improves epidemiological plausibility of Rt and incidence patterns without major complexity."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Default to emitting JSON to stdout regardless of flags; add --no-stdout to suppress if desired.",
+      "reason": "Prevents JSON parse errors in harnesses that expect stdout JSON by default.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Validate and clamp population_size >= 1 in __init__; guard initial adoption seeding to avoid sampling errors.",
+      "reason": "Prevents runtime errors when population_size <= 0.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Fix ring_small_world rewiring by removing early-continue after edge removal and always attempting bounded rewiring or restoring original edge.",
+      "reason": "Avoids unintended degree deficits that skew network properties.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add CLI flag --plot (default False) and wrap sim.visualize() behind it.",
+      "reason": "Avoids blocking or backend errors in headless/CI contexts.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add situational_masking behavior in visits_and_enforcement when mandate is active at mandate-sensitive locations.",
+      "reason": "Improves realism by allowing temporary compliance without affecting long-term adoption state.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Smooth norms effect via EMA: prev_day_norms = alpha*observed + (1-alpha)*prev_day_norms with alpha ~ 0.4; update adoption_step to use this smoothed value.",
+      "reason": "Reduces volatility and spurious feedback loops from single-day variations.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Policy compliance rate at mandate-sensitive locations",
+      "current_gap": "Compliance is driven by a single-day enforcement probability and binary adoption; situational compliance not captured.",
+      "suggestion": "Introduce situational_masking with probability derived from enforcement intensity and mandate status; calibrate using observed compliance audits where available."
+    },
+    {
+      "metric": "Adoption by SES quintile",
+      "current_gap": "Price penalty and SES adjustment are plausible but uncalibrated to observed disparities.",
+      "suggestion": "Fit price_penalty scaling and base_success by SES to match survey or sales data (e.g., household mask purchasing, mobility and compliance by income)."
+    },
+    {
+      "metric": "Rt and incidence",
+      "current_gap": "Location-based mixing lacks household/community layers; observed Rt curves often reflect multiple layers and delays.",
+      "suggestion": "Add a background household transmission rate and tune beta/mask_effectiveness to align with published estimates; compare serial interval proxy with empirical Rt series."
+    },
+    {
+      "metric": "Adoption trajectory (time_to_50%, time_to_70%)",
+      "current_gap": "Adoption S-curve parameters are heuristic.",
+      "suggestion": "Calibrate the logistic parameters and intercept against historical mask mandate adoption timelines (e.g., public transit compliance data) using simple least-squares or ABC."
+    }
+  ],
+  "prioritized_actions": [
+    "Make stdout JSON the default output to eliminate harness parse errors.",
+    "Clamp/validate population size and fix initial seeding to avoid sampling errors.",
+    "Fix small-world rewiring to prevent unintended degree loss.",
+    "Guard visualization behind an opt-in flag to avoid CI/headless issues.",
+    "Add situational masking during enforcement to improve realism of compliance metrics.",
+    "Smooth norms/media effects (EMA) to reduce volatility and better match observed behavior.",
+    "Plan calibration tasks for SES disparities and adoption S-curve parameters."
+  ],
+  "additional_comments": "The recent enhancements (entry refusal, network configurability, purchase tracking, compliance metrics, enforcement actions) are strong steps toward a richer and more auditable model. Focusing next on integration reliability (stdout JSON default), edge-case validation, and modest realism upgrades (situational compliance, norms smoothing) will yield the best near-term gains.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "if getattr(args, \"stdout_json\", False):\n    sys.stdout.write(json.dumps(payload))\n    sys.stdout.flush()\nelse:\n    os.makedirs(os.path.dirname(args.output) or \".\", exist_ok=True)\n    sim.save_json(args.output, metadata=metadata)\n    print(f\"Wrote results to {args.output}\", file=sys.stderr)\n    csv_path = os.path.join(os.path.dirname(args.output), \"results.csv\")\n    sim.save_results(csv_path)\n    print(f\"Wrote daily results CSV to {csv_path}\", file=sys.stderr)\n    try:\n        sim.visualize()\n    except Exception as e:\n        print(f\"Visualization error (continuing): {e}\", file=sys.stderr)",
+      "after": "# Always emit JSON to stdout by default; allow suppression via --no-stdout\nif not getattr(args, \"no_stdout\", False):\n    sys.stdout.write(json.dumps(payload))\n    sys.stdout.flush()\n# Optional file outputs\nif args.output:\n    os.makedirs(os.path.dirname(args.output) or \".\", exist_ok=True)\n    sim.save_json(args.output, metadata=metadata)\n    print(f\"Wrote results to {args.output}\", file=sys.stderr)\n    csv_path = os.path.join(os.path.dirname(args.output), \"results.csv\")\n    sim.save_results(csv_path)\n    print(f\"Wrote daily results CSV to {csv_path}\", file=sys.stderr)\n# Visualization only if explicitly requested\nif getattr(args, \"plot\", False):\n    try:\n        sim.visualize()\n    except Exception as e:\n        print(f\"Visualization error (continuing): {e}\", file=sys.stderr)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "parser.add_argument(\"--stdout-json\", action=\"store_true\", help=\"Emit only JSON to stdout and send logs to stderr\")",
+      "after": "parser.add_argument(\"--no-stdout\", action=\"store_true\", help=\"Do not emit JSON to stdout; write files only\")\nparser.add_argument(\"--plot\", action=\"store_true\", help=\"Show plots (off by default)\")",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.population_size = int(population_size)",
+      "after": "self.population_size = max(1, int(population_size))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "init_ids = set(self.rng.sample(range(self.population_size), max(1, int(self.population_size * init_frac))))",
+      "after": "seed_k = min(self.population_size, max(1, int(self.population_size * init_frac)))\ninit_ids = set(self.rng.sample(range(self.population_size), seed_k))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "adj[i].discard(j)\nadj[j].discard(i)\nif len(adj[i]) >= n - 1:\n    continue\n# Bounded attempts to find a new neighbor\nfor _ in range(10):\n    u = rng.randrange(n)\n    if u != i and u not in adj[i]:\n        adj[i].add(u)\n        adj[u].add(i)\n        break\nelse:\n    # fallback: restore original edge if no candidate found\n    adj[i].add(j)\n    adj[j].add(i)",
+      "after": "adj[i].discard(j)\nadj[j].discard(i)\n# Always attempt bounded rewiring; restore original on failure\nfor _ in range(20):\n    u = rng.randrange(n)\n    if u != i and u not in adj[i]:\n        adj[i].add(u)\n        adj[u].add(i)\n        break\nelse:\n    adj[i].add(j)\n    adj[j].add(i)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "if norms_count:\n    self.prev_day_norms = norms_sum / norms_count\nelse:\n    # No visits observed: decay towards neutral 0.5\n    self.prev_day_norms = 0.5 * self.prev_day_norms + 0.5 * 0.5",
+      "after": "alpha = 0.4\nobserved = (norms_sum / norms_count) if norms_count else 0.5\nself.prev_day_norms = alpha * observed + (1 - alpha) * self.prev_day_norms",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "for pid in visitors:\n    p = self.people[pid]\n    # Mask consumption: occasional usage leads to depletion\n    if p.adopting and p.mask_inventory > 0 and self.rng.random() < 0.2:\n        p.mask_inventory -= 1\n    # Enforcement applies when mandate active and location mandates\n    apply_enforcement = mandate_active and loc.mandate_sensitive\n    enforcement_prob = clamp(self.gov.enforcement_prob * loc.enforcement_level, 0.0, 1.0)\n    if apply_enforcement and not p.adopting:\n        if self.rng.random() < enforcement_prob:\n            # FIXED: Enforcement actions now include potential entry refusal.\n            self.enforcement_actions_count += 1\n            if getattr(loc, \"entry_refusal_if_unmasked\", False) and self.rng.random() < 0.5:\n                # Entry refusal instead of fine\n                refused_ids.append(pid)\n            else:\n                # Fine\n                self.total_fines_count += 1\n                self.total_fines_value += self.gov.fine_amount\n                p.fines_paid += self.gov.fine_amount\n                # Enforcement nudge: slight increases in risk and compliance\n                p.risk = clamp(p.risk + 0.02, 0.0, 1.0)\n                p.compliance_trait = clamp(p.compliance_trait + 0.02, 0.0, 1.0)",
+      "after": "for pid in visitors:\n    p = self.people[pid]\n    # Mask consumption: occasional usage leads to depletion\n    if p.adopting and p.mask_inventory > 0 and self.rng.random() < 0.2:\n        p.mask_inventory -= 1\n    apply_enforcement = mandate_active and loc.mandate_sensitive\n    enforcement_prob = clamp(self.gov.enforcement_prob * loc.enforcement_level, 0.0, 1.0)\n    # Situational masking (temporary compliance without flipping 'adopting')\n    situational = False\n    if apply_enforcement and not p.adopting:\n        # chance to comply situationally scales with enforcement\n        situational_prob = 0.2 + 0.6 * enforcement_prob\n        situational = self.rng.random() < situational_prob\n    effective_masked = p.adopting or situational\n    if apply_enforcement and not effective_masked:\n        if self.rng.random() < enforcement_prob:\n            self.enforcement_actions_count += 1\n            if getattr(loc, \"entry_refusal_if_unmasked\", False) and self.rng.random() < 0.5:\n                refused_ids.append(pid)\n            else:\n                self.total_fines_count += 1\n                self.total_fines_value += self.gov.fine_amount\n                p.fines_paid += self.gov.fine_amount\n                p.risk = clamp(p.risk + 0.02, 0.0, 1.0)\n                p.compliance_trait = clamp(p.compliance_trait + 0.02, 0.0, 1.0)",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes significantly improved realism and configurability: entry refusal enforcement, network parameter exposure, richer metrics (compliance, purchases, enforcement actions), and corrected outage counting. The core loop and outputs are coherent. Remaining integration issues relate to default stdout behavior and a subtle rewiring logic bug.",
+    "positive_impacts": [
+      "Entry refusal adds realistic enforcement pathways beyond fines.",
+      "Network mean degree and rewiring probability are now configurable.",
+      "Expanded metrics (policy compliance rate, average compliance duration, purchases) improve interpretability.",
+      "Market restocking and outage counting are more accurate and less error-prone."
+    ],
+    "negative_impacts": [
+      "Default stdout behavior still risks harness parse errors.",
+      "Rewiring early-continue can silently reduce degree in dense graphs.",
+      "Visualization is still executed unless stdout-json is used, which may affect CI runs."
+    ],
+    "suggestions": [
+      "Make stdout JSON default and plotting opt-in.",
+      "Fix rewiring logic by removing the degree-based early-continue and always restoring the removed edge on failure.",
+      "Add situational masking to complement entry refusal and fines for more nuanced enforcement effects.",
+      "Smooth norms/media signals to stabilize early-day dynamics and improve face validity."
+    ]
+  }
+}

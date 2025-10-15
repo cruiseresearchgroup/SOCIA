@@ -1,0 +1,211 @@
+{
+  "summary": "Overall, the simulation is syntactically sound and functionally coherent with a modular pipeline, parameter registry, basic calibration stubs, and artifacts saving. However, a critical issue exists in evaluate_params where the same simulator instance is mutated across evaluations. Additional issues include state mutation inside a forward pass, weak robustness to missing parameters, narrow module instantiation mapping, and minor error-handling/style concerns. Addressing these will stabilize calibration, avoid cross-trial contamination, and improve reliability of outputs for downstream evaluation.",
+  "critical_issues": [
+    {
+      "issue": "evaluate_params mutates the provided simulator instance during evaluation",
+      "impact": "Cross-trial contamination during calibration or repeated evaluations; metrics and state become inconsistent and can bias or invalidate calibration results",
+      "solution": "Instantiate a fresh Simulation (with a cloned ParameterRegistry and copied current registry values) inside evaluate_params, mirroring the calibrators\u2019 approach",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "AdoptionAggregator.forward mutates shared state (observables_buffer) inside forward pass",
+      "impact": "Violates the forward/buffer separation, complicates reasoning about module side-effects, and can cause ordering sensitivity; increases risk of subtle bugs if module ordering or buffering changes",
+      "solution": "Return observables_buffer deltas via buffers and commit them in Simulation._commit_buffers",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Hard-required parameters are not guarded; modules call get_param unconditionally",
+      "impact": "Plan missing keys will cause KeyErrors at runtime (e.g., noise_scale, smoothing_window_days), leading to simulation failure; reduces robustness across plans",
+      "solution": "Add registry.get_param_or(key, default) and use it for non-critical parameters (noise_scale, ws_rewiring_prob, ba_m, deg_exponent, smoothing_window_days, reporting_lag_days); optionally validate required keys in validate_plan",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Ground-truth alignment by index instead of by 't' in evaluate",
+      "impact": "Incorrect RMSE/MAE if ground truth timestamps do not align exactly by index, producing misleading metrics",
+      "solution": "Align sim and ground-truth series by timestamp (t) before computing metrics",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "load_text_from_url does not catch socket.timeout",
+      "impact": "Timeouts may not be handled cleanly on some platforms; reduced resilience to network issues",
+      "solution": "Also catch socket.timeout alongside HTTPError/URLError; ensure backoff/retry path covers this case",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Adoption probability structure",
+      "current_approach": "Logistic choice over the sum of peer/media/policy minus a fixed threshold, with noise and inertia",
+      "suggested_approach": "Normalize or bound each component and introduce calibrated per-component offsets; optionally use a generalized logistic with separate coefficients for signals, and support agent-level heterogeneity via parameter distributions",
+      "expected_benefit": "Better stability and interpretability; improved fit across different network regimes"
+    },
+    {
+      "aspect": "Policy compliance modeling",
+      "current_approach": "Single base probability scaled by enforcement for all targeted agents",
+      "suggested_approach": "Include group-level or degree-based heterogeneity in compliance (e.g., compliance_prob_base per group or degree quantile); support partial compliance levels",
+      "expected_benefit": "More realistic intervention effects and improved calibration to heterogeneous populations"
+    },
+    {
+      "aspect": "Peer signal memory",
+      "current_approach": "Simple exponential memory smoothing (memory_peer) and conformity exponent",
+      "suggested_approach": "Use a two-timescale memory (short-term and long-term) or decouple exposure memory from conformity; optionally include recency weighting by last change",
+      "expected_benefit": "Richer dynamics that can capture delayed and persistent effects"
+    },
+    {
+      "aspect": "Observables smoothing",
+      "current_approach": "Simple moving average applied to daily rates",
+      "suggested_approach": "Support EMA or configurable smoothing kernels; parameterize smoothing per observable",
+      "expected_benefit": "Better control over noise vs responsiveness aligned to how ground-truth series are processed"
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation_code_iter_50.py",
+      "modification": "Use a fresh Simulation inside evaluate_params instead of mutating the provided simulator",
+      "reason": "Avoid cross-trial contamination and ensure reproducibility during calibration/evaluation",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "modification": "Refactor AdoptionAggregator.forward to avoid mutating state; move observables_buffer updates into commit step",
+      "reason": "Maintain forward/buffer contract and reduce side effects",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "modification": "Add ParameterRegistry.get_param_or(key, default) and use for optional parameters (noise_scale, ws_rewiring_prob, ba_m, deg_exponent, smoothing_window_days, reporting_lag_days)",
+      "reason": "Increase robustness to missing plan parameters",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "modification": "Align ground-truth and simulation series by timestamp 't' in Simulation.evaluate before computing RMSE/MAE",
+      "reason": "Produce correct and stable metrics; avoid index misalignment errors",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "modification": "Catch socket.timeout in load_text_from_url",
+      "reason": "Improve network robustness in real environments",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "modification": "Support module 'type' field in Simulation._build_modules for class mapping, with fallback to 'name'",
+      "reason": "Increase plan schema flexibility and reduce silent fallbacks to base SimModule",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "modification": "Remove unused import 'statistics' and redundant 'pass' statements immediately followed by logic",
+      "reason": "Improve readability and reduce noise",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "RMSE/MAE on adoption_rate_daily",
+      "current_gap": "Metrics computed by index; ground-truth possibly offset or irregularly spaced",
+      "suggestion": "Align by 't' keys; if ground-truth days differ, perform interpolation or matching on overlapping days only"
+    },
+    {
+      "metric": "Peak timing and height",
+      "current_gap": "PeakError and TimeToPeak are placeholders or index-based",
+      "suggestion": "Compute peaks on aligned series and report both absolute peak difference and time-to-peak difference"
+    },
+    {
+      "metric": "TransitionFit (P01, P11, P10, P00)",
+      "current_gap": "Aggregated over all days without per-window normalization; sensitive to horizons",
+      "suggestion": "Compute transition rates per day (or per window) and compare to micro-data if available; otherwise report normalized averages per period"
+    }
+  ],
+  "prioritized_actions": [
+    "Fix evaluate_params to run on a fresh Simulation instance",
+    "Refactor AdoptionAggregator to avoid mutating state in forward and commit via _commit_buffers",
+    "Add get_param_or and guard optional parameters throughout modules",
+    "Align evaluation metrics by timestamp 't' rather than index",
+    "Improve load_text_from_url exception handling to include socket.timeout",
+    "Support module 'type' field in _build_modules and validate required modules in validate_plan",
+    "Clean up unused imports and redundant pass statements"
+  ],
+  "additional_comments": "The removal of the stray plain text line from the previous iteration is a positive correction. The code prints only the final JSON to stdout and logs to stderr, which should avoid mixed outputs; retaining this discipline is key to preventing 'Extra data' JSON parsing errors. Consider adding a smoke test mode that runs a minimal plan and asserts the presence of core observables to catch missing-parameter issues earlier.",
+  "code_snippets": [
+    {
+      "file": "simulation_code_iter_50.py",
+      "before": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    ...\n    adapter = PlanParamsAdapter(os.path.join(simulator.artifacts_dir, \"parameter_definitions.json\"))\n    adapter.apply(simulator, params)\n    start, end = window\n    simulator.run(start, end)\n    metrics = simulator.evaluate()\n    ...",
+      "after": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    adapter = PlanParamsAdapter(os.path.join(simulator.artifacts_dir, \"parameter_definitions.json\"))\n    # Use a fresh simulator to avoid contaminating the provided instance\n    sim_copy = Simulation(simulator.plan, ParameterRegistry.from_plan(simulator.plan), seed=simulator.seed,\n                          artifacts_dir=os.path.join(simulator.artifacts_dir, \"eval_tmp\"))\n    sim_copy.registry.values = dict(simulator.registry.values)\n    adapter.apply(sim_copy, params)\n    start, end = window\n    sim_copy.run(start, end)\n    metrics = sim_copy.evaluate()\n    if \"Brier\" not in metrics or metrics[\"Brier\"] is None:\n        metrics[\"Brier\"] = None\n    if \"TransitionFit\" not in metrics:\n        metrics[\"TransitionFit\"] = {\"P01\": None, \"P11\": None, \"P10\": None, \"P00\": None}\n    return metrics",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "before": "class AdoptionAggregator(SimModule):\n    ...\n    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], t: int) -> Dict[str, Any]:\n        ...\n        obs_buf = state.setdefault(\"observables_buffer\", {\n            \"adoption_rate_daily\": [],\n            \"new_adoptions_daily\": [],\n            \"adoption_rate_low_income_daily\": [],\n            \"adoption_rate_high_income_daily\": [],\n            \"time\": [],\n        })\n        obs_buf[\"adoption_rate_daily\"].append(rate)\n        obs_buf[\"new_adoptions_daily\"].append(new_adoptions)\n        obs_buf[\"adoption_rate_low_income_daily\"].append(rate_low)\n        obs_buf[\"adoption_rate_high_income_daily\"].append(rate_high)\n        obs_buf[\"time\"].append(t)\n        ...",
+      "after": "class AdoptionAggregator(SimModule):\n    ...\n    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], t: int) -> Dict[str, Any]:\n        ...\n        # Return deltas for observables_buffer; commit in _commit_buffers\n        out[\"append.observables_buffer\"] = {\n            \"adoption_rate_daily\": rate,\n            \"new_adoptions_daily\": new_adoptions,\n            \"adoption_rate_low_income_daily\": rate_low,\n            \"adoption_rate_high_income_daily\": rate_high,\n            \"time\": t,\n        }\n        ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "before": "def _commit_buffers(self, buffers: Dict[str, Any], t: int) -> None:\n    ...\n    # Observables\n    obs_state = self.state.setdefault(\"observables\", {})\n    for key, value in buffers.items():\n        if key.startswith(\"observable.\"):\n            series = obs_state.setdefault(key, [])\n            series.append(value)\n    ...",
+      "after": "def _commit_buffers(self, buffers: Dict[str, Any], t: int) -> None:\n    ...\n    # Append to observables_buffer if present\n    if \"append.observables_buffer\" in buffers:\n        obs_buf = self.state.setdefault(\"observables_buffer\", {\n            \"adoption_rate_daily\": [],\n            \"new_adoptions_daily\": [],\n            \"adoption_rate_low_income_daily\": [],\n            \"adoption_rate_high_income_daily\": [],\n            \"time\": [],\n        })\n        delta = buffers[\"append.observables_buffer\"]\n        obs_buf[\"adoption_rate_daily\"].append(delta[\"adoption_rate_daily\"])\n        obs_buf[\"new_adoptions_daily\"].append(delta[\"new_adoptions_daily\"])\n        obs_buf[\"adoption_rate_low_income_daily\"].append(delta[\"adoption_rate_low_income_daily\"])\n        obs_buf[\"adoption_rate_high_income_daily\"].append(delta[\"adoption_rate_high_income_daily\"])\n        obs_buf[\"time\"].append(delta[\"time\"])\n    # Observables emitted directly\n    obs_state = self.state.setdefault(\"observables\", {})\n    for key, value in buffers.items():\n        if key.startswith(\"observable.\"):\n            obs_state.setdefault(key, []).append(value)\n    ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "before": "class ParameterRegistry:\n    ...\n    def get_param(self, key: str) -> Any:\n        if key not in self.definitions:\n            raise KeyError(f\"Unknown parameter key: {key}\")\n        return self.values[key]\n",
+      "after": "class ParameterRegistry:\n    ...\n    def get_param(self, key: str) -> Any:\n        if key not in self.definitions:\n            raise KeyError(f\"Unknown parameter key: {key}\")\n        return self.values[key]\n\n    def get_param_or(self, key: str, default: Any) -> Any:\n        if key not in self.definitions:\n            return default\n        return self.values.get(key, default)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "before": "class AdoptionDecision(SimModule):\n    ...\n    noise_scale = float(self.registry.get_param(\"noise_scale\"))\n    ...",
+      "after": "class AdoptionDecision(SimModule):\n    ...\n    noise_scale = float(self.registry.get_param_or(\"noise_scale\", 0.1))\n    ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "before": "def load_text_from_url(url: str, timeout: float = 10.0, retries: int = 3, backoff: float = 0.5) -> str:\n    ...\n    except (HTTPError, URLError, TimeoutError) as e:\n        last_err = e\n        sleep_time = backoff * (2 ** attempt)\n        eprint(f\"Network error on attempt {attempt + 1}/{retries}: {e}. Retrying in {sleep_time:.2f}s\")\n        time.sleep(sleep_time)\n        attempt += 1\n",
+      "after": "import socket\n...\ndef load_text_from_url(url: str, timeout: float = 10.0, retries: int = 3, backoff: float = 0.5) -> str:\n    ...\n    except (HTTPError, URLError, socket.timeout) as e:\n        last_err = e\n        sleep_time = backoff * (2 ** attempt)\n        eprint(f\"Network error on attempt {attempt + 1}/{retries}: {e}. Retrying in {sleep_time:.2f}s\")\n        time.sleep(sleep_time)\n        attempt += 1\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "before": "def evaluate(self, ground_truth: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:\n    ...\n    sim_series = [v[\"value\"] for v in obs.get(\"observable.adoption_rate_daily\", [])]\n    rmse = None\n    mae = None\n    if ground_truth and \"observable.adoption_rate_daily\" in ground_truth:\n        gt_series = [v[\"value\"] for v in ground_truth[\"observable.adoption_rate_daily\"]]\n        L = min(len(sim_series), len(gt_series))\n        if L > 0:\n            diffs = [(sim_series[i] - gt_series[i]) for i in range(L)]\n            rmse = math.sqrt(sum(d * d for d in diffs) / L)\n            mae = sum(abs(d) for d in diffs) / L\n    ...",
+      "after": "def evaluate(self, ground_truth: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:\n    ...\n    sim_series_full = obs.get(\"observable.adoption_rate_daily\", [])\n    sim_by_t = {pt[\"t\"]: pt[\"value\"] for pt in sim_series_full}\n    rmse = None\n    mae = None\n    if ground_truth and \"observable.adoption_rate_daily\" in ground_truth:\n        gt_series_full = ground_truth[\"observable.adoption_rate_daily\"]\n        common_ts = [pt[\"t\"] for pt in gt_series_full if pt[\"t\"] in sim_by_t]\n        if common_ts:\n            diffs = [sim_by_t[t] - next(v[\"value\"] for v in gt_series_full if v[\"t\"] == t) for t in common_ts]\n            L = len(diffs)\n            rmse = math.sqrt(sum(d * d for d in diffs) / L)\n            mae = sum(abs(d) for d in diffs) / L\n    sim_series = [pt[\"value\"] for pt in sim_series_full]\n    ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "before": "module_configs = self.plan.get(\"modules\", [])\nname_to_config = {m[\"name\"]: m for m in module_configs}\n\ndef instantiate(name: str) -> SimModule:\n    cfg = name_to_config[name]\n    if name == \"NetworkBuilder\":\n        return NetworkBuilder(name, cfg, self.registry)\n    ...\n",
+      "after": "module_configs = self.plan.get(\"modules\", [])\n# Support 'type' field with fallback to 'name'\nname_to_config = {m.get(\"name\", m.get(\"type\")): m for m in module_configs}\n\ndef instantiate(name: str) -> SimModule:\n    cfg = name_to_config[name]\n    mtype = cfg.get(\"type\", name)\n    if mtype == \"NetworkBuilder\":\n        return NetworkBuilder(name, cfg, self.registry)\n    if mtype == \"AgentInitializer\":\n        return AgentInitializer(name, cfg, self.registry)\n    if mtype == \"PeerInfluence\":\n        return PeerInfluence(name, cfg, self.registry)\n    if mtype == \"MediaInfluence\":\n        return MediaInfluence(name, cfg, self.registry)\n    if mtype == \"PolicyIntervention\":\n        return PolicyIntervention(name, cfg, self.registry)\n    if mtype == \"AdoptionDecision\":\n        return AdoptionDecision(name, cfg, self.registry)\n    if mtype == \"AdoptionAggregator\":\n        return AdoptionAggregator(name, cfg, self.registry)\n    return SimModule(name, cfg, self.registry)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_50.py",
+      "before": "import statistics",
+      "after": "",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent iteration significantly expanded the code into a full-featured simulation with calibration stubs and artifacts handling, and it removed the stray 'Error: Request timed out.' line that could corrupt outputs.",
+    "positive_impacts": [
+      "Removal of stray plain text that could break JSON outputs",
+      "Introduction of a robust CLI and loaders with retries",
+      "Clear modular simulation architecture with buffers and commit",
+      "ParameterRegistry and ad hoc calibrators improve extensibility"
+    ],
+    "negative_impacts": [
+      "evaluate_params still mutates the provided simulator instance",
+      "AdoptionAggregator mutates state during forward",
+      "Module instantiation strictly relies on 'name' unless adjusted",
+      "Some metrics remain placeholders and ground-truth alignment is simplistic"
+    ],
+    "suggestions": [
+      "Instantiate a fresh Simulation inside evaluate_params",
+      "Move observables_buffer mutations to commit step",
+      "Support module 'type' and validate presence of core modules during plan validation",
+      "Align evaluation series by timestamp and compute additional metrics (peak error) if ground truth exists",
+      "Add get_param_or to make modules resilient to missing plan keys",
+      "Catch socket.timeout in URL loader and remove unused imports"
+    ]
+  }
+}

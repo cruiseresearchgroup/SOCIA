@@ -1,0 +1,211 @@
+{
+  "summary": "The current iteration introduces valuable robustness (params adapter, calibrated resets, JSON sanitization), but fails at syntax due to a malformed nested try/except for PROJECT_ROOT. There are also execution-flow issues (unnecessary run() fallback, aggressive early stopping) and stylistic noise ('pass' statements before executable bodies). Beyond these, the simulation diverges from the Mask Adoption Diffusion specification by omitting core entities (Retailer, Location, enforcement) and key validation/metrics. Fix the syntax error first, then clean the entry/run flow and early stopping. Next, extend the model to include mandates/enforcement, costs/supply, and location compliance, and add validation checks and metrics as per the specification.",
+  "critical_issues": [
+    {
+      "issue": "Malformed nested try/except around PROJECT_ROOT causes IndentationError",
+      "impact": "Prevents the code from running at all; verification fails at syntax stage",
+      "solution": "Replace the broken nested try/except with a single robust block that handles environments without __file__ and honors env overrides",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Overly defensive try/except fallback for Simulation.run signature",
+      "impact": "May invoke a wrong signature (sim.run(end_day)) causing TypeError or inconsistent execution across environments",
+      "solution": "Remove the fallback and call sim.run(start_day, end_day) directly; optionally detect signature with inspect to be robust",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Aggressive early stopping in Simulation.run when adoption exceeds target_stop",
+      "impact": "Calibration and evaluation may terminate before the full window, biasing metrics and violating validation criteria",
+      "solution": "Introduce a parameter/flag to disable early stopping during calibration/evaluation, or set a higher threshold when needed",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Stray 'pass' statements at the beginning of function/method bodies",
+      "impact": "Not a runtime error, but reduces readability, confuses linters, and obscures actual logic flow",
+      "solution": "Remove redundant 'pass' lines where code immediately follows within the same block",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Misleading 'cumulative_adopters' metric (tracks net current adopters vs unique cumulative)",
+      "impact": "Downstream analytics could misinterpret this as total unique adopters; validation criteria expecting cumulative curves may fail",
+      "solution": "Track unique adopters separately with a set/bitset; keep current adopters as a separate variable",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Model lacks mask-specific mechanisms (supply, price, enforcement at locations) required by the task specification",
+      "impact": "Cannot compute key metrics (e.g., average_compliance_by_location_type, inequality by cost constraints) and fails to meet validation criteria",
+      "solution": "Add Location, Government enforcement, Retailer modules and integrate into the decision process; implement purchase/inventory and location compliance checks",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy and enforcement mechanics",
+      "current_approach": "Binary \u2018policy_active\u2019 and a scalar incentive amount affect utility; no location-based checks or enforcement actions",
+      "suggested_approach": "Add Location with mask_policy and enforcement_strength; Government sets mandate and enforcement_probability; on location entry, perform compliance checks, warnings/fines, and adjust behavior via penalties",
+      "expected_benefit": "Enables metrics on average compliance by location type and validates policy_monotonicity_check"
+    },
+    {
+      "aspect": "Supply, price, and purchase behavior",
+      "current_approach": "No retailer/supply, no mask inventory/costs",
+      "suggested_approach": "Add Retailer with stock_level, restock_rate, price_per_mask; Person.purchase_masks governed by base_purchase_probability and cost_sensitivity; update mask_inventory and constrain current_mask_use",
+      "expected_benefit": "Captures adoption bottlenecks driven by price and stock; enables masks_sold metric and inequality analysis"
+    },
+    {
+      "aspect": "Household and within-household norm transmission",
+      "current_approach": "Only peer influence on the network",
+      "suggested_approach": "Introduce Household membership; share_norms_within_household to accelerate convergence among members with higher weight than general peers",
+      "expected_benefit": "More realistic diffusion in family units and improved fit to early cluster adoption patterns"
+    },
+    {
+      "aspect": "Media and misinformation",
+      "current_approach": "Generic marketing contacts and neighbor exposures",
+      "suggested_approach": "MediaOutlet broadcasts messages with message_bias and misinformation_probability; update agents\u2019 risk_perception/trust and consequently their attitude_toward_masks",
+      "expected_benefit": "Captures shifts from information campaigns vs misinformation and improves alignment with temporal adoption curves"
+    },
+    {
+      "aspect": "Disease prevalence feedback",
+      "current_approach": "No infection module, no prevalence signal",
+      "suggested_approach": "Add optional simple prevalence model or external prevalence input; adjust risk_perception and perceived_prevalence in decision utility",
+      "expected_benefit": "Supports cases_or_Rt_reduction metric and increases external validity of adoption responses to outbreaks"
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Fix PROJECT_ROOT/DATA_DIR/ARTIFACTS_DIR initialization with a single clean block",
+      "reason": "Resolves the IndentationError and ensures robust behavior without __file__",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove TypeError fallback around sim.run; optionally detect signature using inspect",
+      "reason": "Prevents incorrect signature invocation and simplifies control flow",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add a parameter to disable early stopping during calibration/evaluation; default to respecting early stopping for speed outside calibration",
+      "reason": "Ensures full-length runs for validation windows and repeatability across trials",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove stray 'pass' statements at the start of function bodies (e.g., _json_clean, seed_all, safe_mkdirs, load_json_file, etc.)",
+      "reason": "Improves readability and avoids confusing static analysis/linting tools",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Disambiguate and correctly compute unique cumulative adopters separate from current adopters",
+      "reason": "Prevents metric misuse and enables meaningful comparisons/calibrations against cumulative data",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add metrics per the specification: time_to_50_percent, sustained_adoption_after_policy_lift, average_compliance_by_location_type, inequality_index_by_group, policy_monotonicity_check",
+      "reason": "Aligns outputs with task requirements and supports validation criteria",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "No explicit logistic fit check; early stopping may truncate initial diffusion phase",
+      "suggestion": "Disable early stopping for calibration runs and add a logistic-fit routine (R^2 >= 0.9) on the initial growth segment; log fit parameters for diagnostics"
+    },
+    {
+      "metric": "time_to_50_percent",
+      "current_gap": "Not computed; only time_to_threshold_70 exists",
+      "suggestion": "Add time_to_50_percent; ensure early stopping does not cut off the observation before it reaches 50%"
+    },
+    {
+      "metric": "average_compliance_by_location_type",
+      "current_gap": "No location types or compliance checks",
+      "suggestion": "Introduce Location with type and policy enforcement; log observed compliance per visit to compute averages by type"
+    },
+    {
+      "metric": "inequality_index_by_group",
+      "current_gap": "No breakdown by income/age or mask affordability",
+      "suggestion": "Compute Gini/Theil over adoption by income quantiles and demographic groups; tie to price and inventory constraints for realism"
+    },
+    {
+      "metric": "policy_monotonicity_check",
+      "current_gap": "Not implemented",
+      "suggestion": "Batch-run across seeds with increasing enforcement_probability and assert non-decreasing adoption in at least 90% of seeds; report exceptions"
+    }
+  ],
+  "prioritized_actions": [
+    "Fix the PROJECT_ROOT initialization syntax error",
+    "Remove run() signature fallback and simplify main execution",
+    "Add a flag to disable early stopping during calibration/evaluation",
+    "Disambiguate and correctly compute unique cumulative adopters",
+    "Implement Location/Government/Retailer modules with compliance and supply mechanics",
+    "Add required validation checks and metrics per the task specification",
+    "Remove stray 'pass' statements; minor refactors for clarity",
+    "Add logistic-fit check and policy monotonicity calibration sweep"
+  ],
+  "additional_comments": "Do not change the final direct main() call due to the sandbox requirement, even though some environments recommend guarding with if __name__ == \"__main__\". Keep optional dependency fallbacks as implemented (networkx, numpy, matplotlib). Consider exposing an environment flag (e.g., DISABLE_EARLY_STOP=1) to control early stopping without code changes in batch runs.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "# FIXED: PROJECT_ROOT robust to missing __file__; DATA_DIR and ARTIFACTS with env overrides\ntry:\n    # FIXED: Applied feedback snippet from simulation_code_iter_12.py\ntry:\n    PROJECT_ROOT = os.environ.get(\"PROJECT_ROOT\") or str(Path(__file__).resolve().parent)\nexcept NameError:\n    PROJECT_ROOT = os.environ.get(\"PROJECT_ROOT\") or os.getcwd()\nexcept NameError:\n    # __file__ may be undefined in some environments (e.g., interactive)\n    PROJECT_ROOT = os.environ.get(\"PROJECT_ROOT\") or os.getcwd()\nDATA_PATH = os.environ.get(\"DATA_PATH\") or \"data\"\nDATA_DIR = os.path.join(PROJECT_ROOT, DATA_PATH)\nARTIFACTS_DIR = os.environ.get(\"ARTIFACTS_DIR\") or os.path.join(PROJECT_ROOT, \"artifacts\")",
+      "after": "# Robust PROJECT_ROOT with env override; handle missing __file__ cleanly\nif \"__file__\" in globals():\n    PROJECT_ROOT = os.environ.get(\"PROJECT_ROOT\") or str(Path(__file__).resolve().parent)\nelse:\n    PROJECT_ROOT = os.environ.get(\"PROJECT_ROOT\") or os.getcwd()\nDATA_PATH = os.environ.get(\"DATA_PATH\") or \"data\"\nDATA_DIR = os.path.join(PROJECT_ROOT, DATA_PATH)\nARTIFACTS_DIR = os.environ.get(\"ARTIFACTS_DIR\") or os.path.join(PROJECT_ROOT, \"artifacts\")",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "    # Baseline run\n    try:\n        sim.run(start_day, end_day)\n    except TypeError:\n        # FIXED: Compatibility fallback if signature mismatch (per feedback)\n        sim.run(end_day)",
+      "after": "    # Baseline run (run signature is defined as run(start_day, end_day))\n    sim.run(start_day, end_day)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    # Early stopping if fully adopted threshold reached\n    target_stop = float(self.params.get(\"policy_target_coverage\", 0.7))",
+      "after": "    # Early stopping can be disabled via param/flag for calibration\n    target_stop = float(self.params.get(\"policy_target_coverage\", 0.7))\n    disable_early_stop = bool(int(os.environ.get(\"DISABLE_EARLY_STOP\", \"0\")))\n    # ... later during loop end:\n    if (not disable_early_stop) and self.state[\"adoption_rate_history\"] and self.state[\"adoption_rate_history\"][-1] >= min(0.999, max(0.7, target_stop)):\n        break",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _json_clean(obj: _t.Any) -> _t.Any:\n    ...\n    pass\n    try:\n        if isinstance(obj, float):",
+      "after": "def _json_clean(obj: _t.Any) -> _t.Any:\n    \"\"\"Recursively transform Python objects into JSON-safe structures.\"\"\"\n    try:\n        if isinstance(obj, float):",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class AdoptionAggregator(Module):\n    ...\n    def forward(self, state: dict, buffers: dict, params: ParameterRegistry, t: int) -> None:\n        ...\n        # Cumulative adopters updated via net flows\n        new_adopts = int(buffers.get(\"signal.new_adoptions_today\", 0))\n        dropouts = int(buffers.get(\"signal.dropouts_today\", 0))\n        prev_cum = state.get(\"cumulative_adopters\", 0)\n        if t == 0:\n            cumulative_adopters = int(sum(1 for x in adopted_flags if x))\n        else:\n            cumulative_adopters = max(0, prev_cum + new_adopts - dropouts)",
+      "after": "class AdoptionAggregator(Module):\n    ...\n    def forward(self, state: dict, buffers: dict, params: ParameterRegistry, t: int) -> None:\n        ...\n        # Current adopters\n        current_adopters = int(sum(1 for x in adopted_flags if x))\n        # Unique cumulative adopters tracked with a bitset on state (initialize once)\n        if t == 0 or \"ever_adopted\" not in state:\n            state[\"ever_adopted\"] = [bool(x) for x in adopted_flags]\n        else:\n            for i, flag in enumerate(adopted_flags):\n                state[\"ever_adopted\"][i] = state[\"ever_adopted\"][i] or bool(flag)\n        cumulative_unique = int(sum(1 for x in state[\"ever_adopted\"] if x))\n        buffers[\"signal.cumulative_adopters\"] = cumulative_unique",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "metrics[\"time_to_threshold_70\"] = t70",
+      "after": "metrics[\"time_to_threshold_70\"] = t70\n# Additional required metric: time_to_50_percent\nmetrics[\"time_to_50_percent\"] = next((i for i, v in enumerate(sim_adopt) if v >= 0.50), None)",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "This iteration significantly improves modularity and robustness (ABC adapters, safe JSON outputs, resettable simulation state) but introduced a fatal syntax error around the environment path setup and retains a fragile run() fallback. It also still lacks key mask-specific entities and validation metrics.",
+    "positive_impacts": [
+      "Implemented ParamsAdapter ABC and DefaultParamsAdapter for flexible calibration/application of parameters",
+      "Added Simulation.reset(reseed) enabling reproducible calibration trials",
+      "Sanitized all JSON outputs with _json_clean and allow_nan=False",
+      "Robust CLI parsing via parse_known_args and improved env-based quick test mode",
+      "Integrated exposures memory and exposure weight into the BehaviorAdoption utility"
+    ],
+    "negative_impacts": [
+      "IndentationError due to malformed nested try/except for PROJECT_ROOT (breaks execution)",
+      "Residual try/except fallback for run() signature can still misfire",
+      "Redundant 'pass' statements reduce clarity",
+      "Early stopping may bias calibration/evaluation runs",
+      "Metrics and entities still misaligned with the mask adoption specification"
+    ],
+    "suggestions": [
+      "Fix the PROJECT_ROOT block as a single, clear initialization",
+      "Remove run() signature fallback and rely on the defined signature; optionally use inspect if required",
+      "Add a disable_early_stop flag for calibration/evaluation contexts",
+      "Refactor out stray 'pass' statements at function starts",
+      "Implement required modules (Location, Government, Retailer) and metrics to meet task criteria"
+    ]
+  }
+}

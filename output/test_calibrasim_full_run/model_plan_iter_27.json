@@ -1,0 +1,1030 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based network diffusion model of household program adoption under social influence, marketing, and incentives. Persons interact on a stochastic block model network with homophily; adoption decisions follow a logistic utility with peer norms, marketing exposure, and monetary incentives; churn is allowed.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "income_quantile",
+        "pro_env_attitude",
+        "adopted",
+        "time_since_adoption",
+        "threshold_social",
+        "sensitivity_marketing",
+        "sensitivity_incentive",
+        "peer_influence_weight",
+        "perceived_cost",
+        "last_social_signal",
+        "neighborhood_group"
+      ],
+      "behaviors": [
+        "interact_with_neighbors",
+        "respond_to_marketing",
+        "respond_to_incentives",
+        "consider_adoption",
+        "potential_churn"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "age_group_shares": {
+            "18-34": 0.35,
+            "35-54": 0.4,
+            "55+": 0.25
+          },
+          "income_quantiles_shares": {
+            "Q1": 0.25,
+            "Q2": 0.25,
+            "Q3": 0.25,
+            "Q4": 0.25
+          },
+          "pro_env_attitude_mean": 0.5,
+          "pro_env_attitude_sd": 0.2,
+          "threshold_social_mean": 0.3,
+          "threshold_social_sd": 0.1,
+          "sensitivity_marketing_mean": 1.0,
+          "sensitivity_marketing_sd": 0.3,
+          "sensitivity_incentive_mean": 1.0,
+          "sensitivity_incentive_sd": 0.3,
+          "peer_influence_weight_mean": 0.4,
+          "peer_influence_weight_sd": 0.15,
+          "perceived_cost_mean": 1.0,
+          "perceived_cost_sd": 0.5,
+          "initial_adopter_fraction": 0.02
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs and (optionally) lightly rewires the social network with community structure and homophily.",
+      "inputs": [],
+      "outputs": [
+        "graph.G",
+        "agent.neighborhood_group"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  draw group_shares ~ Dirichlet([dirichlet_alpha]*num_groups)\n  assign each agent to a group by group_shares -> agent.neighborhood_group\n  for each pair of groups (a,b):\n    p = sbm_p_intra if a==b else sbm_p_inter\n    add edges between agents in groups (a,b) with probability p, respecting avg_degree_target via thinning\n  apply homophily_on_attitude: for each edge (i,j), compute similarity s = 1 - |att_i - att_j|; keep edge with prob min(1, (1 - h) + h*s)\n  with probability rewiring_prob, rewire a small fraction of edges uniformly at random",
+        "notes": [
+          "Runs effectively only at t=0; subsequent ticks no-op unless rewiring_prob > 0.",
+          "avg_degree_target achieved by Bernoulli thinning after SBM generation."
+        ]
+      },
+      "requirements": [
+        "random_number_generator"
+      ],
+      "module_parameters": [
+        "network_model",
+        "num_groups",
+        "dirichlet_alpha",
+        "sbm_p_intra",
+        "sbm_p_inter",
+        "avg_degree_target",
+        "homophily_on_attitude",
+        "rewiring_prob"
+      ]
+    },
+    {
+      "name": "SocialInfluence",
+      "description": "Computes perceived social signal per agent from neighbors' adoption with memory and saturation.",
+      "inputs": [
+        "graph.G",
+        "agent.adopted",
+        "agent.last_social_signal"
+      ],
+      "outputs": [
+        "signal.social_influence",
+        "agent.last_social_signal"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  N_i = neighbors of i in G\n  if |N_i| == 0: frac = 0 else frac = mean(adopted[j] for j in N_i)\n  sat = 1 - exp(-social_norm_saturation_kappa * frac)\n  w = peer_influence_weight_i  # drawn at init from N(peer_influence_weight_mean, sd)\n  raw = w * sat\n  # memory smoothing\n  alpha = 1 - 0.5 ** (1 / influence_memory_half_life_days)\n  social_signal_i = (1 - alpha) * last_social_signal_i + alpha * raw\n  last_social_signal_i = social_signal_i",
+        "notes": [
+          "Saturation prevents runaway when nearly all neighbors adopt.",
+          "Half-life smoothing stabilizes noisy networks."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "peer_influence_weight_mean",
+        "peer_influence_weight_sd",
+        "social_norm_saturation_kappa",
+        "influence_memory_half_life_days"
+      ]
+    },
+    {
+      "name": "MarketingIntervention",
+      "description": "Generates per-agent marketing exposure from budget and targeting; optionally uses observed daily spend.",
+      "inputs": [
+        "date.t",
+        "agent.adopted",
+        "agent.income_quantile"
+      ],
+      "outputs": [
+        "signal.marketing_exposure",
+        "scalar.marketing_spend_today"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if use_exogenous_marketing and data.marketing_spend[t] exists:\n  spend_t = data.marketing_spend[t]\nelse:\n  spend_t = marketing_spend_daily_base\nbase_reach = spend_t * marketing_effect_per_$\nfor each agent i:\n  if adopted[i]: base_prob = base_reach * (1 - targeting_bias_toward_nonadopters)\n  else: base_prob = base_reach * (1 + targeting_bias_toward_nonadopters)\n  # cap probability and apply coverage\n  p = min(1.0, base_prob)\n  shown = Bernoulli(p * targeting_coverage)\n  marketing_exposure_i = shown * (1 + message_effect_size * sensitivity_marketing_i)\noutput scalar.marketing_spend_today = spend_t",
+        "notes": [
+          "Exposure scales linearly with spend via marketing_effect_per_$.",
+          "Nonadopters receive biased targeting when targeting_bias_toward_nonadopters > 0."
+        ]
+      },
+      "requirements": [
+        "optional:data.observed_marketing.csv"
+      ],
+      "module_parameters": [
+        "use_exogenous_marketing",
+        "marketing_spend_daily_base",
+        "marketing_effect_per_$",
+        "targeting_coverage",
+        "targeting_bias_toward_nonadopters",
+        "message_effect_size"
+      ]
+    },
+    {
+      "name": "IncentivePolicy",
+      "description": "Computes per-agent incentive values under a budget and targeting policy schedule.",
+      "inputs": [
+        "date.t",
+        "agent.income_quantile",
+        "agent.adopted"
+      ],
+      "outputs": [
+        "signal.incentive_value",
+        "scalar.incentive_budget_remaining"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "active = (t >= incentive_start_day) and (t <= incentive_end_day)\nif not active:\n  incentive_value[:] = 0; return\nper_cap_offer = incentive_amount\neligible = [i for i in agents if not adopted[i]]\nif incentive_targeting_strategy == 'universal': targets = eligible\nelif incentive_targeting_strategy == 'need_based':\n  targets = [i for i in eligible if income_quantile_i in ['Q1','Q2'] and rank_quantile(i) <= need_based_income_threshold]\nelse: targets = random_sample(eligible, int(len(eligible) * 0.5))\n# enforce budget\nmax_affordable = floor(incentive_budget_remaining / per_cap_offer)\nassigned_targets = targets[:max_affordable]\nfor i in agents: incentive_value_i = per_cap_offer if i in assigned_targets else 0\nincentive_budget_remaining -= per_cap_offer * len(assigned_targets)",
+        "notes": [
+          "Budget carries over day-to-day within the active window.",
+          "Targeting can prioritize lower-income agents."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "incentive_start_day",
+        "incentive_end_day",
+        "incentive_amount",
+        "incentive_budget_total",
+        "incentive_targeting_strategy",
+        "need_based_income_threshold"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Updates adoption state via logistic probability combining social, marketing, and incentives, minus perceived cost.",
+      "inputs": [
+        "signal.social_influence",
+        "signal.marketing_exposure",
+        "signal.incentive_value",
+        "agent.perceived_cost",
+        "agent.sensitivity_incentive",
+        "agent.sensitivity_marketing",
+        "agent.adopted"
+      ],
+      "outputs": [
+        "agent.adopted",
+        "signal.adoption_probability",
+        "event.new_adopter"
+      ],
+      "dependencies": [
+        "SocialInfluence",
+        "MarketingIntervention",
+        "IncentivePolicy"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i where not adopted[i]:\n  u = logistic_intercept\n  u += beta_social * social_influence_i\n  u += beta_marketing * (marketing_exposure_i * sensitivity_marketing_i)\n  u += beta_incentive * (incentive_value_i * sensitivity_incentive_i)\n  u -= perceived_cost_i\n  u += Normal(0, adoption_heterogeneity_scale)\n  p = base_adoption_rate + (1 - base_adoption_rate) * sigmoid(u)\n  adopt_now = Bernoulli(p)\n  if adopt_now:\n    adopted[i] = True\n    event.new_adopter[i] = True\n    time_since_adoption[i] = 0\n  else:\n    event.new_adopter[i] = False\nfor each agent i where adopted[i]: time_since_adoption[i] += 1\n# adaptive learning of perceived_cost (optional small update)\nperceived_cost_i = max(0, perceived_cost_i - learning_rate * social_influence_i)",
+        "notes": [
+          "Sigmoid ensures probabilities in [0,1].",
+          "Base rate prevents total stagnation in absence of signals."
+        ]
+      },
+      "requirements": [
+        "random_number_generator"
+      ],
+      "module_parameters": [
+        "base_adoption_rate",
+        "logistic_intercept",
+        "beta_social",
+        "beta_marketing",
+        "beta_incentive",
+        "perceived_cost_mean",
+        "perceived_cost_sd",
+        "threshold_social_mean",
+        "threshold_social_sd",
+        "learning_rate",
+        "adoption_heterogeneity_scale"
+      ]
+    },
+    {
+      "name": "Churn",
+      "description": "Allows adopted agents to abandon adoption (churn), with elevated risk after incentives end and decaying over time.",
+      "inputs": [
+        "date.t",
+        "agent.adopted",
+        "agent.time_since_adoption"
+      ],
+      "outputs": [
+        "event.churned",
+        "agent.adopted"
+      ],
+      "dependencies": [
+        "AdoptionDecision",
+        "IncentivePolicy"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "active_incentives = (t >= incentive_start_day) and (t <= incentive_end_day)\nmult = 1.0 if active_incentives else post_incentive_churn_multiplier\nlambda_decay = ln(2) / churn_decay_half_life_days\nfor each agent i where adopted[i]:\n  p_churn = baseline_churn_prob * mult * exp(-lambda_decay * time_since_adoption[i])\n  c = Bernoulli(min(1.0, p_churn))\n  if c: adopted[i] = False; event.churned[i] = True; time_since_adoption[i] = 0 else: event.churned[i] = False",
+        "notes": [
+          "Churn probability declines with tenure.",
+          "Multiplier increases churn risk immediately after incentives end."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "baseline_churn_prob",
+        "post_incentive_churn_multiplier",
+        "churn_decay_half_life_days"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily observables from agent states and events.",
+      "inputs": [
+        "agent.adopted",
+        "event.new_adopter",
+        "event.churned"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adoptions_daily",
+        "observable.cumulative_adopters",
+        "observable.churn_rate_daily"
+      ],
+      "dependencies": [
+        "AdoptionDecision",
+        "Churn"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "N = population_size\nadoption_rate_daily[t] = mean(adopted)\nnew_adoptions_daily[t] = sum(event.new_adopter)\nchurn_rate_daily[t] = sum(event.churned) / max(1, sum(adopted) + sum(event.churned))\nif t == 0: cumulative_adopters[t] = sum(adopted)\nelse: cumulative_adopters[t] = cumulative_adopters[t-1] + new_adoptions_daily[t] - sum(event.churned)\n# optional smoothing\nif smoothing_window_days > 1: apply moving average to reported series",
+        "notes": [
+          "Churn reduces cumulative adopters.",
+          "Smoothing optional and controlled by parameter."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "smoothing_window_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "network_model",
+      "dtype": "categorical",
+      "default": "SBM",
+      "owner_module": "NetworkBuilder",
+      "description": "Network generation model; currently 'SBM' supported.",
+      "frozen": true
+    },
+    {
+      "key": "num_groups",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 2,
+        "high": 10
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of communities in the SBM.",
+      "frozen": false
+    },
+    {
+      "key": "dirichlet_alpha",
+      "dtype": "float",
+      "default": 5.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 20.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Concentration parameter for group size shares.",
+      "frozen": false
+    },
+    {
+      "key": "sbm_p_intra",
+      "dtype": "float",
+      "default": 0.06,
+      "bounds": {
+        "low": 0.005,
+        "high": 0.2
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Intra-group connection probability.",
+      "frozen": false
+    },
+    {
+      "key": "sbm_p_inter",
+      "dtype": "float",
+      "default": 0.006,
+      "bounds": {
+        "low": 0.0001,
+        "high": 0.05
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Inter-group connection probability.",
+      "frozen": false
+    },
+    {
+      "key": "avg_degree_target",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 50.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target average degree after thinning.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_on_attitude",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Strength of homophily by pro-environment attitude.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Daily probability to rewire a small random fraction of edges.",
+      "frozen": false
+    },
+    {
+      "key": "peer_influence_weight_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Mean weight of social influence on utility.",
+      "frozen": false
+    },
+    {
+      "key": "peer_influence_weight_sd",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Std dev of social influence weights across agents.",
+      "frozen": false
+    },
+    {
+      "key": "social_norm_saturation_kappa",
+      "dtype": "float",
+      "default": 3.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 10.0
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Rate parameter for saturation of social norm function.",
+      "frozen": false
+    },
+    {
+      "key": "influence_memory_half_life_days",
+      "dtype": "float",
+      "default": 7.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 30.0
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Half-life for exponential smoothing of social influence.",
+      "frozen": false
+    },
+    {
+      "key": "use_exogenous_marketing",
+      "dtype": "bool",
+      "default": true,
+      "owner_module": "MarketingIntervention",
+      "description": "If true, read daily marketing spend from data; else use base constant.",
+      "frozen": false
+    },
+    {
+      "key": "marketing_spend_daily_base",
+      "dtype": "float",
+      "default": 1000.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1000000.0
+      },
+      "owner_module": "MarketingIntervention",
+      "description": "Constant daily marketing spend when not using exogenous data.",
+      "frozen": false
+    },
+    {
+      "key": "marketing_effect_per_$",
+      "dtype": "float",
+      "default": 1e-05,
+      "bounds": {
+        "low": 1e-07,
+        "high": 0.001
+      },
+      "owner_module": "MarketingIntervention",
+      "description": "Expected exposure probability per dollar spent.",
+      "frozen": false
+    },
+    {
+      "key": "targeting_coverage",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MarketingIntervention",
+      "description": "Fraction of population reachable per day.",
+      "frozen": false
+    },
+    {
+      "key": "targeting_bias_toward_nonadopters",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MarketingIntervention",
+      "description": "Relative prioritization of nonadopters in targeting.",
+      "frozen": false
+    },
+    {
+      "key": "message_effect_size",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "MarketingIntervention",
+      "description": "Multiplicative uplift applied to exposure effectiveness.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_start_day",
+      "dtype": "int",
+      "default": 15,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "IncentivePolicy",
+      "description": "First day incentives are offered.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_end_day",
+      "dtype": "int",
+      "default": 45,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "IncentivePolicy",
+      "description": "Last day incentives are offered.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_amount",
+      "dtype": "float",
+      "default": 20.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 500.0
+      },
+      "owner_module": "IncentivePolicy",
+      "description": "Per-adopter incentive (currency units).",
+      "frozen": false
+    },
+    {
+      "key": "incentive_budget_total",
+      "dtype": "float",
+      "default": 100000.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 100000000.0
+      },
+      "owner_module": "IncentivePolicy",
+      "description": "Total budget available for incentives.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_targeting_strategy",
+      "dtype": "categorical",
+      "default": "universal",
+      "owner_module": "IncentivePolicy",
+      "description": "Targeting method for incentives: universal | need_based | random.",
+      "frozen": false
+    },
+    {
+      "key": "need_based_income_threshold",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "IncentivePolicy",
+      "description": "Top share of need-based eligible (by lower income quantiles).",
+      "frozen": false
+    },
+    {
+      "key": "base_adoption_rate",
+      "dtype": "float",
+      "default": 0.005,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Floor probability of adoption per day absent signals.",
+      "frozen": false
+    },
+    {
+      "key": "logistic_intercept",
+      "dtype": "float",
+      "default": -2.0,
+      "bounds": {
+        "low": -10.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Intercept of logistic utility.",
+      "frozen": false
+    },
+    {
+      "key": "beta_social",
+      "dtype": "float",
+      "default": 2.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on social influence signal.",
+      "frozen": false
+    },
+    {
+      "key": "beta_marketing",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on marketing exposure.",
+      "frozen": false
+    },
+    {
+      "key": "beta_incentive",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on monetary incentive (per currency unit).",
+      "frozen": false
+    },
+    {
+      "key": "perceived_cost_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean perceived cost of adopting.",
+      "frozen": false
+    },
+    {
+      "key": "perceived_cost_sd",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std dev perceived cost across agents.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_social_mean",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean latent social threshold; used in heterogeneity shaping.",
+      "frozen": false
+    },
+    {
+      "key": "threshold_social_sd",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std dev of social threshold.",
+      "frozen": false
+    },
+    {
+      "key": "learning_rate",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Daily reduction in perceived cost due to positive social signal.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_heterogeneity_scale",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std dev of idiosyncratic utility noise.",
+      "frozen": false
+    },
+    {
+      "key": "baseline_churn_prob",
+      "dtype": "float",
+      "default": 0.0005,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.02
+      },
+      "owner_module": "Churn",
+      "description": "Daily probability an adopter churns at tenure 0 if no modifiers.",
+      "frozen": false
+    },
+    {
+      "key": "post_incentive_churn_multiplier",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 1.0,
+        "high": 5.0
+      },
+      "owner_module": "Churn",
+      "description": "Multiplier on churn risk when incentives are not active.",
+      "frozen": false
+    },
+    {
+      "key": "churn_decay_half_life_days",
+      "dtype": "float",
+      "default": 30.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 180.0
+      },
+      "owner_module": "Churn",
+      "description": "Half-life for decay of churn risk by tenure.",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Moving average window for reported observables.",
+      "frozen": false
+    },
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 90,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": false
+    },
+    {
+      "key": "burn_in_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 30
+      },
+      "owner_module": "global",
+      "description": "Days before metrics are computed (ignored in evaluation).",
+      "frozen": true
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2000000000
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG to ensure reproducibility.",
+      "frozen": true
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(agent.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "observed_adoption.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "sum(event.new_adopter)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "observed_adoption.csv:new_adoptions"
+    },
+    {
+      "id": "observable.cumulative_adopters",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "running_sum(new_adoptions) - running_sum(churned)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "observed_adoption.csv:cumulative_adopters"
+    },
+    {
+      "id": "observable.churn_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "sum(event.churned)/max(1,sum(agent.adopted)+sum(event.churned))",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "observed_adoption.csv:churn_rate"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "MAE_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {}
+      }
+    },
+    {
+      "name": "PeakError_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "mode": "value"
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeakError",
+        "config": {
+          "unit": "days"
+        }
+      }
+    },
+    {
+      "name": "MAPE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "MAPE",
+        "config": {
+          "epsilon": 1e-06
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "start_day_index": 0,
+    "initial_adopter_fraction": 0.02
+  },
+  "algorithms": {
+    "SBM_network_generation": "Stochastic Block Model with Dirichlet group shares and Bernoulli edge sampling; post-hoc homophily-thinning and degree-thinning to match targets.",
+    "Social_signal_saturation": "sat(frac) = 1 - exp(-kappa * frac) with exponential smoothing using half-life.",
+    "Logistic_adoption": "p = base + (1-base) * sigmoid(intercept + beta_social*S + beta_marketing*M + beta_incentive*I - cost + noise).",
+    "Budget_constrained_incentives": "Assign per-cap incentives to eligible targets up to remaining budget; deduct spent.",
+    "Churn_with_tenure_decay": "Daily churn probability decays exponentially with tenure; multiplier when incentives inactive."
+  },
+  "data_sources": [
+    {
+      "name": "observed_adoption.csv",
+      "purpose": "Calibration and evaluation of simulated observables.",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "new_adoptions",
+        "cumulative_adopters",
+        "churn_rate"
+      ]
+    },
+    {
+      "name": "observed_marketing.csv",
+      "purpose": "Optional exogenous time series of daily marketing spend.",
+      "fields_used": [
+        "date",
+        "marketing_spend"
+      ]
+    },
+    {
+      "name": "policy_schedule.csv",
+      "purpose": "Optional validation of policy timing and amounts.",
+      "fields_used": [
+        "date",
+        "incentive_active",
+        "incentive_amount"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entrypoint: parse config, construct model, run simulation, compute metrics."
+      },
+      {
+        "name": "entities.py",
+        "description": "Entity definitions and attribute initialization helpers."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "NetworkBuilder module implementation."
+      },
+      {
+        "name": "modules/social_influence.py",
+        "description": "SocialInfluence module implementation."
+      },
+      {
+        "name": "modules/marketing.py",
+        "description": "MarketingIntervention module implementation and data ingest."
+      },
+      {
+        "name": "modules/incentives.py",
+        "description": "IncentivePolicy module implementation."
+      },
+      {
+        "name": "modules/adoption.py",
+        "description": "AdoptionDecision module implementation."
+      },
+      {
+        "name": "modules/churn.py",
+        "description": "Churn module implementation."
+      },
+      {
+        "name": "modules/aggregation.py",
+        "description": "AdoptionAggregator implementation and observable computation."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric computations (RMSE, MAE, PeakError, TimeToPeak, MAPE)."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Load data sources and align to simulation dates."
+      },
+      {
+        "name": "config.py",
+        "description": "Parameter schema, validation, and defaults."
+      },
+      {
+        "name": "utils/random.py",
+        "description": "Random number utilities and seeding."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "numba",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 31,
+    "end_day": 60
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "MAE_new_adoptions",
+    "PeakError_new_adoptions",
+    "TimeToPeak_new_adoptions",
+    "MAPE_adoption_rate"
+  ]
+}

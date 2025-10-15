@@ -1,0 +1,209 @@
+{
+  "summary": "The simulation is feature-rich and mostly coherent, but a few logic issues and performance pitfalls materially affect correctness and robustness. Most critical is an inflated daily_new_adopters metric due to capturing the 'previous day' state after resetting transient fields. Additional improvements include applying enforcement capacity to actual enforcement probabilities (not just counters), stabilizing the 'no-influence' validation via a freeze flag, modest refactors to reduce overhead in validations, and clarifying/removing unused parameters. A few targeted adjustments will improve output correctness, performance, and data alignment.",
+  "critical_issues": [
+    {
+      "issue": "daily_new_adopters baseline computed after reset_daily_state(), which clears current_mask_use and inflates 'new adopters'.",
+      "impact": "Overstates new adopters whenever the previous day\u2019s wearers were compliance-only (current_mask_use=True). This distorts trend analysis, policy-effectiveness interpretation, and any downstream calibration.",
+      "solution": "Capture prev_any_use_flags before resetting transient state or persist yesterday\u2019s flags. Then compute daily_new_adopters by comparing end-of-day states to the correct prior-day states.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Enforcement capacity only gates incident counting, not the enforcement probability used in compliance decisions.",
+      "impact": "Behaviorally inconsistent: once capacity is exhausted, agents still perceive enforcement, which can inflate compliance and adoption under capacity constraints.",
+      "solution": "When remaining_capacity <= 0, pass a zero (or reduced) agency_enforcement to Location.enforce_mask_policy to remove enforcement influence.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "No-influence stability validation is fragile because purchasing/inventory dynamics and adoption decisions still change behavior over time.",
+      "impact": "Validation can fail even if influence weights are zero, due to inventory depletion or stochastic decisions, undermining test reliability.",
+      "solution": "Introduce a freeze_adoption flag in decide_adoption, and set procurement_access_fraction to 0 for this validation. When frozen, keep mask adoption constant without consuming inventory.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Heavy defaults and validations may be too computationally expensive for many environments.",
+      "impact": "Slow runs, timeouts, and noisy benchmarks. Validation methods that perform additional full simulations exacerbate the problem.",
+      "solution": "Downscale population and days in validation runs, and/or further reduce location counts and contact rates for validations. Consider lower defaults for public_venues_count/contact_rate_per_day.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Multiple functions contain extraneous 'pass' followed by real logic.",
+      "impact": "Stylistic confusion and potential maintenance errors; no runtime effect, but reduces code clarity.",
+      "solution": "Remove 'pass' statements where they are immediately followed by real logic.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Risk perception weighting for prevalence",
+      "current_approach": "Prevalence component is added directly to the signal along with w_peer, w_policy, and w_media (no explicit prevalence weight).",
+      "suggested_approach": "Introduce a w_prevalence parameter (default e.g., 0.3) and multiply prevalence_component by w_prevalence before adding to the signal.",
+      "expected_benefit": "More interpretable and tunable contribution of prevalence to risk perception; easier calibration against observed behavior."
+    },
+    {
+      "aspect": "Enforcement capacity realism",
+      "current_approach": "Capacity limits only cap incident counts; enforcement still affects compliance even after capacity is exhausted.",
+      "suggested_approach": "When capacity is exhausted, send zero enforcement probability to locations. Optionally add a soft cap that linearly reduces enforcement probability as capacity is approached.",
+      "expected_benefit": "Behavioral consistency between recorded incidents and agents\u2019 perception of enforcement pressure."
+    },
+    {
+      "aspect": "Stability validation",
+      "current_approach": "Zeroing influence weights but leaving purchasing/adoption decisions unchanged.",
+      "suggested_approach": "Add a freeze_adoption option that preserves adoption state, avoids consuming inventory, and sets procurement_access_fraction=0.",
+      "expected_benefit": "Reliable validation of dynamic stability under no-influence conditions."
+    },
+    {
+      "aspect": "Performance in validation scenarios",
+      "current_approach": "Some validations use full population and location configs.",
+      "suggested_approach": "Downscale population_size, public_venues_count, contact_rate_per_day inside validations. Consider shorter day horizons.",
+      "expected_benefit": "Faster validations without compromising logical checks."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Capture prev_any_use_flags before resetting transient state in Simulation.step().",
+      "reason": "Fix overcounting of daily_new_adopters and improve metric correctness.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Apply enforcement capacity to enforcement probability (effective_enforcement) passed to enforce_mask_policy.",
+      "reason": "Ensure capacity constraints influence behavior, not just incident counting.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add freeze_adoption flag to Person.decide_adoption and use it in no-influence validation; skip inventory consumption and habit updates when frozen.",
+      "reason": "Make no-influence stability validation reliable and independent of inventory dynamics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Introduce w_prevalence weight in Person.perceive_risk and wire it via parameters.",
+      "reason": "Improve interpretability and calibration control of prevalence effects.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Downscale population and days in validate_policy_monotonicity (and optionally other validations).",
+      "reason": "Reduce runtime and improve reliability across environments.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove extraneous 'pass' statements where logic follows immediately.",
+      "reason": "Improve readability and maintainability.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Print SMOKE_OK to stderr instead of stdout to avoid polluting JSON output.",
+      "reason": "Prevents JSON parsing errors in environments that expect a single JSON object on stdout.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Adoption trajectory under mandates vs. no mandates",
+      "current_gap": "Policy_effectiveness_index is computed but may be confounded by supply constraints and enforcement capacity not affecting behavior.",
+      "suggestion": "Calibrate w_policy, enforcement_level, and w_prevalence against observed series, and ensure enforcement capacity modifies behavior (effective_enforcement)."
+    },
+    {
+      "metric": "Compliance rate under mandates",
+      "current_gap": "Compliance can be overestimated since capacity doesn\u2019t limit enforcement probability.",
+      "suggestion": "Apply effective_enforcement per capacity and tune signage_strength to observed compliance in similar venues."
+    },
+    {
+      "metric": "Supply shortage days and price dynamics",
+      "current_gap": "Price adjustments are simplistic and may not match real price elasticity.",
+      "suggestion": "Introduce a price elasticity parameter and calibrate using observed price and stockout data; optionally add a target inventory ratio that nudges price up/down."
+    },
+    {
+      "metric": "Inequality in adoption",
+      "current_gap": "Gini is computed across quintiles but not tied to empirically-grounded income-elasticity of purchasing.",
+      "suggestion": "Adjust affordability function (e.g., change denominator scaling, include income shock variance) and calibrate against subgroup adoption data if available."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix daily_new_adopters baseline capture before reset_daily_state.",
+    "Apply enforcement capacity to enforcement probability (effective_enforcement).",
+    "Add freeze_adoption option and use it in the no-influence stability validation.",
+    "Downscale population and days inside validate_policy_monotonicity (and other validations).",
+    "Introduce w_prevalence and tune prevalence impact on risk.",
+    "Print SMOKE_OK to stderr to avoid non-JSON output on stdout.",
+    "Remove extraneous 'pass' statements to improve clarity."
+  ],
+  "additional_comments": "The recent refactors (SupplyChain tracking, counterfactual guard, demand/sold tracking) are strong improvements. The remaining rough edges are relatively small and straightforward to address. Consider adding unit tests for daily_new_adopters, enforcement capacity effects, and validation pathways to prevent regressions.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "        # Reset transient states\n        for person in self.people:\n            person.reset_daily_state()\n        \n        # Policy and media\n        mandate_active = self.policy.issue_mandates(day)\n        ...\n        prev_any_use_flags = [1 if (p.mask_adopted or p.current_mask_use) else 0 for p in self.people]\n",
+      "after": "        # Capture prior-day any-use BEFORE resetting transient state\n        prev_any_use_flags = [1 if (p.mask_adopted or p.current_mask_use) else 0 for p in self.people]\n\n        # Reset transient states for the new day\n        for person in self.people:\n            person.reset_daily_state()\n\n        # Policy and media\n        mandate_active = self.policy.issue_mandates(day)\n        ...\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "                    incident, compliant_now = ploc.enforce_mask_policy(person, agency_enforcement, self.rng)\n                    if incident and remaining_capacity > 0:\n                        public_incidents += 1\n                        remaining_capacity -= 1\n",
+      "after": "                    effective_enforcement = agency_enforcement if remaining_capacity > 0 else 0.0\n                    incident, compliant_now = ploc.enforce_mask_policy(person, effective_enforcement, self.rng)\n                    if incident and remaining_capacity > 0:\n                        public_incidents += 1\n                        remaining_capacity -= 1\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def decide_adoption(\n        self,\n        price: float,\n        policy_active: bool,\n        rng,\n        enforcement_level: float = 0.0,\n        penalty_amount: float = 0.0,\n        habit_formation_rate: float = 0.02,\n        compliance_decay_rate: float = 0.01,\n    ) -> bool:\n        ...\n        will_wear = rng.random() < p_wear\n        # Consume one mask if adopting and inventory available\n        if will_wear and self.mask_inventory > 0:\n            self.mask_adopted = True\n            self.mask_inventory -= 1\n            self.habit_strength = clamp(self.habit_strength + habit_formation_rate, 0.0, 1.0)\n            return True\n        else:\n            self.mask_adopted = False\n            self.habit_strength = clamp(self.habit_strength * (1.0 - compliance_decay_rate), 0.0, 1.0)\n            return False\n",
+      "after": "    def decide_adoption(\n        self,\n        price: float,\n        policy_active: bool,\n        rng,\n        enforcement_level: float = 0.0,\n        penalty_amount: float = 0.0,\n        habit_formation_rate: float = 0.02,\n        compliance_decay_rate: float = 0.01,\n        freeze_adoption: bool = False,\n    ) -> bool:\n        if freeze_adoption:\n            # Preserve current state, do not consume inventory or update habit\n            return self.mask_adopted\n        ...\n        will_wear = rng.random() < p_wear\n        if will_wear and self.mask_inventory > 0:\n            self.mask_adopted = True\n            self.mask_inventory -= 1\n            self.habit_strength = clamp(self.habit_strength + habit_formation_rate, 0.0, 1.0)\n            return True\n        else:\n            self.mask_adopted = False\n            self.habit_strength = clamp(self.habit_strength * (1.0 - compliance_decay_rate), 0.0, 1.0)\n            return False\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "            person.decide_adoption(\n                price=self.supply_chain.price_per_mask,\n                policy_active=mandate_active,\n                rng=self.rng,\n                enforcement_level=agency_enforcement,\n                penalty_amount=penalty_amount,\n                habit_formation_rate=habit_formation_rate,\n                compliance_decay_rate=compliance_decay_rate,\n            )\n",
+      "after": "            person.decide_adoption(\n                price=self.supply_chain.price_per_mask,\n                policy_active=mandate_active,\n                rng=self.rng,\n                enforcement_level=agency_enforcement,\n                penalty_amount=penalty_amount,\n                habit_formation_rate=habit_formation_rate,\n                compliance_decay_rate=compliance_decay_rate,\n                freeze_adoption=bool(self.p.get(\"freeze_adoption\", False)),\n            )\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def perceive_risk(\n        self,\n        peer_share: float,\n        policy_signal: float,\n        media_signal: float,\n        prevalence_signal: float,\n        risk_perception_sensitivity_to_prevalence: float,\n        external_prevalence_signal: float,\n        w_peer: float,\n        w_policy: float,\n        w_media: float,\n        household_share: float = 0.0,\n        w_household: float = 0.6,\n    ) -> None:\n        ...\n        signal = (\n            w_peer * peer_share\n            + w_household * household_share\n            + w_policy * policy_signal * self.trust_in_authority\n            + w_media * media_component * (1.0 - self.exposure_to_misinformation)\n            + prevalence_component\n        )\n",
+      "after": "    def perceive_risk(\n        self,\n        peer_share: float,\n        policy_signal: float,\n        media_signal: float,\n        prevalence_signal: float,\n        risk_perception_sensitivity_to_prevalence: float,\n        external_prevalence_signal: float,\n        w_peer: float,\n        w_policy: float,\n        w_media: float,\n        household_share: float = 0.0,\n        w_household: float = 0.6,\n        w_prevalence: float = 0.3,\n    ) -> None:\n        ...\n        signal = (\n            w_peer * peer_share\n            + w_household * household_share\n            + w_policy * policy_signal * self.trust_in_authority\n            + w_media * media_component * (1.0 - self.exposure_to_misinformation)\n            + w_prevalence * prevalence_component\n        )\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        low_sim = Simulation(low_params, seed=123)\n        low_res = low_sim.run(short_days)\n        ...\n        high_sim = Simulation(high_params, seed=123)\n        high_res = high_sim.run(short_days)\n",
+      "after": "        # Downscale for faster validation\n        low_params.update({\"population_size\": min(2000, int(low_params.get(\"population_size\", 10000))),\n                           \"public_venues_count\": 2, \"contact_rate_per_day\": 5})\n        low_sim = Simulation(low_params, seed=123)\n        low_res = low_sim.run(short_days)\n        ...\n        high_params.update({\"population_size\": min(2000, int(high_params.get(\"population_size\", 10000))),\n                            \"public_venues_count\": 2, \"contact_rate_per_day\": 5})\n        high_sim = Simulation(high_params, seed=123)\n        high_res = high_sim.run(short_days)\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "    if args.fast_smoke_run:\n        print(\"SMOKE_OK\")\n",
+      "after": "    if args.fast_smoke_run:\n        print(\"SMOKE_OK\", file=sys.stderr)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:\n    ...\n    pass\n    return max(lo, min(hi, x))\n",
+      "after": "def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:\n    \"\"\"Clamp a number to the [lo, hi] range.\"\"\"\n    return max(lo, min(hi, x))\n",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes added SupplyChain tracking, enforcement capacity counters, adaptive policy, and counterfactual guards. These are solid. However, the capacity limit currently only caps incident counts, not behavior; 'pass' artifacts remain; and daily_new_adopters is still misbased. Validation downscaling is partial and can be improved.",
+    "positive_impacts": [
+      "SupplyChain now tracks cumulative production/distribution and price updates.",
+      "Counterfactual guard prevents infinite recursion in policy effectiveness computation.",
+      "Demand/sold series enables better shortage metrics.",
+      "Adaptive policy routine aligns with prior feedback."
+    ],
+    "negative_impacts": [
+      "Enforcement capacity applied only to metrics, not to compliance behavior.",
+      "daily_new_adopters still derives from a post-reset baseline (inflation risk).",
+      "Validations still heavy in places (e.g., policy_monotonicity uses full population).",
+      "Extraneous 'pass' statements reduce clarity and may cause confusion."
+    ],
+    "suggestions": [
+      "Apply capacity to effective enforcement probability as shown in snippets.",
+      "Capture previous-day any-use before reset or persist per-day flags.",
+      "Downscale population and contact parameters in validation runs.",
+      "Add w_prevalence to risk perception for calibration flexibility.",
+      "Print SMOKE_OK to stderr to avoid mixed stdout content."
+    ]
+  }
+}

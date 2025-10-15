@@ -1,0 +1,233 @@
+{
+  "summary": "The simulation runs and includes several robust improvements (network rewiring safeguards, purchases before adoption, norms EMA, situational masking, stdout handling). However, it diverges substantially from the Mask Adoption Dynamics specification. The most critical gaps are missing entities (Household, PolicyAuthority with policy_schedule, InformationSource, MaskMarket with types), missing interactions (household norms, information flow with credibility/misinformation, typed purchases), and incomplete metrics/validation. Priorities are to refactor toward the specified schema, wire parameters into the adoption model and market, implement policy scheduling and household influence, and compute all required metrics and validation checks.",
+  "critical_issues": [
+    {
+      "issue": "Entity model does not match the specification (missing Household, PolicyAuthority with policy_schedule, InformationSource, and type-aware MaskMarket; Person lacks required attributes).",
+      "impact": "Prevents modeling key drivers (household norms, dynamic policy transitions, misinformation credibility, mask type economics/efficacy), leading to unrealistic adoption dynamics and incomplete metrics.",
+      "solution": "Introduce new classes per spec: Household, PolicyAuthority (with policy_schedule), InformationSource (credibility, bias, misinformation_prob), and MaskMarket managing per-type inventory/price/restock. Extend Person with household_id, mask_type, media_consumption_profile, etc., and integrate them in the daily loop.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Required interactions are incomplete (no household_norms, information_broadcast with credibility/misinformation, or typed purchase logic).",
+      "impact": "Adoption dynamics miss essential social and informational mechanisms, making outputs less realistic and not evaluable per spec.",
+      "solution": "Add household influence step using Household.norm_strength; implement InformationSource.broadcast_message to update person.risk and trust via credibility and misinformation; implement purchase_masks via MaskMarket with price_by_type, supply_by_type, and rationing_rules.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Key required metrics are missing/incomplete (final_adoption_rate, sustained_adoption_days, group_adoption_gap, policy_effect_size, compliance_in_mandated_locations, mask_type_distribution, exposure_reduction_proxy).",
+      "impact": "Cannot evaluate the simulation against the spec; policy and equity insights are underdeveloped.",
+      "solution": "Expand compute_metrics to compute exactly named metrics, including group gaps by age and income/SES, pre/post policy effect size, daily compliance in mandated locations, distribution of mask types, and an efficacy-weighted exposure reduction proxy.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Policy scheduling and states are not implemented (fixed mandate window only).",
+      "impact": "Cannot test transitions (e.g., mandate to recommendation) or compute policy_effect_size correctly.",
+      "solution": "Replace Government with PolicyAuthority supporting policy_schedule arrays (days/states) and enforcement/communication strategies per state. Use this to drive policy_intensity and enforcement.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Parameters from the specification are not wired into dynamics (weights, types, costs, efficacy, enforcement default, policy schedule).",
+      "impact": "Scenario control and reproducibility per spec are impaired; adoption model is heuristic rather than parameter-driven.",
+      "solution": "Add a configuration layer (from a JSON dict) mapping spec parameters to the simulation. Use base_influence_strength, risk_perception_weight, policy_effect_strength, etc., directly in adoption_probability. Use cost_of_mask_by_type and restock_rate_by_type in MaskMarket.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Validation criteria are not implemented (convergence_check, policy_response_sanity, reproducibility verification, explicit adoption_bounds and supply_feasibility checks).",
+      "impact": "Cannot automatically verify correctness or detect failures against the spec. Potential silent validity issues.",
+      "solution": "Add validate() function producing a validation report. Check adoption bounds on series, compute last-7-day convergence, policy response magnitude post-mandate when enforcement >= 0.5 and mask supply adequate, assert non-negative inventories, and record a hash of summary metrics for reproducibility.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Mask type dynamics and efficacy are absent.",
+      "impact": "No differentiation between cloth/surgical/N95 affects both adoption economics and exposure proxy; prevents mask_type_distribution metric.",
+      "solution": "Add Person.mask_type and MaskMarket per-type stock/price; choose type at purchase based on cost_sensitivity/income/efficacy preferences; use type-specific efficacy in exposure_reduction_proxy and (if enabled) disease_step.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Metric naming mismatch (compliance_in_mandated_locations expected, but only policy_compliance_rate/timeseries provided).",
+      "impact": "Automated evaluator may miss or reject compliance metrics.",
+      "solution": "Expose compliance_in_mandated_locations as the mean observed during mandate period and include the daily series under the specified name.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy process and enforcement",
+      "current_approach": "Fixed mandate window via Government, with simple binary intensity and flat enforcement_prob.",
+      "suggested_approach": "PolicyAuthority with policy_schedule states (e.g., mandate, recommendation) controlling enforcement_level and communication_strategy; compute policy intensity by state; adapt enforcement at Location with enforcement_level and default when unspecified.",
+      "expected_benefit": "Captures dynamic policy transitions and allows computing policy_effect_size accurately; aligns with spec semantics."
+    },
+    {
+      "aspect": "Information flows and misinformation",
+      "current_approach": "Single Media with uniform baseline/shock; no credibility or misinformation modeling.",
+      "suggested_approach": "Multiple InformationSource instances with credibility, reach, bias, and misinformation_prob; broadcast messages to persons weighted by their media_consumption_profile and trust; update risk_perception and trust.",
+      "expected_benefit": "Richer and more realistic adoption dynamics driven by information and trust; enables experiments with misinformation."
+    },
+    {
+      "aspect": "Household norms",
+      "current_approach": "Absent.",
+      "suggested_approach": "Introduce Household with norm_strength and member_ids; daily influence step increases adoption propensity or stabilizes compliance within households.",
+      "expected_benefit": "Introduces strong local clustering of behavior; matches observed within-household conformity."
+    },
+    {
+      "aspect": "Mask market and types",
+      "current_approach": "Retailers with undifferentiated inventory; simple rationing.",
+      "suggested_approach": "MaskMarket with types_available, price_by_type, supply_level, restock_rate_by_type, rationing_rules; agents select type based on cost_sensitivity, income, and perceived efficacy.",
+      "expected_benefit": "Models economic access and efficacy tradeoffs; supports mask_type_distribution metric and exposure reduction proxy."
+    },
+    {
+      "aspect": "Adoption decision model",
+      "current_approach": "Heuristic logistic combination with hardcoded weights.",
+      "suggested_approach": "Parameterize using base_influence_strength, risk_perception_weight, policy_effect_strength, prevalence_signal_sensitivity, fatigue_rate, forgetting_rate from config; include compliance_noise.",
+      "expected_benefit": "Scenario-driven and reproducible behavior; easier calibration and sensitivity analysis."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation_code_iter_59.py",
+      "modification": "Replace Government with PolicyAuthority supporting arbitrary policy_schedule, states, enforcement levels, and communication strategies.",
+      "reason": "Aligns with spec and enables policy_effect_size computation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "modification": "Add classes: Household, InformationSource, MaskMarket with type-specific inventories and prices; extend Person to include household_id, mask_type, cost_sensitivity, media_consumption_profile, compliance_propensity.",
+      "reason": "Brings entities and attributes in line with the specification and enables missing interactions.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "modification": "Refactor adoption_probability to accept a params dict and use configured weights instead of hardcoded constants.",
+      "reason": "Wires scenario parameters into dynamics for control and calibration.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "modification": "Implement information_broadcast, household_norms, and purchase_masks (typed) steps in the daily loop; track mask_type_distribution and exposure_reduction_proxy.",
+      "reason": "Completes required interactions and metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "modification": "Add validate() producing adoption_bounds, convergence_check, policy_response_sanity, supply_feasibility, and reproducibility_seed checks; include results in metrics.",
+      "reason": "Meets the validation_criteria in the specification and ensures quality of outputs.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "modification": "Rename/expose compliance metric as compliance_in_mandated_locations and compute policy_effect_size using pre/post windows around policy_start_day.",
+      "reason": "Matches the expected metric names and definitions.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "modification": "Add CLI/JSON config ingestion to map the provided parameters into the simulation and remove hardcoded values where possible.",
+      "reason": "Enables running the provided scenario directly and ensures reproducibility.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "Heuristic weights may cause unrealistic adoption speed and peak; policy and media effects are not parameterized per spec.",
+      "suggestion": "Use risk_perception_weight, base_influence_strength, policy_effect_strength, and prevalence_signal_sensitivity from the scenario; calibrate weights to match observed adoption curves from real-world datasets (e.g., mask surveys)."
+    },
+    {
+      "metric": "group_adoption_gap",
+      "current_gap": "Only SES top-bottom gap and per-age rates computed; no explicit group gap metric.",
+      "suggestion": "Compute explicit differences (q5 - q1, max-min by age) and validate against empirical differentials from survey data; incorporate cost_sensitivity and trust in authority distributions conditioned on SES."
+    },
+    {
+      "metric": "compliance_in_mandated_locations",
+      "current_gap": "Partially available as policy_compliance_rate, but not aligned with expected name/path.",
+      "suggestion": "Compute as required and cross-check against observed compliance estimates in transit/workplace datasets; adjust enforcement_level and fines to match."
+    },
+    {
+      "metric": "mask_type_distribution",
+      "current_gap": "Not tracked.",
+      "suggestion": "Model type choice based on price and efficacy. Fit price elasticity using external data (e.g., price changes vs N95 uptake) to improve realism."
+    },
+    {
+      "metric": "exposure_reduction_proxy",
+      "current_gap": "Not computed.",
+      "suggestion": "Estimate unprotected contacts and weight by mask efficacy-by-type; validate against reductions in attack rates where available."
+    }
+  ],
+  "prioritized_actions": [
+    "Introduce PolicyAuthority with policy_schedule and refactor enforcement/policy intensity to use states.",
+    "Add MaskMarket with per-type supply, price, restock; add Person.mask_type and typed purchase logic.",
+    "Add InformationSource and household_norms interactions; extend Person and add Household entity.",
+    "Parameterize adoption_probability and dynamics using scenario parameters instead of hardcoded weights.",
+    "Implement required metrics (final_adoption_rate, sustained_adoption_days, group_adoption_gap, policy_effect_size, compliance_in_mandated_locations, mask_type_distribution, exposure_reduction_proxy).",
+    "Add validation checks per spec and include a validation report in results.",
+    "Add configuration ingestion (JSON) to use the provided parameter set directly."
+  ],
+  "additional_comments": "Recent changes improved robustness (network rewiring, norms smoothing, situational masking, safer CLI IO) and help with stability and interpretation. The main remaining gap is structural: the simulation must be refactored to match the specified schema and metrics. Keep the end-of-file main() call as required by the sandbox. Ensure metric names and shapes match exactly to avoid evaluator mismatches.",
+  "code_snippets": [
+    {
+      "file": "simulation_code_iter_59.py",
+      "before": "class Government:\n    ...\n    def policy_intensity(self, day: int) -> float:\n        intensity = 1.0 if self.mandate_active(day) else 0.0\n        return intensity\n",
+      "after": "class PolicyAuthority:\n    def __init__(self, policy_schedule: Dict[str, List[Any]], enforcement_level_default: float = 0.4, communication_strategy: str = \"neutral\"):\n        self.days = policy_schedule.get(\"day\", [])\n        self.states = policy_schedule.get(\"state\", [])\n        self.enforcement_level_default = enforcement_level_default\n        self.communication_strategy = communication_strategy\n    def current_state(self, day: int) -> str:\n        idx = max([i for i, d in enumerate(self.days) if d <= day], default=-1)\n        return self.states[idx] if idx >= 0 else \"none\"\n    def policy_intensity(self, day: int) -> float:\n        state = self.current_state(day)\n        return 1.0 if state == \"mandate\" else 0.5 if state == \"recommendation\" else 0.0\n    def enforcement_level(self, day: int) -> float:\n        state = self.current_state(day)\n        return self.enforcement_level_default if state in (\"mandate\", \"recommendation\") else 0.0\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "before": "class Retailer:\n    def __init__(self, name: str, initial_inventory: int, restock_rate: int, price: float, ration_limit: int = 5):\n        ...\n",
+      "after": "class MaskMarket:\n    def __init__(self, types_available: List[str], price_by_type: Dict[str, float], initial_supply_by_type: Dict[str, int], restock_rate_by_type: Dict[str, int], rationing_rules: Dict[str, int]):\n        self.types_available = types_available\n        self.price_by_type = price_by_type\n        self.inventory_by_type = {t: max(0, int(initial_supply_by_type.get(t, 0))) for t in types_available}\n        self.restock_rate_by_type = restock_rate_by_type\n        self.rationing_rules = rationing_rules\n    def restock(self):\n        for t in self.types_available:\n            self.inventory_by_type[t] += int(self.restock_rate_by_type.get(t, 0))\n    def sell_masks(self, mask_type: str, desired_qty: int) -> int:\n        inv = self.inventory_by_type.get(mask_type, 0)\n        limit = self.rationing_rules.get(mask_type, desired_qty)\n        qty = max(0, min(desired_qty, limit, inv))\n        self.inventory_by_type[mask_type] = inv - qty\n        return qty\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "before": "class Person:\n    ...\n    def __init__(..., media_subscribed: bool,):\n        self.pid = pid\n        self.age = age\n        self.income = income\n        self.ses_quintile = 3\n        ...\n        self.mask_inventory = 0\n        self.media_subscribed = media_subscribed\n",
+      "after": "class Person:\n    def __init__(..., household_id: int, media_consumption_profile: Dict[str, float], cost_sensitivity: float, ...):\n        self.pid = pid\n        self.household_id = household_id\n        self.media_consumption_profile = media_consumption_profile  # source_id -> weight\n        self.cost_sensitivity = clamp(cost_sensitivity, 0.0, 1.0)\n        self.mask_type = None  # 'cloth' | 'surgical' | 'N95'\n        self.mask_inventory_by_type = {\"cloth\": 0, \"surgical\": 0, \"N95\": 0}\n        ...\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "before": "def adoption_probability(person: Person, peer_share: float, policy_intensity: float, media_signal: float, policy_effect_scalar: float) -> float:\n    w_social = 0.8\n    w_policy = 1.0\n    w_media = 0.6\n    w_personal = 0.5\n    linear = (...)\n    prob = clamp(sigmoid(3.5 * linear), 0.0, 1.0)\n    return prob\n",
+      "after": "def adoption_probability(person: Person, peer_share: float, policy_intensity: float, media_signal: float, params: Dict[str, float]) -> float:\n    w_social = params.get(\"base_influence_strength\", 0.3)\n    w_risk = params.get(\"risk_perception_weight\", 0.4)\n    w_policy = params.get(\"policy_effect_strength\", 0.5)\n    w_media = params.get(\"info_campaign_intensity\", 0.2)\n    noise = params.get(\"compliance_noise\", 0.1)\n    linear = (w_social * (peer_share - person.threshold)\n              + w_policy * (person.trust * policy_intensity)\n              + w_media * media_signal\n              + w_risk * (person.risk - 0.5)\n              + 0.5 * (person.baseline + 0.4 * person.compliance_trait + 0.4 * person.attitude)\n              + 0.6 * person.habit - params.get(\"fatigue_rate\", 0.01) * person.fatigue)\n    return clamp(sigmoid(3.0 * linear + random.uniform(-noise, noise)), 0.0, 1.0)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "before": "def compute_metrics(self) -> None:\n    adoption_series = self.adoption_rate_over_time[:]\n    ...\n    self.metrics = {\n        \"adoption_rate_over_time\": adoption_series,\n        ...\n        \"policy_compliance_rate\": policy_compliance_rate,\n        \"policy_compliance_timeseries\": policy_compliance_timeseries,\n        ...\n    }\n",
+      "after": "def compute_metrics(self) -> None:\n    adoption_series = self.adoption_rate_over_time[:]\n    final_rate = adoption_series[-1] if adoption_series else 0.0\n    # sustained_adoption_days over 70%\n    threshold = 0.7\n    streak = 0\n    sustained_days = 0\n    for v in adoption_series:\n        if v >= threshold:\n            streak += 1\n            sustained_days = max(sustained_days, streak)\n        else:\n            streak = 0\n    # group_adoption_gap\n    gap_age = max(self._group_rates_by_age().values()) - min(self._group_rates_by_age().values())\n    gap_ses = abs(self._group_rates_by_ses()[\"5\"] - self._group_rates_by_ses()[\"1\"])\n    # policy_effect_size (avg 7 days pre/post policy_start_day)\n    ps = self.params.get(\"policy_start_day\", 20)\n    pre = adoption_series[max(0, ps-7):ps]\n    post = adoption_series[ps:min(len(adoption_series), ps+7)]\n    policy_effect_size = (sum(post)/len(post) - sum(pre)/len(pre)) if pre and post else None\n    # compliance_in_mandated_locations\n    comp_ts = [safe_div(m, t, 0.0) if t>0 else None for (m, t) in self.daily_compliance]\n    comp_avg = sum(x for x in comp_ts if x is not None)/len([x for x in comp_ts if x is not None]) if any(x is not None for x in comp_ts) else 0.0\n    # mask_type_distribution\n    mask_type_dist = getattr(self, \"mask_type_distribution_over_time\", None)\n    # exposure_reduction_proxy\n    eff_by_type = self.params.get(\"mask_efficacy_by_type\", {\"cloth\":0.3,\"surgical\":0.5,\"N95\":0.8})\n    exposure_proxy = getattr(self, \"exposure_reduction_proxy\", None)\n    self.metrics.update({\n        \"final_adoption_rate\": final_rate,\n        \"time_to_70_percent\": next((i for i,v in enumerate(adoption_series) if v>=0.7), None),\n        \"sustained_adoption_days\": sustained_days,\n        \"group_adoption_gap\": {\"age\": gap_age, \"ses_q5_minus_q1\": gap_ses},\n        \"policy_effect_size\": policy_effect_size,\n        \"compliance_in_mandated_locations\": {\"average\": comp_avg, \"timeseries\": comp_ts},\n        \"mask_type_distribution\": mask_type_dist,\n        \"exposure_reduction_proxy\": exposure_proxy,\n    })\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "before": "def step(self, day: int) -> None:\n    media_signals = self.daily_media_signal(day)\n    self.retailer_restock()\n    self.purchase_step()\n    peer_shares = self.compute_peer_share()\n    self.adoption_step(day, media_signals, peer_shares)\n    visits_by_loc = self._compute_daily_visits()\n    self.visits_and_enforcement(day, visits_by_loc)\n    self.disease_step(day, visits_by_loc)\n",
+      "after": "def step(self, day: int) -> None:\n    # 1) Information broadcast\n    self.information_broadcast(day)\n    # 2) Media signals (legacy or additional)\n    media_signals = self.daily_media_signal(day)\n    # 3) Market restock and typed purchases\n    self.mask_market.restock()\n    self.purchase_masks_typed()\n    # 4) Household norms influence\n    self.apply_household_norms()\n    # 5) Peer exposure and adoption\n    peer_shares = self.compute_peer_share()\n    self.adoption_step(day, media_signals, peer_shares)\n    # 6) Mobility, enforcement\n    visits_by_loc = self._compute_daily_visits()\n    self.visits_and_enforcement(day, visits_by_loc)\n    # 7) Disease (optional)\n    self.disease_step(day, visits_by_loc)\n    # 8) Metrics accumulation\n    self._update_daily_metrics(day)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_59.py",
+      "before": "def results(self) -> Dict[str, Any]:\n    res = {\"metrics\": self.metrics, \"timeseries\": {...}}\n    return res\n",
+      "after": "def validate(self) -> Dict[str, Any]:\n    series = self.adoption_rate_over_time\n    adoption_bounds = all(0.0 <= v <= 1.0 for v in series)\n    conv = None\n    if len(series) >= 7:\n        conv = sum(abs(series[-i-1] - series[-i-2]) for i in range(6))/6.0 < 0.001\n    policy_ok = self._check_policy_response_sanity()\n    supply_ok = all(v >= 0 for v in getattr(self, \"mask_market\").inventory_by_type.values())\n    return {\"adoption_bounds\": adoption_bounds, \"convergence_check\": conv, \"policy_response_sanity\": policy_ok, \"supply_feasibility\": supply_ok}\n\ndef results(self) -> Dict[str, Any]:\n    return {\"metrics\": self.metrics, \"validation\": self.validate(), \"timeseries\": {...}}\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent iteration improved stability and usability but did not address schema alignment. Notable positives include robust network rewiring, population clamp, norms smoothing (EMA), situational masking, reordering purchases before adoption, consistent stdout JSON by default, and additional compliance/enforcement tracking. However, the simulation still lacks key entities/interactions/metrics from the spec.",
+    "positive_impacts": [
+      "Network rewiring now avoids degree loss and self-loops; better small-world generation.",
+      "Population size clamp prevents sampling errors on small runs.",
+      "Exponential moving average for norms reduces volatility and improves behavioral stability.",
+      "Situational masking introduces realistic context-dependent compliance.",
+      "Purchases before adoption removes unnecessary lag and increases face-validity.",
+      "Consistent stdout JSON simplifies harness integration."
+    ],
+    "negative_impacts": [
+      "Metric naming still deviates from the spec (compliance_in_mandated_locations missing).",
+      "Policy remains a fixed window; policy_schedule/state transitions still unimplemented.",
+      "Typed masks and mask market absent; cannot compute type-specific metrics or exposure proxy.",
+      "Adoption model still hardcoded and not parameter-driven."
+    ],
+    "suggestions": [
+      "Refactor Government to PolicyAuthority with schedule handling and state-dependent intensity/enforcement.",
+      "Introduce MaskMarket typed inventories and modify purchase/adoption/disease logic accordingly.",
+      "Parameterize adoption using provided weights; ingest scenario parameters from a JSON config.",
+      "Implement validation checks per spec and expose them in results to support automated verification."
+    ]
+  }
+}

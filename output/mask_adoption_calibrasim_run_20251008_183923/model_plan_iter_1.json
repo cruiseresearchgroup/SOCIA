@@ -1,0 +1,1651 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based, multiplex-network diffusion model of mask-wearing that integrates peer influence, information propagation, and policy/venue enforcement. Calibrated on days 0-29, predicts days 30-39.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "occupation",
+        "household_id",
+        "workplace_id",
+        "adoption_state",
+        "compliance_probability",
+        "risk_perception",
+        "mask_attitude",
+        "susceptibility_to_influence",
+        "peer_influence_weight",
+        "policy_sensitivity",
+        "information_exposure",
+        "degree"
+      ],
+      "behaviors": [
+        "decide_adopt_mask",
+        "interact_with_peers",
+        "attend_location",
+        "respond_to_policy",
+        "update_beliefs"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "use_train_day0_states": true,
+          "fallback_logit_model": {
+            "alpha0": -2.5,
+            "alpha_risk": 2.0,
+            "alpha_age": {
+              "Youth": 0.0,
+              "Young Adult": 0.2,
+              "Middle Age": 0.3
+            },
+            "alpha_occ": {
+              "Student": 0.1,
+              "White Collar": 0.2,
+              "Blue Collar": 0.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Location",
+      "attributes": [
+        "id",
+        "type",
+        "capacity",
+        "mask_requirement_level",
+        "enforcement_level",
+        "contact_rate_multiplier",
+        "opening_hours"
+      ],
+      "behaviors": [
+        "host_contacts",
+        "enforce_policy",
+        "report_compliance"
+      ],
+      "initialization": {
+        "method": "derived_from_network",
+        "parameters": {
+          "generate_households_from_family_cliques": true,
+          "generate_workplaces_from_work_school_components": true,
+          "default_capacity_household": 6,
+          "default_capacity_workplace": 50,
+          "default_capacity_public": 100,
+          "opening_hours_default": [
+            8,
+            20
+          ]
+        }
+      }
+    },
+    {
+      "name": "PolicyAuthority",
+      "attributes": [
+        "id",
+        "mandate_level",
+        "communication_intensity",
+        "enforcement_resources",
+        "subsidy_incentive",
+        "policy_start_day",
+        "policy_end_day"
+      ],
+      "behaviors": [
+        "issue_policy",
+        "broadcast_message",
+        "adjust_policy_over_time"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_start_day": 10,
+          "policy_end_day": 60,
+          "mandate_level": 0.5,
+          "communication_intensity": 0.3,
+          "enforcement_resources": 0.3,
+          "subsidy_incentive": 0.0
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkPreprocessor",
+      "description": "Loads and prepares multiplex network: validates nodes, symmetrizes edges (optional), removes self-loops, computes degrees by layer, builds neighbor index structures.",
+      "inputs": [
+        "data.agent_attributes",
+        "data.social_network"
+      ],
+      "outputs": [
+        "state.network_layers",
+        "state.degrees_by_layer",
+        "state.neighbor_index"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  G_family, G_work, G_comm = build_graphs_from_JSON()\n  if params.symmetrize_edges:\n    symmetrize(G_family); symmetrize(G_work); symmetrize(G_comm)\n  if params.remove_self_loops:\n    remove_self_loops(G_family, G_work, G_comm)\n  neighbor_index = build_neighbor_index(G_family, G_work, G_comm)\n  degrees_by_layer = compute_degrees(neighbor_index)\n  state.network_layers = {family: G_family, work: G_work, community: G_comm}\n  state.neighbor_index = neighbor_index\n  state.degrees_by_layer = degrees_by_layer\nelse:\n  no_op()",
+        "notes": [
+          "Runs effectively only at t=0; subsequent ticks keep structures static.",
+          "If directed_mode=true, skip symmetrization and preserve edge direction in exposure calculations."
+        ]
+      },
+      "sbi_calibration": false,
+      "sbi_target_signals": [],
+      "calibration_notes": "Structural module; no direct stochastic parameters tied to observables.",
+      "requirements": [
+        "agent_attributes.csv",
+        "social_network.json"
+      ],
+      "module_parameters": [
+        "symmetrize_edges",
+        "remove_self_loops",
+        "directed_mode"
+      ]
+    },
+    {
+      "name": "ExposureCalculator",
+      "description": "Computes layer-weighted social exposure I_i,t to mask-wearing from neighbors, adjusted by homophily and contact weights.",
+      "inputs": [
+        "state.neighbor_index",
+        "state.person.adoption_state[t-1]",
+        "data.agent_attributes"
+      ],
+      "outputs": [
+        "signal.exposure_I[t]"
+      ],
+      "dependencies": [
+        "NetworkPreprocessor",
+        "AttendanceAndContacts"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  for each layer L in {family, work, community}:\n    N_iL = neighbor_index[i][L]\n    if |N_iL| == 0: frac_L = 0\n    else:\n      w_sum = 0; masked_w_sum = 0\n      for j in N_iL:\n        w = 1.0\n        if same_age(i,j): w *= params.homophily_weight_same_age\n        if same_occ(i,j): w *= params.homophily_weight_same_occ\n        w_sum += w\n        masked_w_sum += w * adoption_state[j,t-1]\n      frac_L = masked_w_sum / max(w_sum, eps)\n    I_i += params.layer_weight_L * frac_L\n  # smooth exposure\n  signal.exposure_I[i,t] = (1 - params.exposure_smoothing_gamma) * I_i + params.exposure_smoothing_gamma * signal.exposure_I[i,t-1]",
+        "notes": [
+          "Layer weights must sum to 1.",
+          "Smoothing provides stability in highly clustered structures."
+        ]
+      },
+      "sbi_calibration": false,
+      "sbi_target_signals": [],
+      "calibration_notes": "Calibrate layer weights and homophily multipliers indirectly via AdoptionDynamics RMSE.",
+      "requirements": [
+        "valid neighbor_index",
+        "agent demographic attributes"
+      ],
+      "module_parameters": [
+        "layer_weight_family",
+        "layer_weight_work",
+        "layer_weight_community",
+        "homophily_weight_same_age",
+        "homophily_weight_same_occ",
+        "exposure_smoothing_gamma"
+      ]
+    },
+    {
+      "name": "PolicyAuthority",
+      "description": "Schedules and emits daily policy signals: mandate level, enforcement, communication, subsidy; allows ramping after start_day.",
+      "inputs": [],
+      "outputs": [
+        "signal.policy.mandate_level[t]",
+        "signal.policy.enforcement_level[t]",
+        "signal.policy.communication_intensity[t]",
+        "signal.policy.subsidy_incentive[t]"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t < params.policy_start_day or t > params.policy_end_day:\n  mandate = 0.0; comm = 0.0; enforce = 0.0; subsidy = 0.0\nelse:\n  ramp = min(1.0, params.policy_ramp_rate * (t - params.policy_start_day))\n  mandate = params.mandate_level_base * ramp\n  comm = params.communication_intensity_base * ramp\n  enforce = min(1.0, params.enforcement_level_global * (1 + params.mandate_to_enforcement_multiplier * mandate))\n  subsidy = params.subsidy_incentive_base * ramp\nemit signals",
+        "notes": [
+          "Ramping smooths sudden jumps at policy start.",
+          "Enforcement can scale with mandate intensity."
+        ]
+      },
+      "sbi_calibration": false,
+      "sbi_target_signals": [],
+      "calibration_notes": "Policy schedule is externally specified; magnitude parameters can be tuned indirectly.",
+      "requirements": [
+        "policy window configuration"
+      ],
+      "module_parameters": [
+        "policy_start_day",
+        "policy_end_day",
+        "mandate_level_base",
+        "communication_intensity_base",
+        "enforcement_level_global",
+        "subsidy_incentive_base",
+        "policy_ramp_rate",
+        "mandate_to_enforcement_multiplier"
+      ]
+    },
+    {
+      "name": "InfoDiffusion",
+      "description": "Generates received_info per agent via neighbor info contagion and exogenous broadcasts influenced by policy communication.",
+      "inputs": [
+        "state.neighbor_index",
+        "state.person.received_info[t-1]",
+        "signal.policy.communication_intensity[t]"
+      ],
+      "outputs": [
+        "state.person.received_info[t]"
+      ],
+      "dependencies": [
+        "NetworkPreprocessor",
+        "PolicyAuthority"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  p_broadcast = params.exogenous_broadcast_rate * (1 + params.policy_comm_to_info_multiplier * signal.policy.communication_intensity[t])\n  # neighbor-driven info\n  for L in {family, work, community}:\n    neighbors = neighbor_index[i][L]\n    m = count { j in neighbors : received_info[j,t-1] == 1 }\n    k = |neighbors|\n    if k > 0:\n      p_layer = 1 - (1 - params.info_transmission_L)^(m)\n    else:\n      p_layer = 0\n    p_neighbor += (1/3) * p_layer\n  p_total = 1 - (1 - p_broadcast) * (1 - p_neighbor)\n  # memory decay: if had info last day, retain with prob (1 - decay)\n  if received_info[i,t-1] == 1:\n    retain = bernoulli(1 - params.info_memory_decay)\n  else:\n    retain = 0\n  new_info = bernoulli(p_total)\n  received_info[i,t] = max(retain, new_info)",
+        "notes": [
+          "Combines broadcast and neighbor contagion without double counting via independence approximation.",
+          "Memory decay prevents perpetual info saturation."
+        ]
+      },
+      "sbi_calibration": true,
+      "sbi_target_signals": [
+        "observable.received_info_rate_daily"
+      ],
+      "calibration_notes": "Tune info_transmission_* and exogenous_broadcast_rate against daily received_info rate (train_data).",
+      "requirements": [
+        "train_data.csv to build targets",
+        "neighbor index"
+      ],
+      "module_parameters": [
+        "info_transmission_family",
+        "info_transmission_work",
+        "info_transmission_community",
+        "exogenous_broadcast_rate",
+        "policy_comm_to_info_multiplier",
+        "info_memory_decay"
+      ]
+    },
+    {
+      "name": "AttendanceAndContacts",
+      "description": "Allocates daily contact opportunities across layers; provides effective contact weights for influence and enforcement.",
+      "inputs": [
+        "state.degrees_by_layer",
+        "signal.policy.mandate_level[t]"
+      ],
+      "outputs": [
+        "signal.layer_contact_weight[t]"
+      ],
+      "dependencies": [
+        "NetworkPreprocessor",
+        "PolicyAuthority"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "base = {\n  family: params.household_fraction,\n  work: params.workplace_fraction,\n  community: params.public_space_fraction\n}\n# normalize base fractions\nfor L in base: base[L] = max(0, base[L])\nsum_base = base.family + base.work + base.community\nfor L in base: base[L] /= max(sum_base, eps)\n# adjust for openings\nopen = {\n  work: params.location_open_fraction_work_school,\n  community: params.location_open_fraction_public,\n  family: 1.0\n}\nfor L in {family, work, community}:\n  w[L] = base[L] * open[L]\nsum_w = w.family + w.work + w.community\nfor L in w: w[L] /= max(sum_w, eps)\nsignal.layer_contact_weight[t] = w",
+        "notes": [
+          "Outputs daily weights that can modulate exposure or enforcement effects.",
+          "Policy closures can be modeled by reducing corresponding open fractions (not shown here but allowed)."
+        ]
+      },
+      "sbi_calibration": false,
+      "sbi_target_signals": [],
+      "calibration_notes": "Fractions can be tuned indirectly; defaults reflect provided parameters.",
+      "requirements": [
+        "layer fractions configured"
+      ],
+      "module_parameters": [
+        "contact_rate_daily",
+        "household_fraction",
+        "workplace_fraction",
+        "public_space_fraction",
+        "attendance_variance",
+        "location_open_fraction_public",
+        "location_open_fraction_work_school"
+      ]
+    },
+    {
+      "name": "LocationEnforcement",
+      "description": "Applies location-specific mask requirements and enforcement, influencing effective adoption at locations.",
+      "inputs": [
+        "signal.policy.mandate_level[t]",
+        "signal.policy.enforcement_level[t]"
+      ],
+      "outputs": [
+        "signal.location_effective_enforcement[t]"
+      ],
+      "dependencies": [
+        "PolicyAuthority"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for L in {family, work, community}:\n  req = params.location_mask_requirement_level[L]\n  eff = params.location_enforcement_level[L] * signal.policy.enforcement_level[t] * req\n  signal.location_effective_enforcement[t][L] = min(1.0, eff)\n# optional reporting noise (not used in dynamics)\nobserved = clip(signal.location_effective_enforcement[t] + Normal(0, params.location_report_noise_sigma), 0, 1)",
+        "notes": [
+          "Families typically have low formal enforcement; public/work can be higher.",
+          "This signal feeds AdoptionDynamics via policy_effect_strength."
+        ]
+      },
+      "sbi_calibration": false,
+      "sbi_target_signals": [],
+      "calibration_notes": "Not directly observed; effect tuned via adoption fit.",
+      "requirements": [
+        "policy signals"
+      ],
+      "module_parameters": [
+        "location_mask_requirement_level_family",
+        "location_mask_requirement_level_work",
+        "location_mask_requirement_level_community",
+        "location_enforcement_level_family",
+        "location_enforcement_level_work",
+        "location_enforcement_level_community",
+        "location_report_noise_sigma"
+      ]
+    },
+    {
+      "name": "AdoptionDynamics",
+      "description": "Updates mask-wearing state using discrete-time hazard with peer exposure, info, policy, risk perception, and habit persistence/dropout.",
+      "inputs": [
+        "signal.exposure_I[t]",
+        "state.person.received_info[t-1]",
+        "signal.policy.mandate_level[t]",
+        "signal.location_effective_enforcement[t]"
+      ],
+      "outputs": [
+        "state.person.adoption_state[t]"
+      ],
+      "dependencies": [
+        "ExposureCalculator",
+        "InfoDiffusion",
+        "PolicyAuthority",
+        "LocationEnforcement"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  # persistence/dropout\n  if adoption_state[i,t-1] == 1:\n    # persistence can be reinforced by exposure\n    phi = min(1.0, params.phi_persist + 0.1 * signal.exposure_I[i,t])\n    stay_masked = bernoulli(phi)\n    if stay_masked:\n      adoption_state[i,t] = 1\n      continue\n    else:\n      # dropout; lower when exposure high\n      delta = params.delta_drop * (1 - signal.exposure_I[i,t])\n      dropout = bernoulli(delta)\n      adoption_state[i,t] = 0 if dropout else 1\n      continue\n  # adoption for previously unmasked\n  I = min(params.peer_influence_cap, signal.exposure_I[i,t])\n  info = state.person.received_info[i,t-1]\n  policy_effect = params.policy_effect_strength * (\n      signal.policy.mandate_level[t] +\n      0.5 * (signal.location_effective_enforcement[t].family + signal.location_effective_enforcement[t].work + signal.location_effective_enforcement[t].community)\n  )\n  # individual propensity\n  base = params.beta0 + params.lambda_peer * I + params.beta_info * info + policy_effect - params.mask_disutility + 0.8 * risk_perception[i]\n  # thresholded logistic\n  z = base - params.adoption_threshold\n  p_adopt = 1 / (1 + exp(-z))\n  adoption_state[i,t] = bernoulli(p_adopt)\n  # update risk perception decay\n  risk_perception[i] = max(0, risk_perception[i] * (1 - params.risk_perception_decay))",
+        "notes": [
+          "Risk perception enters additively; decays slowly over time.",
+          "peer_influence_cap avoids unrealistically high I due to dense clusters."
+        ]
+      },
+      "sbi_calibration": true,
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily"
+      ],
+      "calibration_notes": "Fit lambda_peer, beta_info, beta0, phi_persist, delta_drop, mask_disutility, adoption_threshold, policy_effect_strength using daily adoption rate RMSE and additional constraints.",
+      "requirements": [
+        "exposure and info signals",
+        "policy/enforcement signals"
+      ],
+      "module_parameters": [
+        "lambda_peer",
+        "beta_info",
+        "beta0",
+        "phi_persist",
+        "delta_drop",
+        "mask_disutility",
+        "adoption_threshold",
+        "risk_perception_decay",
+        "policy_effect_strength",
+        "peer_influence_cap"
+      ]
+    },
+    {
+      "name": "Aggregation",
+      "description": "Computes population-level observables from agent states for calibration and evaluation.",
+      "inputs": [
+        "state.person.adoption_state[t]",
+        "state.person.received_info[t]"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.received_info_rate_daily"
+      ],
+      "dependencies": [
+        "AdoptionDynamics",
+        "InfoDiffusion"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate = mean_i(adoption_state[i,t])\nreceived_info_rate = mean_i(received_info[i,t])\nemit observable.adoption_rate_daily[t] = adoption_rate\nemit observable.received_info_rate_daily[t] = received_info_rate",
+        "notes": [
+          "Outputs are used by metrics; no parameters."
+        ]
+      },
+      "sbi_calibration": false,
+      "sbi_target_signals": [],
+      "calibration_notes": "Derived from states; no direct calibration.",
+      "requirements": [
+        "complete agent states at t"
+      ],
+      "module_parameters": []
+    }
+  ],
+  "parameters": [
+    {
+      "key": "simulation_days",
+      "dtype": "int",
+      "default": 60,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 40,
+          "high": 120
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": true
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 10000,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 1000,
+          "high": 20000
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Number of agents; inferred from data if files provided.",
+      "frozen": true
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 1,
+          "high": 1000000
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "PRNG seed for reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "observation_noise_sigma",
+      "dtype": "float",
+      "default": 0.0,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0.0,
+          "high": 0.05
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "global",
+      "description": "Optional observation noise for observables.",
+      "frozen": true
+    },
+    {
+      "key": "average_degree",
+      "dtype": "float",
+      "default": 8.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 8.0,
+          "sd": 2.0
+        }
+      },
+      "bounds": {
+        "low": 1.0,
+        "high": 50.0
+      },
+      "owner_module": "global",
+      "description": "Average degree used only for synthetic network generation; ignored when network data provided.",
+      "frozen": true
+    },
+    {
+      "key": "symmetrize_edges",
+      "dtype": "bool",
+      "default": true,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "p": {
+            "true": 0.8,
+            "false": 0.2
+          }
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "NetworkPreprocessor",
+      "description": "If true, edges are made undirected by symmetrization.",
+      "frozen": false
+    },
+    {
+      "key": "remove_self_loops",
+      "dtype": "bool",
+      "default": true,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "p": {
+            "true": 0.99,
+            "false": 0.01
+          }
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "NetworkPreprocessor",
+      "description": "Remove self-referential edges.",
+      "frozen": true
+    },
+    {
+      "key": "directed_mode",
+      "dtype": "bool",
+      "default": false,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "p": {
+            "true": 0.2,
+            "false": 0.8
+          }
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "NetworkPreprocessor",
+      "description": "Preserve directed influence instead of symmetrizing.",
+      "frozen": false
+    },
+    {
+      "key": "layer_weight_family",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "dirichlet",
+        "args": {
+          "alpha": [
+            5.0,
+            3.0,
+            2.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "Weight of family layer in exposure aggregation.",
+      "frozen": false
+    },
+    {
+      "key": "layer_weight_work",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "dirichlet",
+        "args": {
+          "alpha": [
+            5.0,
+            3.0,
+            2.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "Weight of work/school layer in exposure aggregation.",
+      "frozen": false
+    },
+    {
+      "key": "layer_weight_community",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "dirichlet",
+        "args": {
+          "alpha": [
+            5.0,
+            3.0,
+            2.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "Weight of community layer in exposure aggregation.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_weight_same_age",
+      "dtype": "float",
+      "default": 1.2,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.2,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 2.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "Multiplier for neighbor influence when age_group matches.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_weight_same_occ",
+      "dtype": "float",
+      "default": 1.15,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.15,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 2.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "Multiplier for neighbor influence when occupation matches.",
+      "frozen": false
+    },
+    {
+      "key": "exposure_smoothing_gamma",
+      "dtype": "float",
+      "default": 0.1,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 8.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "EWMA smoothing of exposure over time.",
+      "frozen": false
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 10,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 1,
+          "high": 20
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 120
+      },
+      "owner_module": "PolicyAuthority",
+      "description": "First day policy becomes active.",
+      "frozen": true
+    },
+    {
+      "key": "policy_end_day",
+      "dtype": "int",
+      "default": 60,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 30,
+          "high": 120
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 365
+      },
+      "owner_module": "PolicyAuthority",
+      "description": "Last day of policy activity.",
+      "frozen": true
+    },
+    {
+      "key": "mandate_level_base",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAuthority",
+      "description": "Base mask mandate intensity when fully ramped.",
+      "frozen": false
+    },
+    {
+      "key": "communication_intensity_base",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.5,
+          "beta": 3.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAuthority",
+      "description": "Base intensity of public communications.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_level_global",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.5,
+          "beta": 3.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAuthority",
+      "description": "Resource level for enforcement (global scale).",
+      "frozen": false
+    },
+    {
+      "key": "subsidy_incentive_base",
+      "dtype": "float",
+      "default": 0.0,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.0,
+          "beta": 10.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAuthority",
+      "description": "Base incentive/subsidy level; can be zero.",
+      "frozen": true
+    },
+    {
+      "key": "policy_ramp_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "prior": {
+        "type": "loguniform",
+        "args": {
+          "low": 0.01,
+          "high": 0.5
+        }
+      },
+      "bounds": {
+        "low": 0.01,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAuthority",
+      "description": "Daily ramp fraction after start day.",
+      "frozen": false
+    },
+    {
+      "key": "mandate_to_enforcement_multiplier",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.5,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyAuthority",
+      "description": "How strongly mandate level scales enforcement.",
+      "frozen": false
+    },
+    {
+      "key": "info_transmission_family",
+      "dtype": "float",
+      "default": 0.4,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3.0,
+          "beta": 3.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Per-informed-neighbor daily info transmission probability in family layer.",
+      "frozen": false
+    },
+    {
+      "key": "info_transmission_work",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 4.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Per-informed-neighbor daily info transmission probability in work/school layer.",
+      "frozen": false
+    },
+    {
+      "key": "info_transmission_community",
+      "dtype": "float",
+      "default": 0.1,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.5,
+          "beta": 6.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Per-informed-neighbor daily info transmission probability in community layer.",
+      "frozen": false
+    },
+    {
+      "key": "exogenous_broadcast_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "prior": {
+        "type": "loguniform",
+        "args": {
+          "low": 0.0001,
+          "high": 0.1
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Daily probability of receiving info from exogenous sources.",
+      "frozen": false
+    },
+    {
+      "key": "policy_comm_to_info_multiplier",
+      "dtype": "float",
+      "default": 0.8,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.8,
+          "sd": 0.3
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "How strongly policy communication boosts broadcast rate.",
+      "frozen": false
+    },
+    {
+      "key": "info_memory_decay",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 6.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Daily probability that prior info state is forgotten.",
+      "frozen": false
+    },
+    {
+      "key": "contact_rate_daily",
+      "dtype": "int",
+      "default": 12,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 4,
+          "high": 30
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 100
+      },
+      "owner_module": "AttendanceAndContacts",
+      "description": "Total daily contact opportunities used for scaling.",
+      "frozen": true
+    },
+    {
+      "key": "household_fraction",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "dirichlet",
+        "args": {
+          "alpha": [
+            3.0,
+            5.0,
+            2.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttendanceAndContacts",
+      "description": "Fraction of contacts in household layer before openings.",
+      "frozen": false
+    },
+    {
+      "key": "workplace_fraction",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "dirichlet",
+        "args": {
+          "alpha": [
+            3.0,
+            5.0,
+            2.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttendanceAndContacts",
+      "description": "Fraction of contacts in work/school layer before openings.",
+      "frozen": false
+    },
+    {
+      "key": "public_space_fraction",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "dirichlet",
+        "args": {
+          "alpha": [
+            3.0,
+            5.0,
+            2.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttendanceAndContacts",
+      "description": "Fraction of contacts in community/public layer before openings.",
+      "frozen": false
+    },
+    {
+      "key": "attendance_variance",
+      "dtype": "float",
+      "default": 0.1,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 8.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttendanceAndContacts",
+      "description": "Day-to-day variability of attendance (used if stochastic sampling is enabled).",
+      "frozen": true
+    },
+    {
+      "key": "location_open_fraction_public",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 9.0,
+          "beta": 1.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttendanceAndContacts",
+      "description": "Open fraction for public spaces.",
+      "frozen": true
+    },
+    {
+      "key": "location_open_fraction_work_school",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 9.0,
+          "beta": 1.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttendanceAndContacts",
+      "description": "Open fraction for work/school locations.",
+      "frozen": true
+    },
+    {
+      "key": "location_mask_requirement_level_family",
+      "dtype": "float",
+      "default": 0.1,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.2,
+          "beta": 8.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "LocationEnforcement",
+      "description": "Requirement level in family settings.",
+      "frozen": true
+    },
+    {
+      "key": "location_mask_requirement_level_work",
+      "dtype": "float",
+      "default": 0.6,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "LocationEnforcement",
+      "description": "Requirement level in work/school settings.",
+      "frozen": false
+    },
+    {
+      "key": "location_mask_requirement_level_community",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.5,
+          "beta": 2.5
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "LocationEnforcement",
+      "description": "Requirement level in community/public settings.",
+      "frozen": false
+    },
+    {
+      "key": "location_enforcement_level_family",
+      "dtype": "float",
+      "default": 0.05,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.1,
+          "beta": 10.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "LocationEnforcement",
+      "description": "Base enforcement level in family settings.",
+      "frozen": true
+    },
+    {
+      "key": "location_enforcement_level_work",
+      "dtype": "float",
+      "default": 0.6,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "LocationEnforcement",
+      "description": "Base enforcement level in work/school settings.",
+      "frozen": false
+    },
+    {
+      "key": "location_enforcement_level_community",
+      "dtype": "float",
+      "default": 0.4,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 3.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "LocationEnforcement",
+      "description": "Base enforcement level in community/public settings.",
+      "frozen": false
+    },
+    {
+      "key": "location_report_noise_sigma",
+      "dtype": "float",
+      "default": 0.0,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0.0,
+          "high": 0.05
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "LocationEnforcement",
+      "description": "Noise on reported enforcement for diagnostics.",
+      "frozen": true
+    },
+    {
+      "key": "lambda_peer",
+      "dtype": "float",
+      "default": 1.2,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.2,
+          "sd": 0.4
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Peer influence strength on adoption logit.",
+      "frozen": false
+    },
+    {
+      "key": "beta_info",
+      "dtype": "float",
+      "default": 0.8,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.8,
+          "sd": 0.3
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Effect of received_info on adoption propensity.",
+      "frozen": false
+    },
+    {
+      "key": "beta0",
+      "dtype": "float",
+      "default": -2.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": -2.0,
+          "sd": 0.5
+        }
+      },
+      "bounds": {
+        "low": -5.0,
+        "high": 0.0
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Baseline adoption intercept for non-maskers.",
+      "frozen": false
+    },
+    {
+      "key": "phi_persist",
+      "dtype": "float",
+      "default": 0.9,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 9.0,
+          "beta": 1.0
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Probability to remain masked from t-1 to t (before dropout adjustment).",
+      "frozen": false
+    },
+    {
+      "key": "delta_drop",
+      "dtype": "float",
+      "default": 0.02,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.2,
+          "beta": 60.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Baseline dropout probability for masked agents at low exposure.",
+      "frozen": false
+    },
+    {
+      "key": "mask_disutility",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 8.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Perceived cost of masking applied to adoption propensity.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold",
+      "dtype": "float",
+      "default": 0.6,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Threshold in logistic propensity controlling steepness and shift.",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_decay",
+      "dtype": "float",
+      "default": 0.01,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.5,
+          "beta": 150.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Daily fractional decay of risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "policy_effect_strength",
+      "dtype": "float",
+      "default": 0.4,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.4,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.5
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Scales mandate/enforcement effect on adoption.",
+      "frozen": false
+    },
+    {
+      "key": "peer_influence_cap",
+      "dtype": "float",
+      "default": 0.95,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 8.0,
+          "beta": 1.0
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDynamics",
+      "description": "Upper cap on exposure I to prevent extreme values.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "Aggregation",
+      "formula_or_field": "mean(Person.adoption_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:wearing_mask"
+    },
+    {
+      "id": "observable.received_info_rate_daily",
+      "source_module": "Aggregation",
+      "formula_or_field": "mean(Person.received_info)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:received_info"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true,
+          "window": {
+            "start_day": 0,
+            "end_day": 29
+          }
+        }
+      }
+    },
+    {
+      "name": "MAE",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "window": {
+            "start_day": 0,
+            "end_day": 29
+          }
+        }
+      }
+    },
+    {
+      "name": "FinalAdoptionRate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "AbsoluteDifferenceOnDay",
+        "config": {
+          "day": 29
+        }
+      }
+    },
+    {
+      "name": "StabilityLastWindow",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "MeanAbsDiff",
+        "config": {
+          "last_n_days": 7,
+          "window": {
+            "start_day": 23,
+            "end_day": 29
+          }
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network_multiplex",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 10000,
+    "random_seed": 42,
+    "initial_adoption_rate": 0.2,
+    "policy_start_day": 10,
+    "policy_end_day": 60,
+    "data_folder": "data_fitting/mask_adoption_data/",
+    "load_state_from_train_data": true
+  },
+  "algorithms": {
+    "LayerWeightedExposure": "Compute weighted fraction of masked neighbors per agent with homophily multipliers and EWMA smoothing.",
+    "InfoContagion": "Hybrid broadcast and neighbor-driven information diffusion with memory decay.",
+    "AdoptionHazard": "Discrete-time hazard/logit for mask adoption with persistence and dropout, influenced by exposure, info, policy, and risk perception.",
+    "PolicyScheduler": "Time-based ramping of mandate, communication, and enforcement levels.",
+    "RMSEEvaluator": "Compute RMSE between simulated and observed adoption rates over calibration window.",
+    "SBI_Grid_Or_CMAES": "Simulation-based optimization over non-frozen parameters to minimize RMSE subject to stability and final-day constraints."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agent demographics and traits; compute homophily, risk priors.",
+      "fields_used": [
+        "agent_id",
+        "age_group",
+        "occupation",
+        "risk_perception"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Build multiplex social network layers.",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibrate micro-transitions and aggregate adoption/info rates for days 0-29; initialize day 0 states.",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point; parses config, orchestrates simulation loop, handles calibration and prediction runs."
+      },
+      {
+        "name": "modules/network.py",
+        "description": "NetworkPreprocessor and ExposureCalculator implementations; graph utilities."
+      },
+      {
+        "name": "modules/policy.py",
+        "description": "PolicyAuthority and LocationEnforcement modules."
+      },
+      {
+        "name": "modules/info.py",
+        "description": "InfoDiffusion logic and utilities."
+      },
+      {
+        "name": "modules/adoption.py",
+        "description": "AdoptionDynamics and persistence/dropout mechanisms."
+      },
+      {
+        "name": "modules/attendance.py",
+        "description": "AttendanceAndContacts module; contact weight computation."
+      },
+      {
+        "name": "modules/aggregation.py",
+        "description": "Aggregation of observables and metric calculations."
+      },
+      {
+        "name": "calibration/sbi.py",
+        "description": "SBI/optimization routines (grid search or CMA-ES) and metric-driven objective."
+      },
+      {
+        "name": "io/data_loader.py",
+        "description": "Load and validate CSV/JSON data; build agent and network structures."
+      },
+      {
+        "name": "config/schema.py",
+        "description": "Parameter schema, bounds, and validation; frozen parameter enforcement."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "numba",
+      "tqdm",
+      "jsonschema"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "MAE",
+    "FinalAdoptionRate",
+    "StabilityLastWindow"
+  ]
+}

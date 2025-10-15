@@ -1,0 +1,250 @@
+{
+  "summary": "The simulation is modular and executable, but several key issues prevent it from meeting the specification and producing valid metrics. The most critical problems are (1) missing/misnamed output metrics, (2) a policy schedule activation bug, (3) lack of validation criteria implementation, and (4) state mutations within modules instead of returning updates. Addressing these will improve correctness, traceability, and alignment with the problem specification. Additional improvements include support for nested location visit rates, exogenous risk signals, mask fatigue, household norms, and meaningful calibration evaluation.",
+  "critical_issues": [
+    {
+      "issue": "Metrics mismatch and missing required metrics per spec",
+      "impact": "Downstream evaluation and comparisons fail or are misleading; external consumers cannot interpret results as intended.",
+      "solution": "Augment compute_summary_metrics to compute and expose spec-aligned keys: peak_adoption_rate, time_to_70_percent (alias for threshold), sustained_adoption_at_horizon, compliance_by_location (alias), enforcement_actions_count (sum), masks_purchased (sum), mask_shortage_days (alias for stockout days), adoption_inequality_index (alias for Gini), policy_effect_increment (alias of mandate_effect_size).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Policy schedule activation bug (policy_start_day used instead of schedule event day)",
+      "impact": "Mandates may activate too early or too late compared to schedule; invalid counterfactuals and policy-effect estimates.",
+      "solution": "When a policy_type_sequence event triggers at day t, set effective start_day = t for that policy_type within GovernmentPolicyModule.forward.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Validation criteria not implemented",
+      "impact": "Cannot verify target behavior (e.g., reaching 70% under mandate), dynamic stability, replicate consistency, or calibration fit.",
+      "solution": "Add a validation function that checks: target_adoption_threshold under strong mandate scenario, stability_after_horizon (variance over last 14 days), replicate_consistency across seeds, and optional RMSE vs observed data if provided.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Modules mutate state directly instead of returning updates",
+      "impact": "Order-dependent, hard-to-trace side effects and potential inconsistencies; violates the module protocol stated in comments.",
+      "solution": "Refactor AdoptionDecisionModule and RetailMarketModule to accumulate person_updates and retailer_updates, and commit via _commit_updates; do not mutate objects directly in forward().",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Calibration RMSE computed against self",
+      "impact": "Calibration becomes meaningless (zero error), preventing any real model improvement.",
+      "solution": "Allow passing observed adoption trajectories via bundle and compute RMSE/MAE/Brier against those; otherwise return None or a clear placeholder indicating unavailable calibration data.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Spec parameters partially ignored (nested location_visit_rates, mask_fatigue_rate_per_day, exogenous_risk_signal, household norms)",
+      "impact": "Lower fidelity to the specification; missing mechanisms to capture known dynamics (fatigue, household norms).",
+      "solution": "Add HouseholdNormsModule; incorporate fatigue into adoption utility; handle location_visit_rates nested object; add exogenous risk signal into risk perception updates.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "retailer_updates not committed in _commit_updates",
+      "impact": "Any future module that returns retailer_updates will be ignored; current RetailMarketModule also mutates retailers directly.",
+      "solution": "Implement retailer_updates commit loop and refactor RetailMarketModule to use it.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy schedule handling",
+      "current_approach": "Uses gov.policy_start_day even when a scheduled change occurs, causing early or late activation.",
+      "suggested_approach": "Track effective_start_day per schedule event and set mandate_active based on t >= effective_start_day for the currently active policy.",
+      "expected_benefit": "Correct timing for mandates; improved policy-effect estimation."
+    },
+    {
+      "aspect": "Household norms",
+      "current_approach": "Households created but not used to shape norms.",
+      "suggested_approach": "Add a HouseholdNormsModule that updates members\u2019 compliance_propensity/habit_strength based on household mask_norm_strength and household adoption share.",
+      "expected_benefit": "Captures within-household reinforcement and micro-norm formation."
+    },
+    {
+      "aspect": "Mask fatigue",
+      "current_approach": "fatigue_level exists but not used in decision utility.",
+      "suggested_approach": "Increase fatigue_level by mask_fatigue_rate_per_day and subtract a term from decision utility z (e.g., -beta_fatigue * fatigue_level) or reduce habit_strength.",
+      "expected_benefit": "More realistic long-horizon dynamics with potential waning compliance."
+    },
+    {
+      "aspect": "Exogenous risk signal and media effects",
+      "current_approach": "Risk updates ignore external signals; information_reach uses media.reach only.",
+      "suggested_approach": "Support exogenous_risk_signal as scalar or time series added to base risk; keep information_reach computed from actual exposures (already partially implemented).",
+      "expected_benefit": "Ability to replicate observed waves or shifts in perceived risk."
+    },
+    {
+      "aspect": "Location visit rates",
+      "current_approach": "Uses flat keys; ignores nested parameters.location_visit_rates.",
+      "suggested_approach": "Fallback logic to read nested keys for work/public/home rates.",
+      "expected_benefit": "Greater alignment with the spec and easier configuration."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "GovernmentPolicyModule.forward",
+      "modification": "Set effective_start_day to schedule event day when policy changes; use this for mandate activation.",
+      "reason": "Fix timing of policy activation to adhere to policy_type_sequence.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "Simulation.compute_summary_metrics",
+      "modification": "Add spec-aligned metrics and alias existing ones: peak_adoption_rate, time_to_70_percent, sustained_adoption_at_horizon, compliance_by_location, enforcement_actions_count, mask_shortage_days, adoption_inequality_index, policy_effect_increment.",
+      "reason": "Conform to specification and evaluation requirements.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "Simulation._commit_updates",
+      "modification": "Apply retailer_updates to retailers, similar to person and location updates.",
+      "reason": "Ensure all module changes are properly committed and remove reliance on direct mutation.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "AdoptionDecisionModule.forward",
+      "modification": "Stop mutating p.mask_inventory/quality directly; return these via person_updates, including fatigue increments.",
+      "reason": "Maintain module purity and traceability; align with design protocol.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "RetailMarketModule.forward",
+      "modification": "Return person_updates and retailer_updates instead of mutating person.budget, person.mask_inventory, retailer.inventory_level, retailer.price_per_mask directly.",
+      "reason": "Avoid side effects and enable deterministic commit ordering.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "InformationAndBeliefModule.forward",
+      "modification": "Support exogenous_risk_signal (scalar or array by day) and integrate into risk update; also keep the existing media effects.",
+      "reason": "Match spec and allow replicating changes in perceived risk.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "MobilityEnforcementModule.forward",
+      "modification": "Add fallback to read nested parameters.location_visit_rates if present.",
+      "reason": "Match spec naming and structure for visit rates.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "New module",
+      "modification": "Add HouseholdNormsModule adjusting member compliance_propensity/habit_strength based on household norms and observed household wearing.",
+      "reason": "Implement the household_norms interaction in spec.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "evaluate_params",
+      "modification": "Compute RMSE/MAE/Brier against observed adoption if bundle['observed_adoption_rate_over_time'] is provided; otherwise set metrics to None and warn.",
+      "reason": "Make calibration meaningful when data is provided and avoid misleading zeros otherwise.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "scale_free_graph",
+      "modification": "Remove unused variable 'need' and ensure preferential attachment sampling uses repeated-node list only.",
+      "reason": "Clean up unused code to avoid confusion and maintain performance clarity.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "Imports",
+      "modification": "Remove unused import 'time'.",
+      "reason": "Minor cleanup.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "No calibration to real data; RMSE uses self-comparison.",
+      "suggestion": "Provide observed adoption trajectory and compute RMSE/MAE/Brier; tune decision_coefficients, information params, and enforcement levels using calibrator."
+    },
+    {
+      "metric": "compliance_by_location",
+      "current_gap": "Modeled, but without observed benchmarks.",
+      "suggestion": "If available, collect workplace vs public compliance data and adjust enforcement_strength and mandate_strictness to match averages."
+    },
+    {
+      "metric": "adoption_inequality_index",
+      "current_gap": "SES inequality calculated but unvalidated.",
+      "suggestion": "Use socioeconomic segmentation from observed datasets (income or proxies) to calibrate cost sensitivity, access_to_masks, and retailer price dynamics."
+    },
+    {
+      "metric": "mask_shortage_days and masks_purchased",
+      "current_gap": "Supply chain modeled without calibration; dynamic price may be too reactive.",
+      "suggestion": "Introduce external stock/replenishment data or constraints; calibrate restock_rate and lead times; bound price adjustments to realistic elasticity."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix policy schedule activation to use the schedule event day as the effective start day.",
+    "Produce spec-aligned metrics in compute_summary_metrics (add missing metrics and correct names).",
+    "Stop mutating state inside modules; implement person_updates and retailer_updates and commit them.",
+    "Implement validation criteria (target threshold, stability, replicate consistency, optional RMSE).",
+    "Enable observed data calibration in evaluate_params (non-self RMSE).",
+    "Add nested location_visit_rates support, exogenous risk signal, and fatigue in adoption utility.",
+    "Implement HouseholdNormsModule to reflect household norms interaction."
+  ],
+  "additional_comments": "The recent introduction of MobilityEnforcementModule, PolicyMaker, and location-level enforcement is a strong step toward the spec. The current observables merging is reasonable as modules emit disjoint keys, but keep an eye on potential double-counting if future modules emit overlapping observables keys. compute_policy_impact() may be computationally expensive; consider caching or optional evaluation.",
+  "code_snippets": [
+    {
+      "file": "GovernmentPolicyModule.forward",
+      "before": "seq = params.get(\"policy_type_sequence\", [])\nfor event in seq or []:\n    try:\n        if int(event.get(\"day\", -1)) == t:\n            policy_type = str(event.get(\"policy\", policy_type))\n    except Exception:\n        continue\nstart_day = int(gov.policy_start_day)\nmandate_active = (policy_type == \"mandate\" and t >= start_day)",
+      "after": "seq = params.get(\"policy_type_sequence\", [])\neffective_start_day = int(gov.policy_start_day)\nfor event in seq or []:\n    try:\n        if int(event.get(\"day\", -1)) == t:\n            policy_type = str(event.get(\"policy\", policy_type))\n            effective_start_day = t  # policy becomes effective starting today\n    except Exception:\n        continue\nmandate_active = (policy_type == \"mandate\" and t >= effective_start_day)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "Simulation._commit_updates",
+      "before": "# Person updates\nperson_updates: Dict[int, Dict[str, Any]] = updates.get(\"person_updates\", {})\nfor pid, fields in person_updates.items():\n    p = self.persons[pid]\n    for k, v in fields.items():\n        setattr(p, k, v)\n# Location updates\nlocation_updates: Dict[int, Dict[str, Any]] = updates.get(\"location_updates\", {})\nfor lid, fields in location_updates.items():\n    if 0 <= lid < len(self.locations):\n        loc = self.locations[lid]\n        for k, v in fields.items():\n            setattr(loc, k, v)\n# Global updates ...",
+      "after": "# Person updates\nperson_updates: Dict[int, Dict[str, Any]] = updates.get(\"person_updates\", {})\nfor pid, fields in person_updates.items():\n    p = self.persons[pid]\n    for k, v in fields.items():\n        setattr(p, k, v)\n# Location updates\nlocation_updates: Dict[int, Dict[str, Any]] = updates.get(\"location_updates\", {})\nfor lid, fields in location_updates.items():\n    if 0 <= lid < len(self.locations):\n        loc = self.locations[lid]\n        for k, v in fields.items():\n            setattr(loc, k, v)\n# Retailer updates\nretailer_updates: Dict[int, Dict[str, Any]] = updates.get(\"retailer_updates\", {})\nfor rid, fields in retailer_updates.items():\n    if 0 <= rid < len(self.retailers):\n        r = self.retailers[rid]\n        for k, v in fields.items():\n            setattr(r, k, v)\n# Global updates ...",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "AdoptionDecisionModule.forward",
+      "before": "wear_today = 1 if (p.mask_inventory > 0 and self.rng.random() < p_wear) else 0\nif wear_today:\n    p.mask_inventory = max(0, p.mask_inventory - 1)\n    p.mask_quality_owned = clamp(p.mask_quality_owned - 0.05, 0.0, 1.0)\nperson_updates[p.id] = {\"adoption_state\": wear_today, \"mask_adoption_state\": wear_today}",
+      "after": "wear_today = 1 if (p.mask_inventory > 0 and self.rng.random() < p_wear) else 0\nupdates = {\"adoption_state\": wear_today, \"mask_adoption_state\": wear_today}\nif wear_today:\n    updates[\"mask_inventory\"] = max(0, p.mask_inventory - 1)\n    updates[\"mask_quality_owned\"] = clamp(p.mask_quality_owned - 0.05, 0.0, 1.0)\n# Optional fatigue\nfatigue_rate = float(params.get(\"mask_fatigue_rate_per_day\", 0.0))\nif fatigue_rate > 0:\n    updates[\"fatigue_level\"] = clamp(p.fatigue_level + fatigue_rate, 0.0, 1.0)\nperson_updates[p.id] = {**person_updates.get(p.id, {}), **updates}",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "RetailMarketModule.forward",
+      "before": "r.inventory_level -= buy\np.mask_inventory += buy\n# Weighted average of quality\n...\np.budget = new_budget",
+      "after": "retailer_updates = buffers.get(\"retailer_updates\", {})\nperson_updates = {}\n...\nretailer_updates.setdefault(r.id, {})[\"inventory_level\"] = r.inventory_level - buy\npu = person_updates.get(p.id, {})\npu[\"mask_inventory\"] = p.mask_inventory + buy\npu[\"mask_quality_owned\"] = new_quality\npu[\"budget\"] = new_budget\nperson_updates[p.id] = pu\n...\nreturn {\n  \"person_updates\": person_updates,\n  \"retailer_updates\": retailer_updates,\n  ...\n}",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "InformationAndBeliefModule.forward",
+      "before": "new_risk = clamp((1 - decay) * p.risk_perception + decay * (base_risk + policy_boost + info_signal), 0.0, 1.0)",
+      "after": "exo = params.get(\"exogenous_risk_signal\")\nexo_term = 0.0\nif isinstance(exo, (int, float)):\n    exo_term = float(exo)\nelif isinstance(exo, (list, tuple)) and 0 <= t < len(exo):\n    exo_term = float(exo[t])\nnew_risk = clamp((1 - decay) * p.risk_perception + decay * (base_risk + policy_boost + info_signal + exo_term), 0.0, 1.0)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "MobilityEnforcementModule.forward",
+      "before": "visit_work = float(params.get(\"location_visit_rate_work\", 0.5))\nvisit_public = float(params.get(\"location_visit_rate_public\", 0.3))",
+      "after": "lv = params.get(\"location_visit_rates\", {}) or {}\nvisit_work = float(params.get(\"location_visit_rate_work\", lv.get(\"work\", 0.5)))\nvisit_public = float(params.get(\"location_visit_rate_public\", lv.get(\"public\", 0.3)))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "Simulation.compute_summary_metrics",
+      "before": "metrics = {\n  \"adoption_rate_over_time\": series,\n  \"final_adoption_rate\": final_rate,\n  \"time_to_threshold\": t_to_threshold,\n  \"media_influence_effect\": media_eff,\n  \"misinformation_effect\": misinfo_eff,\n  \"supply_constraints_effect\": supply_eff,\n  \"supply_shortage_days\": stockout_days,\n  \"average_mask_price\": avg_price,\n  \"information_reach\": info_reach_avg,\n  \"compliance_by_location_type\": {\"workplace\": comp_work, \"public_space\": comp_public},\n  \"violation_rate\": violation_rate,\n  \"inequality_of_adoption\": inequality,\n  \"average_mask_quality\": avg_quality,\n  \"masks_purchased\": masks_purchased,\n  \"mandate_effect_size\": mandate_effect,\n}",
+      "after": "peak = max(series) if series else 0.0\nlast_n = 14\nsustained = safe_mean(series[-last_n:]) if len(series) >= last_n else final_rate\nenforcement_actions_count = sum(self.observables.get(\"enforcement_actions_daily\", []))\nmetrics = {\n  \"adoption_rate_over_time\": series,\n  \"peak_adoption_rate\": peak,\n  \"time_to_70_percent\": t_to_threshold,  # alias per spec\n  \"sustained_adoption_at_horizon\": sustained,\n  \"compliance_by_location\": {\"workplace\": comp_work, \"public_space\": comp_public},\n  \"enforcement_actions_count\": enforcement_actions_count,\n  \"masks_purchased\": masks_purchased,\n  \"mask_shortage_days\": stockout_days,\n  \"adoption_inequality_index\": inequality,\n  \"policy_effect_increment\": mandate_effect,\n  # keep legacy/extra keys for backward compatibility\n  \"final_adoption_rate\": final_rate,\n  \"media_influence_effect\": media_eff,\n  \"misinformation_effect\": misinfo_eff,\n  \"supply_constraints_effect\": supply_eff,\n  \"average_mask_price\": avg_price,\n  \"information_reach\": info_reach_avg,\n  \"violation_rate\": violation_rate,\n  \"average_mask_quality\": avg_quality\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "evaluate_params",
+      "before": "series = simulator.observables.get(\"adoption_rate_daily\", [])\nif not series:\n    rmse = 0.0\n    mae = 0.0\n    brier = 0.0\nelse:\n    gt = series\n    rmse = math.sqrt(sum((a - b) ** 2 for a, b in zip(series, gt)) / max(1, len(series)))\n    mae = sum(abs(a - b) for a, b in zip(series, gt)) / max(1, len(series))\n    brier = rmse",
+      "after": "series = simulator.observables.get(\"adoption_rate_daily\", [])\nobserved = None\nif bundle and isinstance(bundle.get(\"observed_adoption_rate_over_time\"), list):\n    observed = bundle[\"observed_adoption_rate_over_time\"][window[0]:window[1]+1]\nif observed and series and len(observed) == len(series):\n    rmse = math.sqrt(sum((a - b) ** 2 for a, b in zip(series, observed)) / max(1, len(series)))\n    mae = sum(abs(a - b) for a, b in zip(series, observed)) / max(1, len(series))\n    brier = rmse\nelse:\n    rmse = None\n    mae = None\n    brier = None",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration adds important components (PolicyMaker, MobilityEnforcementModule, location policies, richer observables, and improved network generation). However, it introduced a schedule activation bug, continues to mutate state in modules, and still lacks spec-aligned metrics and validation functions.",
+    "positive_impacts": [
+      "Introduced PolicyMaker and connected mandate state to location requirements.",
+      "Added MobilityEnforcementModule with location compliance and enforcement metrics.",
+      "Improved scale-free graph performance with repeated-node sampling.",
+      "Expanded decision model coefficients and compliance dynamics."
+    ],
+    "negative_impacts": [
+      "Policy schedule bug: schedule changes ignore the event day for activation.",
+      "Modules still mutate objects directly, breaking module-protocol intent.",
+      "retailer_updates are defined in merge but not applied in commit.",
+      "Metrics and validation remain misaligned with spec, limiting usefulness."
+    ],
+    "suggestions": [
+      "Fix schedule activation day as proposed and add a test covering policy_type_sequence.",
+      "Refactor modules to return updates instead of mutating state and commit retailer_updates.",
+      "Implement validation criteria and spec-aligned metrics names.",
+      "Support nested location_visit_rates and exogenous risk signal, and add household norms and fatigue."
+    ]
+  }
+}

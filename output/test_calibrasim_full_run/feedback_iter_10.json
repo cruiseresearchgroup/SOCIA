@@ -1,0 +1,228 @@
+{
+  "summary": "The current simulation has a critical syntax error that prevents execution, along with several logic and robustness issues. The latest changes improve network fallback, pricing dynamics, and compliance metrics but introduced a stray unmatched parenthesis and left some type and JSON-safety issues unresolved. To stabilize and enhance the model, fix the syntax error, cast audience sizes to int, sanitize metrics for JSON, guard zero-sized establishments, and improve adoption tracking. For better alignment with the task specification and real-world dynamics, add parameter mapping from spec keys to internal keys, track 'ever adopters', incorporate household influence, misinformation, and access inequality, and (optionally) model mask types.",
+  "critical_issues": [
+    {
+      "issue": "SyntaxError due to unmatched parenthesis in Simulation._build_initial_state (duplicate set_global_seed line)",
+      "impact": "Prevents the program from running at all (fails at syntax stage).",
+      "solution": "Remove the stray line and keep a single, correct call: set_global_seed(int(self.params.get(\"seed\", 42))).",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "audience_size is not cast to int after clamping in PolicyAndCampaignManager.forward",
+      "impact": "np.random.choice requires an integer size; a float can cause a ValueError, breaking campaign exposure updates.",
+      "solution": "Cast to int immediately after clamp: audience_size = int(clamp(audience_size, 0, n)).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Metrics and observables may contain NaN values while json.dump uses allow_nan=False",
+      "impact": "Saving artifacts may fail with ValueError: Out of range float values are not JSON compliant, causing crashes if artifacts are enabled.",
+      "solution": "Replace NaN metrics with None (e.g., RMSE_aggregate, MAE_aggregate, Brier) and ensure all dumps use allow_nan=False. Optionally add a sanitize helper.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Potential zero-sized establishments (num_workplaces/num_retailers) not guarded",
+      "impact": "Downstream code (indexing arrays, assignments) can crash when establishments arrays are empty.",
+      "solution": "Use max(1, int(...)) when reading num_workplaces and num_retailers to ensure at least one entity.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "New adopters calculation uses daily state (adopter when use==1) instead of first-time adoption",
+      "impact": "Overcounts 'new adopters' as repeated daily users; cascade detection and campaign attribution may be misleading.",
+      "solution": "Introduce Person.ever_adopter and update only on first adoption. Compute increments based on this persistent state.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Task specification parameters are not mapped to internal parameter names",
+      "impact": "Running the sim with spec-compliant inputs (population_size, time_horizon_days, etc.) silently misconfigures the model.",
+      "solution": "Add an input mapping layer to convert external spec keys to internal ones right after loading parameters.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Redundant 'pass' statements before executable code in many functions",
+      "impact": "Harmless but reduces readability and may confuse static analyzers; masks real code structure.",
+      "solution": "Remove redundant 'pass' statements where code follows immediately.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Household influence",
+      "current_approach": "Household IDs are created but no within-household influence is applied.",
+      "suggested_approach": "In PeerInfluenceUpdater, add a household component: exposure += hh_weight * mean(use of same household). Or maintain a household norm attribute.",
+      "expected_benefit": "Captures strong within-household behavioral correlation and improves adoption clustering realism."
+    },
+    {
+      "aspect": "Misinformation and media heterogeneity",
+      "current_approach": "Campaign increases risk perception uniformly among a trust-weighted audience; no misinformation or media bias.",
+      "suggested_approach": "Use params: misinformation_rate, message_bias. Randomly select a fraction exposed to misinformation that reduces trust/risk_perception and increases comfort_cost or reduces perceived efficacy.",
+      "expected_benefit": "Better realism for information diffusion and polarization effects."
+    },
+    {
+      "aspect": "Access inequality and subsidies",
+      "current_approach": "Affordability captured via income, but access_inequality_index and subsidy_level unused.",
+      "suggested_approach": "Modulate purchase probability and retailer rationing by SES (income tercile) and apply subsidies to effective price by SES or location.",
+      "expected_benefit": "Aligns adoption disparities and shortage dynamics with socioeconomic stratification."
+    },
+    {
+      "aspect": "Persistent adoption state",
+      "current_approach": "adoption_state is 'adopter' for any day with use==1.",
+      "suggested_approach": "Track Person.ever_adopter (boolean). New adopter = current_use==1 and ever_adopter==0; then set ever_adopter=1.",
+      "expected_benefit": "Accurate measurement of first-time adoption and cascades."
+    },
+    {
+      "aspect": "Policy feedback",
+      "current_approach": "Policy is scheduled by start/end with fixed enforcement.",
+      "suggested_approach": "Adjust enforcement_probability/campaign_intensity by observed adoption (or shortages), e.g., if adoption < target, increase enforcement/campaign on next interval.",
+      "expected_benefit": "Dynamic policy responses improve realism and sensitivity analyses."
+    },
+    {
+      "aspect": "Mask types and efficacy",
+      "current_approach": "No mask types are modeled; mask_owned is a scalar count.",
+      "suggested_approach": "Track mask_type distribution (cloth/surgical/respirator). Purchase decision picks type based on price, income, and policy nudges; use mask_efficacy in risk-reduction proxy.",
+      "expected_benefit": "Supports richer scenarios (subsidy for respirators, type-specific shortages) and alignment with mask_efficacy input."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Remove stray set_global_seed line and unmatched parenthesis in Simulation._build_initial_state; keep a single valid call.",
+      "reason": "Fixes SyntaxError that prevents execution.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Cast audience_size to int after clamping in PolicyAndCampaignManager.forward.",
+      "reason": "Prevents np.random.choice size argument errors.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Replace NaN metrics with None in evaluate (RMSE_aggregate, MAE_aggregate, Brier, TransitionFit values) and keep allow_nan=False in json.dump.",
+      "reason": "Avoid JSON serialization failures when artifacts are enabled.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Guard num_workplaces and num_retailers with max(1, ...) in SocialNetworkBuilder.build.",
+      "reason": "Avoid zero-sized arrays leading to indexing errors.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Introduce Person.ever_adopter and adjust AdoptionDecision and AdoptionAggregator to compute new adopters and cascades based on first-time adoption.",
+      "reason": "Corrects overcounting and aligns cascade detection with diffusion theory.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add a params mapping layer in load_params or main to translate task-spec keys (population_size, time_horizon_days, average_degree, etc.) to internal keys.",
+      "reason": "Ensures inputs adhering to the task specification are respected by the simulator.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add a clamp_int helper and use it where an integer is required (audience_size, household sizes, etc.).",
+      "reason": "Avoids accidental float propagation into integer-only APIs.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove redundant 'pass' statements where code follows immediately (e.g., in sigmoid, logit, Module.__init__, module forward methods).",
+      "reason": "Improves readability and maintains a consistent code style.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "overall_adoption_rate and time_to_threshold",
+      "current_gap": "Adoption depends weakly on household influence and misinformation; may not match observed clustered uptake.",
+      "suggestion": "Add household influence and misinformation modules; calibrate w_social, memory_days, and campaign_effect_size to real data."
+    },
+    {
+      "metric": "inequality_in_adoption",
+      "current_gap": "Access_inequality_index and subsidy_level not used; adoption disparity may be too small or unrealistic.",
+      "suggestion": "Modulate effective price and stock by SES; apply subsidies to low-income groups; measure Gini across SES."
+    },
+    {
+      "metric": "compliance_under_mandate",
+      "current_gap": "Compliance driven by simple enforcement/trust logic; lacks observed decay/learning effects.",
+      "suggestion": "Add adherence_decay_rate_per_day (from spec) to reduce policy pressure over time; incorporate sanction history."
+    },
+    {
+      "metric": "mask_availability_rate and shortage_days",
+      "current_gap": "Shortage detection improved but availability rate not computed.",
+      "suggestion": "Track Person.access_to_masks as (mask_owned > threshold) and output mask_availability_rate daily."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix the SyntaxError by removing the stray set_global_seed line with unmatched parenthesis.",
+    "Cast audience_size to int after clamping in PolicyAndCampaignManager.forward.",
+    "Sanitize metrics to avoid NaN in JSON (use None) and keep allow_nan=False in all json.dump calls.",
+    "Guard num_workplaces and num_retailers with max(1, ...) to prevent zero-sized arrays.",
+    "Introduce Person.ever_adopter and base 'new adopters' on first-time adoption (not daily usage).",
+    "Add parameter mapping from task-spec keys to internal keys (population_size->num_agents, time_horizon_days->time_steps, etc.).",
+    "Optionally add household influence and misinformation to improve diffusion realism.",
+    "Remove redundant pass statements and add clamp_int helper to standardize types."
+  ],
+  "additional_comments": "Per system requirements, keep the direct call to main() at the end for sandbox compatibility. Do not replace it with an if __name__ == \"__main__\" guard. The networkx fallback ring-lattice is a good resilience improvement; however, consider adding a small random rewiring to retain small-world properties when networkx is unavailable.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "set_global_seed(int(self.params.get(\"seed\", 42))))\n# FIXED: Corrected unmatched parenthesis\nset_global_seed(int(self.params.get(\"seed\", 42)))",
+      "after": "set_global_seed(int(self.params.get(\"seed\", 42)))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "audience_size = int(reach * n)\naudience_size = clamp(audience_size, 0, n)\n# choose audience\naudience_idx = np.random.choice(n, size=audience_size, replace=False, p=probs)",
+      "after": "audience_size = int(reach * n)\naudience_size = int(clamp(audience_size, 0, n))\n# choose audience\naudience_idx = np.random.choice(n, size=audience_size, replace=False, p=probs)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "metrics[\"RMSE_aggregate\"] = rmse\nmetrics[\"MAE_aggregate\"] = mae\n...\nelse:\n    # Without ground truth, provide placeholders\n    metrics[\"RMSE_aggregate\"] = float(\"nan\")\n    metrics[\"MAE_aggregate\"] = float(\"nan\")\n...\nmetrics[\"Brier\"] = float(\"nan\")\nmetrics[\"TransitionFit\"] = {\"P01\": float(\"nan\"), \"P11\": float(\"nan\"), \"P10\": float(\"nan\"), \"P00\": float(\"nan\")}",
+      "after": "metrics[\"RMSE_aggregate\"] = rmse if not math.isnan(rmese := rmse) else None\nmetrics[\"MAE_aggregate\"] = mae if not math.isnan(mae := mae) else None\n...\nelse:\n    metrics[\"RMSE_aggregate\"] = None\n    metrics[\"MAE_aggregate\"] = None\n...\nmetrics[\"Brier\"] = None\nmetrics[\"TransitionFit\"] = {\"P01\": None, \"P11\": None, \"P10\": None, \"P00\": None}",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "num_workplaces = int(sim.params.get(\"num_workplaces\", 200))\n...\nnum_retailers = int(sim.params.get(\"num_retailers\", 50))",
+      "after": "num_workplaces = max(1, int(sim.params.get(\"num_workplaces\", 200)))\n...\nnum_retailers = max(1, int(sim.params.get(\"num_retailers\", 50)))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# In _build_initial_state\nself.state[\"Person.adoption_state\"] = adoption_state\n...\n# In AdoptionAggregator.forward\nadoption_state = state.get(\"Person.adoption_state\", np.array([\"susceptible\"] * n, dtype=object))\nnew_adopters = (adoption_state == \"adopter\").astype(int) if self._new_adopters_prev is None \\\n    else ((adoption_state == \"adopter\").astype(int) - self._new_adopters_prev).clip(min=0)",
+      "after": "# In _build_initial_state\nself.state[\"Person.ever_adopter\"] = (current_mask_use == 1).astype(int)\nself.state[\"Person.adoption_state\"] = adoption_state\n...\n# In AdoptionDecision.forward, after computing current_use\never = state.get(\"Person.ever_adopter\", np.zeros(n, dtype=int)).copy()\never[(current_use == 1) & (ever == 0)] = 1\nupdates[\"Person.ever_adopter\"] = ever\n...\n# In AdoptionAggregator.forward\never = state.get(\"Person.ever_adopter\", np.zeros(n, dtype=int))\nprev_ever = getattr(self, \"_prev_ever\", np.zeros(n, dtype=int))\nnew_adopters = (ever - prev_ever).clip(min=0)\nself._prev_ever = ever.copy()",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# load_params(main)\nparams = load_params(args.param_file)\n# no mapping from spec keys",
+      "after": "# After loading\nparams = load_params(args.param_file)\n# Map external spec keys to internal\nspec_to_internal = {\n  \"population_size\": \"num_agents\",\n  \"time_horizon_days\": \"time_steps\",\n  \"average_degree\": \"avg_degree\",\n  \"network_topology\": \"network_type\",\n  \"initial_adoption_rate\": \"initial_adopters_fraction\",\n  \"enforcement_probability\": \"mandate_enforcement_prob\",\n  \"fine_amount\": \"fine_amount\",\n  \"campaign_intensity\": \"campaign_effect_size\",\n  \"replenishment_rate_per_day\": \"restock_rate_per_day\",\n  \"mask_price\": \"mask_price\",\n}\nfor ext, internal in spec_to_internal.items():\n    if ext in params and internal not in params:\n        params[internal] = params[ext]",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration significantly improves robustness (networkx fallback, enforcement array, dynamic pricing sign, JSON allow_nan=False) and adds better measurement (compliance only on mandate days). However, it introduced a fatal syntax error and left type and NaN-safety issues in place.",
+    "positive_impacts": [
+      "Added networkx-free ring-lattice fallback for social network construction.",
+      "Corrected dynamic pricing update sign to raise prices when inventory is low.",
+      "Ensured WorkplaceEnforcement returns an array, fixing downstream indexing.",
+      "Improved compliance calculation with mandate-day flags.",
+      "Shortage detection now uses fulfillment ratio, and artifacts record spend/qty."
+    ],
+    "negative_impacts": [
+      "Introduced unmatched parenthesis in Simulation._build_initial_state, causing a SyntaxError.",
+      "Retained audience_size as float after clamp, potentially causing np.random.choice errors.",
+      "Kept NaN metrics while json.dump uses allow_nan=False for artifacts, risking runtime errors if artifacts are written."
+    ],
+    "suggestions": [
+      "Remove the stray set_global_seed line to fix the SyntaxError.",
+      "Cast audience_size to int after clamping.",
+      "Replace NaN metrics with None and keep allow_nan=False consistently.",
+      "Add spec-to-internal parameter mapping to honor the task specification.",
+      "Introduce ever_adopter tracking for accurate new adoption metrics."
+    ]
+  }
+}

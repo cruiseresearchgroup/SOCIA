@@ -1,0 +1,213 @@
+{
+  "summary": "The simulation is structurally sound but contains critical logic flaws in daily update ordering and mask-use gating that distort compliance dynamics. Additional issues include inefficient lookups, incomplete enforcement effects, ignored parameters, missing metrics, and some dead/fragile code. Reordering the daily loop, gating mask wearing on inventory/household allocation, implementing budget-deducting fines, adding ID maps for O(1) lookups, honoring locations_count_by_type, and computing missing metrics will substantially improve correctness, performance, and alignment with the model plan.",
+  "critical_issues": [
+    {
+      "issue": "Daily update order uses mobility/enforcement before behavior decisions, so location compliance and enforcement are computed from stale mask states.",
+      "impact": "Compliance rates, enforcement prompts, and peer/observation influence are misaligned with actual same-day decisions, biasing adoption dynamics and delaying policy/media effects.",
+      "solution": "Reorder run loop to: policy_module.update() -> info_module.update() -> behavior_module.update() -> mobility_module.update() -> retail_module.update() -> aggregator.update(). Ensure last_observed_compliance is used as a lagged variable (yesterday\u2019s observation) and prompted_today is set by mobility for next day.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Agents can adopt (mask_use_state=1) without owning a mask; purchases happen later.",
+      "impact": "Overstates same-day compliance and underestimates the role of supply/budget constraints.",
+      "solution": "Gate wearing on available mask_ownership or immediate household allocation. If not available, generate a purchase intent and keep mask_use_state=0 for the current day.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Fines are recorded but not deducted from household budgets.",
+      "impact": "Enforcement has no economic consequence; therefore, it cannot influence future purchasing/behavior realistically.",
+      "solution": "On fine, find the person\u2019s household and deduct fine_amount, clamped at zero; record deduction in event.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "O(N) linear lookups for agent/household in hot loops.",
+      "impact": "Poor scalability and avoidable CPU cost; risk of StopIteration exceptions.",
+      "solution": "Maintain persistent dicts: id_to_agent and person_id_to_household. Replace next(...) usages with dict lookups.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Observation and enforcement timing",
+      "current_approach": "Behavior uses same-day last_observed_compliance set by mobility that was computed from yesterday\u2019s mask states.",
+      "suggested_approach": "Use last_observed_compliance as a lagged signal (yesterday\u2019s observation). Apply enforcement prompts after behavior; their effect (prompted_today) should apply next day unless explicit immediate compliance logic is added.",
+      "expected_benefit": "Causally consistent day structure; avoids feedback artifacts."
+    },
+    {
+      "aspect": "Resource-constrained adoption",
+      "current_approach": "Agents can wear without inventory; purchases are processed afterward.",
+      "suggested_approach": "Adoption requires mask availability (own or household allocation). If none, log purchase intent and keep not wearing today.",
+      "expected_benefit": "More realistic coupling between supply, budget, and adoption trajectory."
+    },
+    {
+      "aspect": "Household SES coherence",
+      "current_approach": "Household budget set by household SES but person SES assigned independently.",
+      "suggested_approach": "Assign household SES and propagate to members by default; allow mild noise if needed.",
+      "expected_benefit": "Consistent SES-linked behaviors (budget, adoption disparity) and clearer attribution in disparity metrics."
+    },
+    {
+      "aspect": "Policy/location parameters",
+      "current_approach": "locations_count_by_type is ignored; split keys are used.",
+      "suggested_approach": "Honor locations_count_by_type with split keys as fallback.",
+      "expected_benefit": "Closer adherence to the model plan and more flexible scenario control."
+    },
+    {
+      "aspect": "Metrics completeness",
+      "current_approach": "Not computing peak_adoption or sustained_adoption_post_mandate.",
+      "suggested_approach": "Add peak adoption and post-mandate sustained adoption among required metrics.",
+      "expected_benefit": "Better alignment with planned evaluation and policy-relevant outputs."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "Simulation.run",
+      "modification": "Reorder daily updates so behavior decisions occur before mobility/enforcement, and use previous day\u2019s avg_price and last_observed_compliance.",
+      "reason": "Fixes critical causality bug and ensures compliance reflects current-day decisions.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "BehaviorDecisionModule.update",
+      "modification": "Gate mask wearing on actual inventory or immediate household allocation; generate purchase intent if none available; do not allow wearing without mask.",
+      "reason": "Prevents overestimation of adoption on supply-constrained days.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "MobilityAndLocationModule",
+      "modification": "Introduce id_to_agent and person_id_to_household maps; use them in compliance/enforcement; deduct fines from household budgets; update last_observed_compliance after behavior for use next day.",
+      "reason": "Improves performance and correctness; implements economic consequences of enforcement.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "AdoptionAggregator and Simulation.evaluate",
+      "modification": "Compute peak_adoption and sustained_adoption_post_mandate; include in evaluation outputs.",
+      "reason": "Completes planned metrics for better evaluation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "Simulation.initialize_entities",
+      "modification": "Honor locations_count_by_type param; remove initial dead household creation block; align person SES with household SES.",
+      "reason": "Cleaner initialization; plan compliance; coherent SES relationships.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "General (various modules)",
+      "modification": "Avoid next(...) without default; remove unused vars and redundant pass statements; precompute and reuse maps in modules.",
+      "reason": "Robustness and readability improvements.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "time_to_threshold",
+      "current_gap": "Likely underestimated due to same-day wearing without inventory and stale compliance feedback.",
+      "suggestion": "Gate wearing on inventory and reorder day updates; calibrate peer/policy/media weights to published adoption curves for similar mandates."
+    },
+    {
+      "metric": "adoption_disparity_index",
+      "current_gap": "SES not coherently tied to household budgets/person SES; subsidies not targeted in a nuanced way.",
+      "suggestion": "Assign SES at household level, propagate to members, and test targeted subsidies/distribution to low SES; validate disparity trends against survey data."
+    },
+    {
+      "metric": "location_compliance_rate",
+      "current_gap": "Computed from previous-day behavior under current ordering; overstates effects or lags improperly.",
+      "suggestion": "Compute after same-day behavior decisions; add location-type-specific enforcement sensitivities to match observed compliance variation by venue."
+    },
+    {
+      "metric": "churn_rate",
+      "current_gap": "Habit/abandonment rates not calibrated; likely misrepresent sustained adoption post-mandate.",
+      "suggestion": "Calibrate habit_formation_rate and abandonment_rate to panel/survey evidence; consider decay with heterogeneity by attitude/trust."
+    }
+  ],
+  "prioritized_actions": [
+    "Reorder Simulation.run daily loop so behavior precedes mobility/enforcement.",
+    "Enforce inventory gating for mask wearing and household allocation-attempt before setting mask_use_state=1.",
+    "Implement fine deduction from household budgets in enforcement.",
+    "Introduce id_to_agent and person_id_to_household maps; replace linear searches.",
+    "Compute missing metrics (peak_adoption, sustained_adoption_post_mandate) and honor locations_count_by_type.",
+    "Clean initialization: remove dead household creation, align person SES with household SES.",
+    "Harden error handling (avoid next without default) and remove unused code."
+  ],
+  "additional_comments": "The direct call to main() at the end is acceptable per sandbox requirements. Consider adding unit tests for day ordering and mask gating to prevent regressions. Also consider adding a two-stage behavior update (pre-visit intent; post-enforcement compliance) if modeling on-the-spot compliance is desired.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "            # Mobility and location interactions\n            self.mobility_module.update(day, self.signals)\n\n            # Behavior update - use previous day's average price where available\n            if self.behavior_module is not None and self.aggregator is not None and self.aggregator.daily_records:\n                avg_price_prev_day = self.aggregator.daily_records[-1].get(\"avg_price\", avg_price_prev_day)\n                self.behavior_module.set_prev_avg_price(avg_price_prev_day)\n\n            self.behavior_module.update(day, self.signals)\n\n            # Retailer supply and transactions\n            self.retail_module.update(day, self.signals)\n\n            # Aggregate daily observables\n            self.aggregator.update(day, self.signals)",
+      "after": "            # Behavior update uses prior-day avg price if available\n            if self.behavior_module is not None and self.aggregator is not None and self.aggregator.daily_records:\n                avg_price_prev_day = self.aggregator.daily_records[-1].get(\"avg_price\", avg_price_prev_day)\n                self.behavior_module.set_prev_avg_price(avg_price_prev_day)\n\n            # 1) Decide behavior first (today's wearing)\n            self.behavior_module.update(day, self.signals)\n\n            # 2) Then mobility/enforcement uses today's decisions\n            self.mobility_module.update(day, self.signals)\n\n            # 3) Retailer supply and transactions\n            self.retail_module.update(day, self.signals)\n\n            # 4) Aggregate daily observables (then last_observed_compliance affects next day)\n            self.aggregator.update(day, self.signals)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "            purchase_need = 1 if p.mask_ownership <= 0 else 0\n            new_state = 1 if (decision_score >= threshold and (p.mask_ownership > 0 or purchase_need == 1)) else 0\n\n            if new_state == 1 and purchase_need == 1:\n                purchase_intents.append({\"agent_id\": p.id, \"qty\": 5})\n\n            if new_state != p.mask_use_state:\n                adoption_events.append({\"day\": day, \"agent_id\": p.id, \"from\": p.mask_use_state, \"to\": new_state})\n                p.mask_use_state = new_state\n\n            # Share household masks if needed and available\n            if p.mask_ownership <= 0 and new_state == 1:\n                # Household can allocate one mask if available\n                # Find household\n                for h in self.households:\n                    if p.id in h.members and h.mask_inventory > 0:\n                        h.mask_inventory -= 1\n                        p.mask_ownership += 1\n                        break\n\n            # Reset prompt flag after decision\n            p.prompted_today = False",
+      "after": "            # Determine if person can wear today\n            can_wear = p.mask_ownership > 0\n            if not can_wear:\n                # Try immediate household allocation for today\n                hh = next((h for h in self.households if p.id in h.members), None)\n                if hh and hh.mask_inventory > 0:\n                    hh.mask_inventory -= 1\n                    p.mask_ownership += 1\n                    can_wear = True\n\n            will_wear = (decision_score >= threshold) and can_wear\n\n            if not can_wear and (decision_score >= threshold):\n                # Purchase for future days\n                purchase_intents.append({\"agent_id\": p.id, \"qty\": 5})\n\n            new_state = 1 if will_wear else 0\n            if new_state != p.mask_use_state:\n                adoption_events.append({\"day\": day, \"agent_id\": p.id, \"from\": p.mask_use_state, \"to\": new_state})\n                p.mask_use_state = new_state\n\n            # Clear consumed prompt flag (mobility may set it again after this step)\n            p.prompted_today = False",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Compute compliance per location using current mask_use_state\n        location_compliance = {}\n        for L in self.locations:\n            if not L.attendees:\n                L.compliance_rate_today = 0.0\n            else:\n                wearing = sum(1 for pid in L.attendees if next(a for a in self.agents if a.id == pid).mask_use_state == 1)\n                L.compliance_rate_today = wearing / max(1, len(L.attendees))\n            location_compliance[L.id] = L.compliance_rate_today",
+      "after": "        # Build id maps once (on first call) for O(1) lookups\n        if not hasattr(self, \"id_to_agent\"):\n            self.id_to_agent = {a.id: a for a in self.agents}\n        if not hasattr(self, \"person_to_household\"):\n            mapping = {}\n            for hh in self.params.get(\"households_cache\", self.agents):\n                pass  # placeholder - will be set in Simulation after init\n            # Build here directly\n            mapping = {}\n            for p in self.agents:\n                mapping[p.id] = next((h.id for h in self.params.get(\"_households_obj\", []) if p.id in h.members), None)\n            self.person_to_household = mapping\n\n        # Compute compliance per location using today's mask_use_state\n        location_compliance = {}\n        for L in self.locations:\n            if not L.attendees:\n                L.compliance_rate_today = 0.0\n            else:\n                wearing = sum(1 for pid in L.attendees if self.id_to_agent.get(pid, None) and self.id_to_agent[pid].mask_use_state == 1)\n                L.compliance_rate_today = wearing / max(1, len(L.attendees))\n            location_compliance[L.id] = L.compliance_rate_today",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "            if L.mask_policy == \"required\" and L.attendees:\n                for pid in L.attendees:\n                    person = next(a for a in self.agents if a.id == pid)\n                    if person.mask_use_state == 0:\n                        prob_prompt = clamp(L.enforcement_level * float(self.params.get(\"compliance_sensitivity\", 0.6)), 0.0, 1.0)\n                        if self.rng.random() < prob_prompt:\n                            enforcement_events.append({\"day\": day, \"location_id\": L.id, \"agent_id\": pid, \"event\": \"prompt_or_fine\"})\n                            # Apply fine with a smaller probability equal to enforcement level\n                            if self.rng.random() < L.enforcement_level:\n                                # Deduct fine from household or person budget\n                                # Note: Person does not have budget; households have budget\n                                enforcement_events[-1][\"fine\"] = L.fine_amount\n                            # Mark that person was prompted today\n                            person.prompted_today = True",
+      "after": "            if L.mask_policy == \"required\" and L.attendees:\n                for pid in L.attendees:\n                    person = self.id_to_agent.get(pid)\n                    if not person or person.mask_use_state == 1:\n                        continue\n                    prob_prompt = clamp(L.enforcement_level * float(self.params.get(\"compliance_sensitivity\", 0.6)), 0.0, 1.0)\n                    if self.rng.random() < prob_prompt:\n                        evt = {\"day\": day, \"location_id\": L.id, \"agent_id\": pid, \"event\": \"prompt_or_fine\"}\n                        # Fine with probability equal to enforcement level\n                        if self.rng.random() < L.enforcement_level and L.fine_amount > 0:\n                            # Deduct from household budget\n                            hh_id = next((h.id for h in self.params.get(\"_households_obj\", []) if pid in h.members), None)\n                            hh = next((h for h in self.params.get(\"_households_obj\", []) if h.id == hh_id), None)\n                            if hh:\n                                hh.budget = max(0.0, hh.budget - L.fine_amount)\n                            evt[\"fine\"] = L.fine_amount\n                        enforcement_events.append(evt)\n                        # Mark for next-day behavior boost\n                        person.prompted_today = True",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Emit signals\n        signals.setdefault(\"location\", {})\n        signals[\"location\"][\"compliance_rates\"] = location_compliance\n        signals.setdefault(\"enforcement\", {})\n        signals[\"enforcement\"][\"events\"] = enforcement_events\n        signals[\"contacts\"] = contacts\n\n        # Update persons' last observed compliance to feed behavior module\n        for p in self.agents:\n            # If assigned to a location, use that location's compliance rate; else previous value\n            obs = 0.0\n            # Find first location where p attended\n            loc_ids = [L.id for L in self.locations if p.id in L.attendees]\n            if loc_ids:\n                obs = location_compliance.get(loc_ids[0], 0.0)\n            p.last_observed_compliance = obs\n            p.prompted_today = getattr(p, \"prompted_today\", False)",
+      "after": "        # Emit signals\n        signals.setdefault(\"location\", {})\n        signals[\"location\"][\"compliance_rates\"] = location_compliance\n        signals.setdefault(\"enforcement\", {})\n        signals[\"enforcement\"][\"events\"] = enforcement_events\n        signals[\"contacts\"] = contacts\n\n        # Update last_observed_compliance for next day behavior\n        person_loc_map = {}\n        for L in self.locations:\n            for pid in L.attendees:\n                person_loc_map[pid] = L.id\n        for p in self.agents:\n            loc_id = person_loc_map.get(p.id, None)\n            if loc_id is not None:\n                p.last_observed_compliance = location_compliance.get(loc_id, 0.0)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Create specified counts by type\n        for loc_type, count in [\n            (\"workplaces\", int(self.params.get(\"locations_count_workplaces\", 100))),\n            (\"schools\", int(self.params.get(\"locations_count_schools\", 30))),\n            (\"retail\", int(self.params.get(\"locations_count_retail\", 80))),\n            (\"transit\", int(self.params.get(\"locations_count_transit\", 10))),\n            (\"parks\", int(self.params.get(\"locations_count_parks\", 20))),\n        ]:\n            for _ in range(count):\n                capacity = max(5, int(self.rng.normal(capacity_mean, max(1, capacity_sd))))\n                zone = zones[self.rng.integers(0, len(zones))]\n                L = Location(\n                    id=loc_id_counter, type=loc_type, capacity=capacity, mask_policy=\"recommended\",\n                    enforcement_level=default_enforcement, fine_amount=default_fine, open_hours=open_hours, zone=zone\n                )\n                loc_id_counter += 1\n                self.locations.append(L)",
+      "after": "        # Honor locations_count_by_type when present\n        type_counts = self.params.get(\"locations_count_by_type\", None)\n        if type_counts is None:\n            type_counts = {\n                \"workplaces\": int(self.params.get(\"locations_count_workplaces\", 100)),\n                \"schools\": int(self.params.get(\"locations_count_schools\", 30)),\n                \"retail\": int(self.params.get(\"locations_count_retail\", 80)),\n                \"transit\": int(self.params.get(\"locations_count_transit\", 10)),\n                \"parks\": int(self.params.get(\"locations_count_parks\", 20)),\n            }\n        for loc_type, count in type_counts.items():\n            for _ in range(int(count)):\n                capacity = max(5, int(self.rng.normal(capacity_mean, max(1, capacity_sd))))\n                zone = zones[self.rng.integers(0, len(zones))]\n                L = Location(\n                    id=loc_id_counter, type=loc_type, capacity=capacity, mask_policy=\"recommended\",\n                    enforcement_level=default_enforcement, fine_amount=default_fine, open_hours=open_hours, zone=zone\n                )\n                loc_id_counter += 1\n                self.locations.append(L)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Households: approximate size distribution\n        # Use distribution [1,2,3,4,5+] with weights as in plan\n        hh_size_probs = [0.25, 0.35, 0.25, 0.1, 0.05]\n        hh_sizes = []\n        remaining = N\n        while remaining > 0:\n            size_cat = self.rng.choice([1, 2, 3, 4, 5], p=hh_size_probs)\n            size = size_cat if size_cat < 5 else 5\n            size = min(size, remaining)\n            hh_sizes.append(size)\n            remaining -= size\n        # Create households\n        for hid, size in enumerate(hh_sizes):\n            ses_quintile = self.rng.integers(1, 6)  # 1-5\n            # Budget scale by SES: approximate mapping\n            budget_scale_by_ses = [0.8, 1.0, 1.2, 1.5, 2.0]\n            scale = budget_scale_by_ses[ses_quintile - 1]\n            base_budget = 2000.0\n            budget = base_budget * scale\n            mask_inventory = max(0, int(self.rng.normal(0.5, 1.0)))\n            home_zone = zones[self.rng.integers(0, len(zones))]\n            hh = Household(id=hid, members=[], budget=budget, mask_inventory=mask_inventory, household_norms=clamp(self.rng.normal(0.4, 0.2), 0.0, 1.0), home_location=home_zone)\n            self.households.append(hh)\n\n        # Assign people to households\n        person_id = 0\n        for hh in self.households:\n            for _ in range(len(hh.members), len(hh.members) + int(0)):  # placeholder; not used\n                pass\n            # fill hh with up to its intended size from sizes list recorded earlier\n            # But sizes are implicit in creation; we appended households exactly to sizes. So add 'size' new members.\n            pass\n\n        # We must allocate N persons across households using hh_sizes\n        # We'll re-create households again to ensure exact N assignment\n        self.households = []",
+      "after": "        # Households: generate sizes and create once\n        hh_size_probs = [0.25, 0.35, 0.25, 0.1, 0.05]\n        hh_sizes = []\n        remaining = N\n        while remaining > 0:\n            size_cat = self.rng.choice([1, 2, 3, 4, 5], p=hh_size_probs)\n            size = size_cat if size_cat < 5 else 5\n            size = min(size, remaining)\n            hh_sizes.append(size)\n            remaining -= size\n\n        # Build member indices and households with SES\n        self.households = []\n        pid_counter = 0\n        for hid, size in enumerate(hh_sizes):\n            members = list(range(pid_counter, pid_counter + size))\n            pid_counter += size\n            hh_ses = int(self.rng.integers(1, 6))\n            budget_scale_by_ses = [0.8, 1.0, 1.2, 1.5, 2.0]\n            scale = budget_scale_by_ses[hh_ses - 1]\n            base_budget = 2000.0\n            budget = base_budget * scale\n            mask_inventory = max(0, int(self.rng.normal(0.5, 1.0)))\n            home_zone = zones[self.rng.integers(0, len(zones))]\n            hh = Household(id=hid, members=members, budget=budget, mask_inventory=mask_inventory, household_norms=clamp(self.rng.normal(0.4, 0.2), 0.0, 1.0), home_location=home_zone)\n            hh._ses = hh_ses  # store for initializing persons\n            self.households.append(hh)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "            ses = self.rng.integers(1, 6)\n            income = max(0.0, self.rng.normal(income_means[ses - 1], income_sds[ses - 1]))\n            # ...\n            p = Person(\n                id=pid, age=age, gender=gender, household_id=hh_id, income=float(income),\n                socioeconomic_status=ses, risk_perception=rp, trust_in_authorities=trust,\n                # ...\n            )",
+      "after": "            # Use household SES for coherence\n            hh = next((h for h in self.households if h.id == hh_id), None)\n            ses = getattr(hh, \"_ses\", int(self.rng.integers(1, 6)))\n            income = max(0.0, self.rng.normal(income_means[ses - 1], income_sds[ses - 1]))\n            p = Person(\n                id=pid, age=age, gender=gender, household_id=hh_id, income=float(income),\n                socioeconomic_status=ses, risk_perception=rp, trust_in_authorities=trust,\n                # ...\n            )",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        rec = {\n            \"day\": day,\n            \"adoption_rate\": adoption_rate,\n            \"churn_rate\": churn_rate,\n            \"adoption_disparity_index\": adoption_disparity_index,\n            \"location_compliance_rate\": location_compliance_rate,\n            \"avg_price\": avg_price,\n        }\n        self.daily_records.append(rec)",
+      "after": "        rec = {\n            \"day\": day,\n            \"adoption_rate\": adoption_rate,\n            \"churn_rate\": churn_rate,\n            \"adoption_disparity_index\": adoption_disparity_index,\n            \"location_compliance_rate\": location_compliance_rate,\n            \"avg_price\": avg_price,\n        }\n        self.daily_records.append(rec)\n\n    def summarize_metrics(self) -> Dict[str, Any]:\n        df = self.to_dataframe()\n        peak_adoption = float(df[\"adoption_rate\"].max()) if not df.empty else 0.0\n        mandate_end = int(self.params.get(\"mandate_end_day\", 90))\n        post = df[df[\"day\"] > mandate_end]\n        sustained_adoption = float(post[\"adoption_rate\"].mean()) if not post.empty else None\n        return {\"peak_adoption\": peak_adoption, \"sustained_adoption_post_mandate\": sustained_adoption}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Metric: time_to_threshold\n        if \"time_to_threshold\" in metrics_to_compute:\n            threshold = float(self.params.get(\"adoption_threshold_target\", 0.7))\n            df = self.results_df\n            over = df[df[\"adoption_rate\"] >= threshold]\n            ttt = int(over[\"day\"].iloc[0]) if not over.empty else None\n            metrics[\"time_to_threshold\"] = ttt",
+      "after": "        # Metric: time_to_threshold\n        if \"time_to_threshold\" in metrics_to_compute:\n            threshold = float(self.params.get(\"adoption_threshold_target\", 0.7))\n            df = self.results_df\n            over = df[df[\"adoption_rate\"] >= threshold]\n            ttt = int(over[\"day\"].iloc[0]) if not over.empty else None\n            metrics[\"time_to_threshold\"] = ttt\n\n        # Additional metrics\n        summary = self.aggregator.summarize_metrics()\n        metrics.update(summary)",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The current code appears to be a baseline implementation without prior diffs, but the structure suggests some incremental assembly. The main negative impacts are logical ordering and gating oversights. Positive aspects include modularization and an embedded plan that mostly drives parameters.",
+    "positive_impacts": [
+      "Clear modular separation (policy, info, mobility, retail, behavior, aggregator).",
+      "Use of RNG with seed consistency across modules.",
+      "Inclusion of social network and multiple interaction channels."
+    ],
+    "negative_impacts": [
+      "Daily update order misaligns decisions and outcomes.",
+      "Resource constraints are not respected in same-day adoption.",
+      "Performance issues from repeated linear searches.",
+      "Some parameters from the model plan are ignored."
+    ],
+    "suggestions": [
+      "Reorder daily loop and treat observation/enforcement as lagged signals for next-day behavior.",
+      "Gate mask wearing on inventory or household allocation; otherwise generate purchase intent.",
+      "Introduce and reuse id maps for O(1) lookups in high-frequency loops.",
+      "Honor locations_count_by_type and compute missing metrics to match plan."
+    ]
+  }
+}

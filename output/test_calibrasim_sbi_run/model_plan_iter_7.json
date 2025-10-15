@@ -1,0 +1,1017 @@
+{
+  "model_type": "agent_based",
+  "description": "Network-based agent simulation of social behavior adoption influenced by peer effects, media, and policy incentives. Agents interact on a small-world/assortative network. Adoption decisions follow a utility-based probabilistic rule with inertia and memory.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "group_id",
+        "adoption_state",
+        "last_adoption_state",
+        "adoption_probability",
+        "private_benefit",
+        "cost",
+        "stubborn",
+        "memory_utility",
+        "degree",
+        "neighbors"
+      ],
+      "behaviors": [
+        "sample_contacts",
+        "compute_social_pressure",
+        "update_adoption_probability",
+        "adopt_decision"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "population_size": 5000,
+          "initial_adoption_rate": 0.05,
+          "group_count": 3,
+          "group_size_variance": 0.1,
+          "stubborn_fraction": 0.1,
+          "private_benefit_mean": 0.3,
+          "private_benefit_std": 0.1,
+          "cost_mean": 0.25,
+          "cost_std": 0.1
+        }
+      }
+    },
+    {
+      "name": "PolicyAgency",
+      "attributes": [
+        "policy_start_day",
+        "policy_end_day",
+        "policy_incentive_amount",
+        "base_media_intensity",
+        "media_decay_rate",
+        "media_shock_day",
+        "media_shock_magnitude",
+        "policy_targeting_bias"
+      ],
+      "behaviors": [
+        "broadcast_policy_signal",
+        "broadcast_media_signal"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_start_day": 10,
+          "policy_end_day": 60,
+          "policy_incentive_amount": 0.5,
+          "base_media_intensity": 0.2,
+          "media_decay_rate": 0.01,
+          "media_shock_day": 0,
+          "media_shock_magnitude": 0.0,
+          "policy_targeting_bias": 0.0
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the social contact network with small-world structure and configurable assortativity (homophily) by group.",
+      "inputs": [],
+      "outputs": [
+        "network.graph",
+        "agent.neighbors",
+        "agent.degree",
+        "agent.group_id"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  set rng with random_seed\n  assign group_id to each agent to meet group_count and group_size_variance\n  if network_type == 'watts_strogatz':\n    graph = watts_strogatz(N=population_size, k=avg_degree, p=rewiring_prob)\n  else if network_type == 'erdos_renyi':\n    p_edge = avg_degree / (population_size - 1)\n    graph = erdos_renyi(N=population_size, p=p_edge)\n  for each edge (i,j) in graph:\n    if group_i != group_j and rand() < assortativity:\n      attempt to rewire: find k in same group as i not connected to i; replace edge (i,j) with (i,k)\n  assign tie_strength ~ LogNormal(mean=log(tie_strength_mean^2/sqrt(tie_strength_std^2+tie_strength_mean^2)), sd=sqrt(log(1+(tie_strength_std^2/tie_strength_mean^2)))) to each edge\n  store neighbors and degrees for each agent",
+        "notes": [
+          "Assortativity increases same-group edges via simple local rewiring.",
+          "Tie strength affects influence weighting in SocialInteraction."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "networkx",
+        "rng"
+      ],
+      "module_parameters": [
+        "network_type",
+        "avg_degree",
+        "rewiring_prob",
+        "assortativity",
+        "group_count",
+        "group_size_variance",
+        "tie_strength_mean",
+        "tie_strength_std"
+      ]
+    },
+    {
+      "name": "PolicyBroadcast",
+      "description": "Generates daily exogenous signals for policy incentives and media intensity, with decay and optional shock.",
+      "inputs": [
+        "time.day",
+        "agent.group_id"
+      ],
+      "outputs": [
+        "signal.policy_incentive_by_agent",
+        "signal.media_intensity"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each day t:\n  if t >= policy_start_day and t <= policy_end_day:\n    incentive_base = policy_incentive_amount\n  else:\n    incentive_base = 0\n  for each agent i:\n    bias = policy_targeting_bias if agent.group_id == 0 else -policy_targeting_bias/(max(1, group_count-1))\n    policy_signal[i] = max(0, incentive_base + bias)\n  media = base_media_intensity * exp(-media_decay_rate * t)\n  if media_shock_day > 0 and t == media_shock_day:\n    media = media + media_shock_magnitude\n  signal.media_intensity = max(0, media)\n  signal.policy_incentive_by_agent = policy_signal",
+        "notes": [
+          "Targeting bias redistributes incentives across groups but preserves non-negativity.",
+          "Media shock models sudden news spikes."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "time.day"
+      ],
+      "module_parameters": [
+        "policy_start_day",
+        "policy_end_day",
+        "policy_incentive_amount",
+        "base_media_intensity",
+        "media_decay_rate",
+        "media_shock_day",
+        "media_shock_magnitude",
+        "policy_targeting_bias",
+        "group_count"
+      ]
+    },
+    {
+      "name": "SocialInteraction",
+      "description": "Computes each agent's perceived social pressure based on neighbors' adoption states, tie strengths, homophily weight, and contact sampling.",
+      "inputs": [
+        "network.graph",
+        "agent.neighbors",
+        "agent.adoption_state",
+        "edge.tie_strength",
+        "agent.group_id"
+      ],
+      "outputs": [
+        "signal.social_pressure_by_agent"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  contacts = sample subset of neighbors with probability contact_rate (at least 1 if degree>0)\n  if contacts is empty: social_pressure[i] = 0; continue\n  weight_sum = 0\n  influence_sum = 0\n  for each j in contacts:\n    w = edge.tie_strength(i,j) * (1 + homophily_weight if group_i == group_j else 1)\n    weight_sum += w\n    influence_sum += w * adoption_state[j]\n  neighbor_adoption = influence_sum / max(eps, weight_sum)\n  noise = Normal(0, noise_std)\n  social_pressure[i] = influence_weight * clamp(neighbor_adoption + noise, 0, 1)",
+        "notes": [
+          "Sampling contacts reduces computation and mimics limited daily interactions.",
+          "Homophily upweights same-group signals.",
+          "Clamp ensures valid probability range."
+        ]
+      },
+      "requirements": [
+        "numpy.random",
+        "agent.state"
+      ],
+      "module_parameters": [
+        "influence_weight",
+        "contact_rate",
+        "noise_std",
+        "homophily_weight"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Updates adoption probabilities and states using a utility-based logistic choice with inertia, memory, and bounded probabilities.",
+      "inputs": [
+        "signal.social_pressure_by_agent",
+        "signal.policy_incentive_by_agent",
+        "signal.media_intensity",
+        "agent.private_benefit",
+        "agent.cost",
+        "agent.stubborn",
+        "agent.last_adoption_state",
+        "agent.memory_utility"
+      ],
+      "outputs": [
+        "agent.adoption_state",
+        "agent.adoption_probability",
+        "summary.new_adopters"
+      ],
+      "dependencies": [
+        "SocialInteraction",
+        "PolicyBroadcast"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "new_adopters = 0\nfor each agent i:\n  if stubborn[i] == True:\n    # stubborn bias pushes against adoption\n    base_utility = stubborn_bias\n  else:\n    base_utility = 0\n  social_term = social_salience * social_pressure[i]\n  policy_term = policy_salience * policy_incentive_by_agent[i]\n  media_term = media_salience * media_intensity\n  private_term = benefit_sensitivity * private_benefit[i] - cost_sensitivity * cost[i]\n  past_term = memory_weight * memory_utility[i]\n  statusquo = status_quo_bias * (1 if last_adoption_state[i]==1 else -1)\n  utility = base_utility + social_term + policy_term + media_term + private_term + past_term + statusquo\n  p_raw = 1 / (1 + exp(-utility / max(eps, temperature)))\n  p = clamp(p_raw, min_adoption_prob, max_adoption_prob)\n  # inertia: blend with last state to reduce switching\n  p_effective = inertia * last_adoption_state[i] + (1 - inertia) * p\n  adoption_state[i] = Bernoulli(p_effective)\n  if last_adoption_state[i] == 0 and adoption_state[i] == 1:\n    new_adopters += 1\n  # update memory utility as an exponentially smoothed utility signal\n  memory_utility[i] = 0.8 * memory_utility[i] + 0.2 * utility\n  adoption_probability[i] = p_effective\nreturn new_adopters",
+        "notes": [
+          "Temperature controls stochasticity of choice.",
+          "Inertia reduces churn by anchoring to last state.",
+          "Memory utility captures reinforcement from past evaluations."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "rng"
+      ],
+      "module_parameters": [
+        "temperature",
+        "inertia",
+        "memory_weight",
+        "private_benefit_mean",
+        "private_benefit_std",
+        "cost_mean",
+        "cost_std",
+        "stubborn_fraction",
+        "stubborn_bias",
+        "min_adoption_prob",
+        "max_adoption_prob",
+        "policy_salience",
+        "media_salience",
+        "social_salience",
+        "cost_sensitivity",
+        "benefit_sensitivity",
+        "status_quo_bias"
+      ]
+    },
+    {
+      "name": "Aggregation",
+      "description": "Aggregates daily observables: adoption rate and new adopters; applies optional smoothing and reporting lag.",
+      "inputs": [
+        "agent.adoption_state",
+        "summary.new_adopters",
+        "agent.group_id"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adopters_daily",
+        "observable.adoption_rate_by_group_daily"
+      ],
+      "dependencies": [
+        "AdoptionDecision"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "raw_rate = mean(agent.adoption_state)\nraw_new = summary.new_adopters\n# reporting lag\nstore raw values in buffer\nday_out = t - reporting_lag_days\nif day_out >= 0:\n  series_rate[day_out] = raw_rate\n  series_new[day_out] = raw_new\n  for each group g:\n    series_rate_by_group[g][day_out] = mean(adoption_state where group_id==g)\n# smoothing\nif smoothing_window_days > 1:\n  observable.adoption_rate_daily = moving_average(series_rate, window=smoothing_window_days)\n  observable.new_adopters_daily = moving_average(series_new, window=smoothing_window_days)\n  for each group g:\n    observable.adoption_rate_by_group_daily[g] = moving_average(series_rate_by_group[g], window=smoothing_window_days)\nelse:\n  observable.adoption_rate_daily = series_rate\n  observable.new_adopters_daily = series_new\n  observable.adoption_rate_by_group_daily = series_rate_by_group",
+        "notes": [
+          "Reporting lag shifts availability of daily values.",
+          "Smoothing is simple moving average."
+        ]
+      },
+      "requirements": [
+        "pandas (optional)",
+        "numpy"
+      ],
+      "module_parameters": [
+        "reporting_lag_days",
+        "smoothing_window_days",
+        "group_reporting_enabled"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "watts_strogatz",
+      "bounds": null,
+      "owner_module": "NetworkBuilder",
+      "description": "Graph generator type: 'watts_strogatz' or 'erdos_renyi'",
+      "frozen": true
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 2,
+        "high": 50
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Average degree per node in the contact network",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Rewiring probability for Watts-Strogatz network",
+      "frozen": false
+    },
+    {
+      "key": "assortativity",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Probability of rewiring cross-group edges to same-group edges",
+      "frozen": false
+    },
+    {
+      "key": "group_count",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 10
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of demographic or affinity groups",
+      "frozen": false
+    },
+    {
+      "key": "group_size_variance",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Variance factor controlling group size heterogeneity",
+      "frozen": false
+    },
+    {
+      "key": "tie_strength_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 5.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Mean tie strength used for influence weighting",
+      "frozen": false
+    },
+    {
+      "key": "tie_strength_std",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Standard deviation of tie strengths",
+      "frozen": false
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 200
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Day when policy incentives begin",
+      "frozen": false
+    },
+    {
+      "key": "policy_end_day",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Day when policy incentives end",
+      "frozen": false
+    },
+    {
+      "key": "policy_incentive_amount",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Per-agent incentive contribution to adoption utility",
+      "frozen": false
+    },
+    {
+      "key": "base_media_intensity",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Initial media intensity level at day 0",
+      "frozen": false
+    },
+    {
+      "key": "media_decay_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Exponential decay rate of media intensity per day",
+      "frozen": false
+    },
+    {
+      "key": "media_shock_day",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Day of a one-time media shock (0 disables shock)",
+      "frozen": false
+    },
+    {
+      "key": "media_shock_magnitude",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Additive magnitude of media intensity shock",
+      "frozen": false
+    },
+    {
+      "key": "policy_targeting_bias",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Bias to direct more incentives to group 0 (positive) or away (negative), balanced across groups",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "SocialInteraction",
+      "description": "Scaling factor for social pressure from neighbors",
+      "frozen": false
+    },
+    {
+      "key": "contact_rate",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInteraction",
+      "description": "Probability each neighbor is sampled as a contact per day",
+      "frozen": false
+    },
+    {
+      "key": "noise_std",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInteraction",
+      "description": "Standard deviation of noise added to neighbor adoption fraction",
+      "frozen": false
+    },
+    {
+      "key": "homophily_weight",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInteraction",
+      "description": "Multiplicative upweighting for same-group neighbor influence",
+      "frozen": false
+    },
+    {
+      "key": "temperature",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.01,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Softmax temperature controlling sensitivity to utility",
+      "frozen": false
+    },
+    {
+      "key": "inertia",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.9
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on last adoption state in forming current probability",
+      "frozen": false
+    },
+    {
+      "key": "memory_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight of memory utility in the current utility",
+      "frozen": false
+    },
+    {
+      "key": "private_benefit_mean",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean of private benefit distribution across agents",
+      "frozen": false
+    },
+    {
+      "key": "private_benefit_std",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std of private benefit distribution",
+      "frozen": false
+    },
+    {
+      "key": "cost_mean",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean of perceived cost distribution across agents",
+      "frozen": false
+    },
+    {
+      "key": "cost_std",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std of perceived cost distribution",
+      "frozen": false
+    },
+    {
+      "key": "stubborn_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Fraction of agents resistant to adoption",
+      "frozen": false
+    },
+    {
+      "key": "stubborn_bias",
+      "dtype": "float",
+      "default": -1.0,
+      "bounds": {
+        "low": -3.0,
+        "high": 0.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Utility offset discouraging adoption for stubborn agents",
+      "frozen": false
+    },
+    {
+      "key": "min_adoption_prob",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Lower bound on adoption probability",
+      "frozen": true
+    },
+    {
+      "key": "max_adoption_prob",
+      "dtype": "float",
+      "default": 0.99,
+      "bounds": {
+        "low": 0.8,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Upper bound on adoption probability",
+      "frozen": true
+    },
+    {
+      "key": "policy_salience",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on policy incentive signal in utility",
+      "frozen": false
+    },
+    {
+      "key": "media_salience",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on media intensity in utility",
+      "frozen": false
+    },
+    {
+      "key": "social_salience",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on social pressure in utility",
+      "frozen": false
+    },
+    {
+      "key": "cost_sensitivity",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Sensitivity to costs in utility",
+      "frozen": false
+    },
+    {
+      "key": "benefit_sensitivity",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Sensitivity to benefits in utility",
+      "frozen": false
+    },
+    {
+      "key": "status_quo_bias",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Bias toward maintaining the previous adoption state",
+      "frozen": false
+    },
+    {
+      "key": "reporting_lag_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 14
+      },
+      "owner_module": "Aggregation",
+      "description": "Days to delay reporting of observables",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "Aggregation",
+      "description": "Window size for moving average smoothing",
+      "frozen": false
+    },
+    {
+      "key": "group_reporting_enabled",
+      "dtype": "bool",
+      "default": true,
+      "bounds": null,
+      "owner_module": "Aggregation",
+      "description": "Whether to compute group-level adoption rates",
+      "frozen": true
+    },
+    {
+      "key": "simulation_days",
+      "dtype": "int",
+      "default": 90,
+      "bounds": {
+        "low": 7,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days",
+      "frozen": true
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 500,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of agents in the simulation",
+      "frozen": false
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of agents in the adopted state",
+      "frozen": false
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Seed for all RNG operations",
+      "frozen": true
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 1
+      },
+      "owner_module": "global",
+      "description": "Time step in days",
+      "frozen": true
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "Aggregation",
+      "formula_or_field": "mean(Person.adoption_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adopters_daily",
+      "source_module": "Aggregation",
+      "formula_or_field": "sum(transition(Person.adoption_state, 0->1))",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:new_adopters"
+    },
+    {
+      "id": "observable.adoption_rate_by_group_daily",
+      "source_module": "Aggregation",
+      "formula_or_field": "by_group(Person.group_id, mean(Person.adoption_state))",
+      "frequency": "daily",
+      "aggregation": "by_group(group_id)",
+      "target_data_field": "train_data.csv:adoption_rate_by_group"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false,
+          "evaluation_window": [
+            1,
+            60
+          ]
+        }
+      }
+    },
+    {
+      "name": "MAE_new_adopters",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "evaluation_window": [
+            1,
+            60
+          ]
+        }
+      }
+    },
+    {
+      "name": "TimeToPeakDifference",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeakDifference",
+        "config": {
+          "evaluation_window": [
+            1,
+            60
+          ]
+        }
+      }
+    },
+    {
+      "name": "PeakMagnitudeError",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "evaluation_window": [
+            1,
+            60
+          ],
+          "mode": "magnitude"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "simulation_days": 90,
+    "initial_adoption_rate": 0.05,
+    "network": {
+      "type": "watts_strogatz",
+      "avg_degree": 10,
+      "rewiring_prob": 0.1
+    }
+  },
+  "algorithms": {
+    "NetworkGeneration": "Watts-Strogatz small-world or Erdos-Renyi with post hoc assortative rewiring by group.",
+    "ContactSampling": "Independent Bernoulli sampling of neighbors at rate contact_rate.",
+    "InfluenceAggregation": "Weighted average of neighbors' adoption using tie strengths and homophily weights.",
+    "UtilityChoice": "Logistic choice with temperature; probability bounded and blended with inertia.",
+    "MediaDecay": "Exponential decay with optional discrete shock.",
+    "Smoothing": "Simple moving average over specified window."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and evaluation of model during training window",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "new_adopters",
+        "adoption_rate_by_group"
+      ]
+    },
+    {
+      "name": "test_data.csv",
+      "purpose": "Out-of-sample evaluation during prediction period",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "new_adopters"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.py",
+        "description": "Parameter loading/validation, random seed setup"
+      },
+      {
+        "name": "entities.py",
+        "description": "Agent and policy agency data classes and initialization helpers"
+      },
+      {
+        "name": "network_builder.py",
+        "description": "Implements NetworkBuilder module"
+      },
+      {
+        "name": "policy_broadcast.py",
+        "description": "Implements PolicyBroadcast module"
+      },
+      {
+        "name": "social_interaction.py",
+        "description": "Implements SocialInteraction module"
+      },
+      {
+        "name": "adoption_decision.py",
+        "description": "Implements AdoptionDecision module"
+      },
+      {
+        "name": "aggregation.py",
+        "description": "Implements Aggregation module and observable emission"
+      },
+      {
+        "name": "scheduler.py",
+        "description": "Simulation loop, tick management, dependency ordering"
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric computations (RMSE, MAE, TimeToPeakDifference, PeakError)"
+      },
+      {
+        "name": "io.py",
+        "description": "Data loading for train/test and output writing"
+      }
+    ],
+    "dependencies": [
+      "numpy>=1.22",
+      "pandas>=1.5",
+      "networkx>=3.0",
+      "scipy>=1.9"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 61,
+    "end_day": 90
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "MAE_new_adopters",
+    "TimeToPeakDifference",
+    "PeakMagnitudeError"
+  ]
+}

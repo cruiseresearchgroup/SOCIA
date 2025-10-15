@@ -1,0 +1,232 @@
+{
+  "summary": "The simulation gained substantial new functionality (households, locations, enforcement, media, retailers, richer aggregation), but it currently lacks a working CLI/smoke path, contains a critical network construction bug (ring-lattice wrap-around omission), miscomputes enforcement probability, and does not align output metrics and validation checks with the task specification. Fixing the CLI (Docker-free), repairing the small-world network, aligning metrics/validation, and correcting market/price and compliance calculations are top priorities.",
+  "critical_issues": [
+    {
+      "issue": "No working CLI/smoke path and unconditional call to a no-op main()",
+      "impact": "Automated verification fails with a smoke test error and cannot execute or produce JSON results. Users cannot run the simulation programmatically or via CLI.",
+      "solution": "Implement a real main() with argparse that supports --smoke (Docker-free, tiny run), --input/--output, and --summary-only; remove Docker gating; keep the required unconditional main() call. Expose run_simulation(cfg) for programmatic use.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Small-world network base ring construction omits wrap-around neighbors",
+      "impact": "Many nodes (especially near the end of the node list) end up with lower degree or even degree zero before rewiring, leading to a disconnected/biased network and distorted social influence dynamics.",
+      "solution": "Construct base_edges to include both sides of the ring with wrap-around, ensuring each node has k neighbors. Rewire edges from the i<j canonical pair list to preserve degree.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Enforcement probability computation divides by policy_stringency",
+      "impact": "Higher stringency reduces enforcement probability (opposite of intent), weakening mandate effects and reducing compliance shifts.",
+      "solution": "Multiply, do not divide: eff_prob = clamp(base_enforcement_prob * self.enforcement_level * government.enforcement_resources * government.policy_stringency, 0.0, 1.0).",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Metrics and validation not aligned with spec",
+      "impact": "Evaluation metrics (time_to_70_percent, sustained_adoption_days, adoption_inequality_index, policy_compliance_rate_in_mandated_locations, mask_purchase_rate, supply_stockouts_days) not directly produced; validation criteria not checked.",
+      "solution": "In ObservationAggregator.results(), compute the required summaries and add validation flags (adoption bounds, convergence check, and supply-demand sanity). Add Gini or Theil on quintile rates; aggregate compliance and purchase metrics; rename stockout_days to supply_stockouts_days and use system-wide stockout logic.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Stockout logic triggers when any retailer hits zero inventory",
+      "impact": "Overstates supply stockouts; does not reflect system-wide availability.",
+      "solution": "Flag stockout only when system-wide inventory is zero: stockout = (sum(r.inventory for r in retailers) <= 0).",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Price averaging by transaction is unweighted",
+      "impact": "Bias in daily average price (a single small purchase at high price distorts the mean).",
+      "solution": "Compute quantity-weighted average price for daily and overall averages.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Person fields not aligned with spec naming for locations (home_location_id, work_location_id) and mask state",
+      "impact": "Downstream modules may fail or require dynamic attributes; results harder to interpret versus spec fields.",
+      "solution": "Initialize and maintain Person.home_location_id and Person.work_location_id alongside existing aliases; retain is_adopting but also expose has_mask_on alias if desired.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Social network construction",
+      "current_approach": "Forward-only ring edges with i<j filter; rewiring from that set.",
+      "suggested_approach": "Build canonical undirected edge set covering both clockwise and counterclockwise neighbors with wrap-around; rewire edges from this set (Watts\u2013Strogatz).",
+      "expected_benefit": "Correct degree distribution, improved connectivity, and more realistic diffusion of social influence."
+    },
+    {
+      "aspect": "Policy enforcement dynamics",
+      "current_approach": "Enforcement probability scaled by enforcement_resources divided by policy_stringency.",
+      "suggested_approach": "Multiply probability by both resources and stringency. Optionally add heterogeneity by location type.",
+      "expected_benefit": "Mandates produce stronger and more consistent compliance effects aligned with policy settings."
+    },
+    {
+      "aspect": "Supply and market",
+      "current_approach": "Retail-level stockout detection; unweighted price averages; no cumulative supply sanity check.",
+      "suggested_approach": "System-wide stockout detection, quantity-weighted daily and overall prices, and cumulative supply tracking/validation.",
+      "expected_benefit": "More realistic market dynamics and sanity-checked outcomes per validation criteria."
+    },
+    {
+      "aspect": "Metrics and validation",
+      "current_approach": "No explicit computation of spec metrics and validations.",
+      "suggested_approach": "Compute time_to_70_percent, sustained_adoption_days, peak_adoption_rate, policy_compliance_rate_in_mandated_locations (mean), mask_purchase_rate (mean per-capita), supply_stockouts_days, and adoption inequality index (e.g., Gini). Add adoption bounds and convergence checks.",
+      "expected_benefit": "Direct alignment with task spec; robustness and reproducibility checks."
+    },
+    {
+      "aspect": "Media and messaging effects",
+      "current_approach": "Simple additive updates to risk perception and attitude.",
+      "suggested_approach": "Introduce diminishing returns and saturation (e.g., logistic or bounded update with decay), and heterogeneity by bias/trust segments.",
+      "expected_benefit": "More stable, realistic belief dynamics under frequent messaging."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Implement a real CLI main() with argparse, --smoke, --input, --output, --summary-only; keep unconditional main() call as required.",
+      "reason": "Restores execution and automated testing without Docker; enables controlled runs and programmatic integration.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py (NetworkBuilder.build_network)",
+      "modification": "Rebuild base_edges to include wrap-around neighbors; rewire from canonical i<j pairs.",
+      "reason": "Fixes broken ring lattice causing degree imbalances and potential disconnection.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py (Location.enforce_policy)",
+      "modification": "Change enforcement probability from division to multiplication by policy_stringency.",
+      "reason": "Ensures higher stringency increases enforcement likelihood.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py (ObservationAggregator.record_market/results)",
+      "modification": "Use system-wide stockout detection and quantity-weighted prices; compute summary metrics per spec and rename stockout_days to supply_stockouts_days.",
+      "reason": "Accurate representation of supply constraints and alignment with evaluation metrics.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py (ObservationAggregator.results / Simulation.run)",
+      "modification": "Add validation checks (adoption bounds, convergence, and supply-demand sanity) and cumulative supply tracking.",
+      "reason": "Meets validation_criteria and prevents impossible outcomes.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (Person.__init__ and assignment)",
+      "modification": "Initialize home_location_id and work_location_id in Person; maintain workplace_id as alias; optionally has_mask_on alias for is_adopting.",
+      "reason": "Aligns with spec and prevents late dynamic attribute creation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (ObservationAggregator.results)",
+      "modification": "Compute adoption_inequality_index via Gini on income quintiles and summarize policy compliance and purchase rate.",
+      "reason": "Aligns with evaluation metrics and enables direct reporting.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py (style cleanup)",
+      "modification": "Remove stray pass statements that precede actual code to improve readability.",
+      "reason": "Reduces confusion for readers and tools; no functional change.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "policy_compliance_rate_in_mandated_locations",
+      "current_gap": "Only daily series recorded; no overall metric reported; enforcement probability inverted by stringency.",
+      "suggestion": "Report daily and mean compliance; fix enforcement scaling; optionally calibrate enforcement_level by location type using observed compliance data."
+    },
+    {
+      "metric": "mask_purchase_rate",
+      "current_gap": "Daily per-capita purchases recorded but not summarized; prices unweighted.",
+      "suggestion": "Report mean purchases per-capita over the run; use quantity-weighted price; calibrate purchase rules to reflect income and price elasticity."
+    },
+    {
+      "metric": "adoption_inequality_index",
+      "current_gap": "Daily adoption by income quintile captured but inequality not summarized.",
+      "suggestion": "Compute Gini or Theil over quintile adoption rates per day and report the mean; validate against empirical disparities if available."
+    },
+    {
+      "metric": "sustained_adoption_days and time_to_70_percent",
+      "current_gap": "Not computed.",
+      "suggestion": "Compute first day >= 0.7 and longest consecutive streak >= 0.7 from overall_adoption_rate_over_time."
+    },
+    {
+      "metric": "supply_stockouts_days",
+      "current_gap": "Uses any-retailer-zero heuristic.",
+      "suggestion": "Use system-wide inventory == 0 to indicate true stockout days; optionally track fraction of demand unmet."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement CLI/smoke test main() with argparse and no Docker gating; keep unconditional main() call.",
+    "Fix small-world ring construction to include wrap-around neighbors.",
+    "Correct enforcement probability to multiply by policy_stringency.",
+    "Align metrics and validation with spec (add summaries, rename, and checks).",
+    "Use system-wide stockout logic and quantity-weighted prices.",
+    "Initialize Person.home_location_id and work_location_id; maintain aliases.",
+    "Add cumulative supply tracking and supply-demand sanity validation.",
+    "Remove stray pass statements that precede executable code."
+  ],
+  "additional_comments": "The new modules and richer aggregation move the simulator closer to the task spec. Most remaining work is alignment (metrics/validation), correctness (network and enforcement), and operability (CLI/smoke). The unconditional main() call is a stated system requirement; the CLI can still be implemented within it to satisfy both the sandbox and the smoke test without relying on Docker.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass\n...\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()",
+      "after": "def main(argv=None):\n    import argparse, json, sys\n    ap = argparse.ArgumentParser(description=\"Mask Adoption Dynamics Simulation\")\n    ap.add_argument(\"--input\", \"-i\", help=\"Path to JSON config\")\n    ap.add_argument(\"--output\", \"-o\", help=\"Path to write JSON results (stdout if omitted)\")\n    ap.add_argument(\"--smoke\", action=\"store_true\", help=\"Run a tiny smoke test (no Docker)\")\n    ap.add_argument(\"--summary-only\", action=\"store_true\", help=\"Emit only summary metrics\")\n    args = ap.parse_args(argv)\n\n    cfg = {}\n    if args.input:\n        with open(args.input, \"r\", encoding=\"utf-8\") as f:\n            cfg = json.load(f)\n    if args.smoke:\n        cfg.setdefault(\"population_size\", 200)\n        cfg.setdefault(\"sim_days\", 5)\n        cfg.setdefault(\"seed\", 42)\n\n    sim = Simulation(cfg)\n    res = sim.get_result_json()\n\n    out = res if not args.summary_only else {\n        \"metadata\": res.get(\"metadata\", {}),\n        \"summary\": {\n            \"overall_adoption_rate\": res[\"results\"].get(\"overall_adoption_rate_over_time\", []),\n            \"time_to_70_percent\": res[\"results\"].get(\"time_to_70_percent\"),\n            \"peak_adoption_rate\": res[\"results\"].get(\"peak_adoption_rate\"),\n            \"sustained_adoption_days\": res[\"results\"].get(\"sustained_adoption_days\"),\n            \"adoption_inequality_index\": res[\"results\"].get(\"adoption_inequality_index\"),\n            \"policy_compliance_rate_in_mandated_locations\": res[\"results\"].get(\"policy_compliance_rate_in_mandated_locations\"),\n            \"mask_purchase_rate\": res[\"results\"].get(\"mask_purchase_rate\"),\n            \"supply_stockouts_days\": res[\"results\"].get(\"supply_stockouts_days\")\n        }\n    }\n    s = json.dumps(out)\n    if args.output:\n        with open(args.output, \"w\", encoding=\"utf-8\") as f:\n            f.write(s)\n    else:\n        sys.stdout.write(s)\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py (NetworkBuilder.build_network)",
+      "before": "base_edges = [(i, (i + offset) % n) for i in range(n) for offset in range(1, k // 2 + 1) if i < (i + offset) % n]\nfor (i, j) in base_edges:\n    if rng.random() < p_rewire:\n        ...",
+      "after": "base_edges = []\nfor i in range(n):\n    for offset in range(1, k // 2 + 1):\n        j = (i + offset) % n\n        a, b = (i, j) if i < j else (j, i)\n        if a != b and (a, b) not in base_edges:\n            base_edges.append((a, b))\n# Add base edges\nfor (i, j) in base_edges:\n    G.add_edge(i, j, weight=1.0, is_strong=False)\n# Rewire with probability p_rewire (Watts\u2013Strogatz: rewire the endpoint j of each (i,j) edge)\nfor (i, j) in base_edges:\n    if rng.random() < p_rewire:\n        # remove (i,j)\n        G.adj[i] = [(nb, w2, s2) for (nb, w2, s2) in G.adj[i] if nb != j]\n        G.adj[j] = [(nb, w2, s2) for (nb, w2, s2) in G.adj[j] if nb != i]\n        excluded = {i} | {nb for nb, _, _ in G.neighbors(i)}\n        candidates = [u for u in range(n) if u not in excluded]\n        if candidates:\n            u = rng.choice(candidates)\n            G.add_edge(i, u, weight=1.0, is_strong=False)\n        else:\n            G.add_edge(i, j, weight=1.0, is_strong=False)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py (Location.enforce_policy)",
+      "before": "eff_prob = clamp(base_enforcement_prob * self.enforcement_level * (government.enforcement_resources / max(1e-6, government.policy_stringency)), 0.0, 1.0)",
+      "after": "eff_prob = clamp(base_enforcement_prob * self.enforcement_level * government.enforcement_resources * government.policy_stringency, 0.0, 1.0)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py (ObservationAggregator.record_market)",
+      "before": "stockout = any(r.inventory <= 0 for r in retailers)\n...\navg_price_today = (price_sum / float(count_sales)) if count_sales > 0 else (sum(r.current_price for r in retailers) / float(len(retailers)) if retailers else 0.0)",
+      "after": "stockout = (sum(r.inventory for r in retailers) <= 0)\n...\ndenom_qty = sum(qty for _, qty in purchases_today)\navg_price_today = ( (sum(price * qty for price, qty in purchases_today) / denom_qty) if denom_qty > 0 else (sum(r.current_price for r in retailers) / float(len(retailers)) if retailers else 0.0) )",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py (ObservationAggregator.results)",
+      "before": "return {\n  \"overall_adoption_rate_over_time\": smoothed_overall,\n  ...,\n  \"stockout_days\": stockout_days,\n  ...\n}",
+      "after": "def _gini(vals):\n    x = [max(0.0, float(v)) for v in vals]\n    n = len(x)\n    if n == 0:\n        return 0.0\n    x_sorted = sorted(x)\n    cum = 0.0\n    for i, v in enumerate(x_sorted, 1):\n        cum += i * v\n    s = sum(x_sorted)\n    return 0.0 if s == 0 else (2 * cum) / (n * s) - (n + 1) / n\n\noverall = smoothed_overall\npeak_adoption_rate = max(overall) if overall else 0.0\n# time_to_70 and sustained\nthr = 0.7\ntime_to_70 = next((i for i, v in enumerate(overall) if v >= thr), None)\n# longest streak >= thr\nlongest = 0\ncur = 0\nfor v in overall:\n    if v >= thr:\n        cur += 1\n        longest = max(longest, cur)\n    else:\n        cur = 0\nsustained_days = longest\n\n# inequality index from income quintile daily data\ndaily_ginis = []\nfor q in self.adoption_by_income_quintile_daily:\n    vals = [q.get(f\"Q{k}\", 0.0) for k in range(1, 6)]\n    daily_ginis.append(_gini(vals))\nadoption_inequality_index = sum(daily_ginis) / len(daily_ginis) if daily_ginis else 0.0\n\npolicy_compliance_rate = sum(self.daily_compliance_mandated) / len(self.daily_compliance_mandated) if self.daily_compliance_mandated else 0.0\nmask_purchase_rate = sum(self.daily_purchases_per_capita) / len(self.daily_purchases_per_capita) if self.daily_purchases_per_capita else 0.0\n\nreturn {\n  \"overall_adoption_rate_over_time\": overall,\n  ...,\n  \"peak_adoption_rate\": peak_adoption_rate,\n  \"time_to_70_percent\": time_to_70,\n  \"sustained_adoption_days\": sustained_days,\n  \"adoption_inequality_index\": adoption_inequality_index,\n  \"policy_compliance_rate_in_mandated_locations\": policy_compliance_rate,\n  \"mask_purchase_rate\": mask_purchase_rate,\n  \"supply_stockouts_days\": stockout_days,\n  ...\n}",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py (Simulation.run)",
+      "before": "for r in self.retailers:\n    r.restock()\n    r.set_price(self.rng)\n...\nself.result = {\n  \"metadata\": self.metadata,\n  \"results\": self.aggregator.results()\n}",
+      "after": "# track cumulative supply for sanity checks\nif day == 0:\n    cumulative_supply = sum(r.inventory for r in self.retailers)\nelse:\n    cumulative_supply += sum(r.restock_rate for r in self.retailers)\n...\nres = self.aggregator.results()\n# supply-demand sanity\nif self.aggregator.total_masks_bought > cumulative_supply:\n    # optional: log or cap\n    pass\nself.result = {\n  \"metadata\": self.metadata,\n  \"results\": res\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py (Person.__init__)",
+      "before": "self.household_id = household_id\nself.workplace_id = workplace_id\n...",
+      "after": "self.household_id = household_id\nself.workplace_id = workplace_id  # alias for backward compatibility\nself.work_location_id = workplace_id\nself.home_location_id = None\n...",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest update substantially expanded the model scope (households, media, enforcement, retailers) and added many attributes and processes. However, it also regressed the CLI/smoke functionality, introduced a critical network construction bug, and left metrics/validation misaligned with the task spec.",
+    "positive_impacts": [
+      "Expanded entities and processes: Government, Location, Retailer, MediaChannel, Household.",
+      "Richer adoption dynamics including habit/fatigue and messaging effects.",
+      "Aggregator now collects more detailed series (compliance, prices, purchases, quintiles)."
+    ],
+    "negative_impacts": [
+      "CLI removed and replaced with a no-op main(), blocking smoke tests and programmatic execution.",
+      "Small-world base ring lattice incorrectly constructed, causing degree deficits and potential disconnectivity.",
+      "Enforcement probability inverted with respect to stringency.",
+      "Metrics and validations required by spec not computed; stockout logic and price averages inaccurate."
+    ],
+    "suggestions": [
+      "Restore a proper CLI/smoke path and keep unconditional main() call to satisfy sandbox requirements.",
+      "Fix ring-lattice wrap-around and rewire logic per Watts\u2013Strogatz.",
+      "Correct enforcement scaling to multiply by stringency.",
+      "Align aggregator outputs to spec, add validation checks, and correct stockout/pricing computation.",
+      "Initialize Person location fields explicitly and standardize naming."
+    ]
+  }
+}
