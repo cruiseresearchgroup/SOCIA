@@ -1,0 +1,225 @@
+{
+  "summary": "The current codebase includes useful building blocks (agents, market, media, policy, network) but is missing the core simulation loop and metrics computation. Several functions are partially implemented or placeholders, and key behaviors required by the specification (daily step, policy/media integration, disease transmission, and validation) are absent. A major O(n^2) percentile bug, incomplete SEIR dynamics, and lack of validation/metrics block meaningful results. The recent changes improved parameter mapping, added disease-related fields, and incorporated fines into decision utility, but inadvertently removed the step/run/results logic. The next iteration should prioritize restoring a runnable loop, fixing percentile ranking, implementing SEIR and metrics, enforcing validation, and aligning adoption decisions with the provided logit coefficients.",
+  "critical_issues": [
+    {
+      "issue": "Missing simulation loop: no step(), run(), or results() and main() is a stub",
+      "impact": "Prevents the simulation from running and producing any metrics; verification fails.",
+      "solution": "Implement Simulation.step() for daily dynamics (policy/media influence, purchasing, wearing, disease SEIR update, enforcement, market restock/price) and Simulation.run() to iterate for time_horizon_days with early stopping. Implement Simulation.results() to compute required metrics and call it from main().",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "SEIR disease model initialized but never advanced",
+      "impact": "Cumulative infections, cases averted, and mask-transmission effects cannot be computed; invalidates epidemiological outputs.",
+      "solution": "In step(), implement SEIR transitions: contacts between infected and susceptible peers on the social network, mask-modulated transmission probability, incubation to infectious, and recovery after infectious_period; accumulate infections.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "O(n^2) and incorrect percentile computation in _init_people",
+      "impact": "Performance degradation for larger populations (n=10k) and incorrect wealth scaling for cost pressure, biasing adoption and equity metrics.",
+      "solution": "Replace list.index-based ranking with a precomputed average-rank map that handles duplicates in O(n log n), then compute percentiles from ranks.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Metrics and validation not computed",
+      "impact": "Verification criteria (adoption bounds, non-negative stock, stability) and critical outputs (adoption rates, equity gap, supply-demand ratio, misinformation exposure, policy effect size, cases averted) are missing.",
+      "solution": "Track requested vs. sold masks, misinformation exposure, adoption time series, enforcement checks/fines; compute metrics per spec and implement validation checks each step and at end.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Entity and attribute misalignment with spec",
+      "impact": "Harder to compute location- and policy-specific metrics; risks diverging from intended model behaviors (e.g., enforcement variance by location).",
+      "solution": "Either: (a) explicitly map current classes to spec entities and ensure functionally equivalent attributes/behaviors; or (b) rename/extend classes to match spec (Person, Location with enforcement variance, PolicyMaker, InformationChannel, MaskSupplier). Implement missing attributes minimally needed for metrics (e.g., last_wore_mask_day, risk_group proxies, location types).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "MaskMarket.sell uses assert to enforce inventory constraint",
+      "impact": "Asserts can be disabled at runtime; negative stock could slip through and violate validation.",
+      "solution": "Replace assert with a hard clamp and explicit invariant enforcement; record stockout events safely.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "generate_small_world potential duplicate edges and inefficiency",
+      "impact": "Extra work due to duplicate additions and later deduplication; subtle neighbor asymmetries possible before final dedupe.",
+      "solution": "Use sets during construction; check membership before adding; convert to sorted lists at end.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Adoption decision function alignment",
+      "current_approach": "Heuristic weighted utility with social/risk/policy/cost/habit/fatigue; ignores provided logit coefficients in parameters.",
+      "suggested_approach": "Implement the logistic adoption model from parameters: adoption_logit_intercept + beta_peer_prev*peer_prev + beta_media_signal*media_signal + beta_risk*risk_perception + beta_mandate*mandate + beta_enforcement*enforcement + beta_price*price + beta_availability*availability + beta_income*income_norm, then apply sigmoid.",
+      "expected_benefit": "Better alignment with spec; easier calibration to real-world data and policy counterfactuals."
+    },
+    {
+      "aspect": "Locations and enforcement variance",
+      "current_approach": "No explicit locations; a single enforcement_strength scalar.",
+      "suggested_approach": "Introduce minimal Location instances (transit, workplace, retail) with enforcement_level drawn from a distribution with location_enforcement_variance. Track adoption_by_location_type and compliance_in_mandated_locations.",
+      "expected_benefit": "Enables location-specific metrics, more realistic enforcement effects."
+    },
+    {
+      "aspect": "Supply distribution priority",
+      "current_approach": "Single market restocks; no policy-driven distribution or priority rules.",
+      "suggested_approach": "Implement PolicyAuthority-driven distribution of supply_distribution_rate per day using supply_distribution_priority (e.g., risk-based or income-based). Update masks_distributed_cum.",
+      "expected_benefit": "Captures policy interventions and equity effects; improves supply-demand realism."
+    },
+    {
+      "aspect": "Misinformation modeling",
+      "current_approach": "Net media effect computed but not tracked as an exposure metric.",
+      "suggested_approach": "Track daily per-person exposure to misinformation (e.g., negative component of media effect weighted by info_exposure) and compute misinformation_exposure_rate.",
+      "expected_benefit": "Supports evaluation of information campaigns and misinformation impact."
+    },
+    {
+      "aspect": "Consistent wearers metric",
+      "current_approach": "Not computed.",
+      "suggested_approach": "Track a rolling window (memory_window_days) of wearing per agent with a bitset or compact deque and compute fraction with all-ones over window.",
+      "expected_benefit": "Improves behavior stability assessment and adherence analysis."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Add Simulation.run(), Simulation.step(), Simulation.results(), and early stopping; call from main().",
+      "reason": "Core loop missing; necessary for functionality and metrics.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Fix percentile computation in _init_people to O(n log n) with duplicate handling.",
+      "reason": "Prevents performance issues and incorrect wealth scaling.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement SEIR disease transitions with mask-modulated transmission and compute cumulative_infections.",
+      "reason": "Enables epidemiological metrics and cases_averted.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Replace assert in MaskMarket.sell with hard clamp and add validation checks.",
+      "reason": "Ensure no negative stock invariant even when assertions are disabled; meet validation criteria.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use sets in generate_small_world during construction to avoid duplicates and improve efficiency.",
+      "reason": "Cleaner, faster graph construction; fewer post-processing fixes.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement adoption decision using adoption_logit_* parameters; keep heuristic as fallback.",
+      "reason": "Align with spec and facilitate empirical calibration.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement validation criteria after each step (adoption bounds, no_negative_stock) and stability_check on 7-day MA for final 14 days.",
+      "reason": "Satisfy validation requirements and enable early termination when stable.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement policy-driven mask distribution and track masks_distributed_cum and policy_cost.",
+      "reason": "Reflect mask allocation strategies and budget use per spec; improves supply-demand ratio realism.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Populate main() to run the simulation, print or save results as JSON/CSV as needed.",
+      "reason": "Enable execution in sandbox.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "overall_adoption_rate / time_to_50_percent_adoption",
+      "current_gap": "No results; adoption driven by heuristic utility may not match observed uptake under mandates.",
+      "suggestion": "Use adoption_logit coefficients, calibrate intercept and mandate/enforcement betas to match empirical adoption curves from historical mask mandates."
+    },
+    {
+      "metric": "equity_gap_in_adoption",
+      "current_gap": "Wealth scaling heuristic may overstate cost pressure; percentile bug worsens bias.",
+      "suggestion": "Fix percentile calculation and tune socioeconomic_disparity_factor using observed income-based adoption gaps; consider subsidies for low-income groups."
+    },
+    {
+      "metric": "cumulative_infections / cases_averted",
+      "current_gap": "Not computed; SEIR missing.",
+      "suggestion": "Implement SEIR and run counterfactual (no masks or zero effectiveness) using same seed/contact structure to estimate cases averted."
+    },
+    {
+      "metric": "adoption_by_location_type / compliance_in_mandated_locations",
+      "current_gap": "No location structure; cannot compute.",
+      "suggestion": "Add minimal location types with enforcement variance; compute adoption within each and track mandate compliance in those with mask_policy=True."
+    },
+    {
+      "metric": "misinformation_exposure_rate",
+      "current_gap": "Not tracked.",
+      "suggestion": "Record daily exposure = max(0, -net_media_effect) * info_exposure per person; average daily and over time."
+    }
+  ],
+  "prioritized_actions": [
+    "Restore a runnable simulation: implement Simulation.step(), Simulation.run(), Simulation.results(), and call from main().",
+    "Implement SEIR disease transitions with mask-modulated transmission; compute cumulative_infections.",
+    "Fix percentile computation to O(n log n) with duplicate handling; integrate socioeconomic_disparity_factor cleanly.",
+    "Implement metrics per spec (overall adoption, consistent wearers, time to 50%, equity gap, supply-demand ratio, misinformation exposure, policy effect size); add validation checks including stability_check.",
+    "Introduce minimal location structure and enforcement variance to support location-specific metrics.",
+    "Replace assert in MaskMarket.sell with hard clamp; track masks_sold_daily, masks_distributed_cum, and fines_collected.",
+    "Optionally switch adoption decision to parameterized logistic model using adoption_logit_* coefficients for better calibration."
+  ],
+  "additional_comments": "The recent iteration makes strong progress in parameter mapping and adding economic/penalty terms to the utility. However, the removal of the step/run/results logic is a regression that prevents any execution. Reintroducing the loop and wiring together policy, media, market, and disease modules will unblock verification. Keep the direct call to main() at file end, as required by the sandbox.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def _init_people(self) -> None:\n    pass\n    incomes = []\n    for _ in range(self.n):\n        incomes.append(max(10.0, self.rng.lognormvariate(4.5, 0.8)))\n    sorted_incomes = sorted(incomes)\n    def percentile(val: float) -> float:\n        if self.n == 0:\n            return 0.5\n        rank = sorted_incomes.index(val)\n        return clamp01(rank / max(1, self.n - 1))\n    for i in range(self.n):\n        income = incomes[i]\n        ...\n        inc_pct = percentile(income)\n        ...",
+      "after": "def _init_people(self) -> None:\n    # Precompute average ranks to handle duplicates in O(n log n)\n    incomes = [max(10.0, self.rng.lognormvariate(4.5, 0.8)) for _ in range(self.n)]\n    pairs = sorted([(val, idx) for idx, val in enumerate(incomes)], key=lambda x: x[0])\n    ranks = [0.0] * self.n\n    i = 0\n    while i < self.n:\n        j = i\n        while j < self.n and pairs[j][0] == pairs[i][0]:\n            j += 1\n        avg_rank = (i + j - 1) / 2.0\n        for k in range(i, j):\n            ranks[pairs[k][1]] = avg_rank\n        i = j\n    denom = max(1, self.n - 1)\n    percentiles = [clamp01(r / denom) for r in ranks]\n    for i in range(self.n):\n        income = incomes[i]\n        budget = income * 0.02 * (0.5 + self.rng.random())\n        inc_pct = percentiles[i]\n        p = Person(..., income=income, budget=budget, income_percentile=inc_pct, ...)\n        ...",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    ...\n    def __init__(...):\n        pass\n        ...\n        self.metrics = { ... }\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()",
+      "after": "class Simulation:\n    ...\n    def run(self) -> dict:\n        for _ in range(self.T):\n            self.step()\n            if self._early_stop():\n                break\n        return self.results()\n\n    def step(self) -> None:\n        mandate = self.policy.issue_mask_mandate(self.day)\n        policy_signal = 1.0 if mandate else 0.0\n        campaign = self.policy.run_information_campaign(self.day)\n        media_base = self.media_channel.broadcast_message()\n        net_media = clamp01(media_base + 0.5 * policy_signal * campaign) - clamp01(self.misinformation_rate * (1.0 - self.message_credibility))\n        for p in self.people:\n            p.update_from_media(net_media)\n        adopt_prev = [1 if p.is_wearing_mask else 0 for p in self.people]\n        peer_rate = [self.peer_share(i, adopt_prev) for i in range(self.n)]\n        attempted = 0\n        sold_today = 0\n        fines_today = 0.0\n        for i, agent in enumerate(self.people):\n            willing = agent.decide_willingness(peer_rate[i], policy_signal, self.vendor.price, self.weights, self.enforcement_strength, self.fine_amount, self.rng, self.subsidy_level, self.wealth_effect_on_adoption)\n            if willing and agent.mask_inventory <= 0:\n                attempted += 1\n                units = self.vendor.sell(1, agent.budget, self.subsidy_level)\n                if units > 0:\n                    sold_today += units\n                    agent.budget = max(0.0, agent.budget - self.vendor.effective_price(self.subsidy_level) * units)\n                    agent.mask_inventory += units\n            agent.is_wearing_mask = willing and agent.mask_inventory > 0\n            if agent.is_wearing_mask:\n                agent.mask_inventory -= 1\n            if mandate and not agent.is_wearing_mask:\n                if self.rng.random() < self.enforcement_check_probability * self.enforcement_strength:\n                    fines_today += self.fine_amount\n            agent.update_habit_and_fatigue(self.habit_formation_rate, self.habit_decay_rate, self.fatigue_change_wear, self.fatigue_recovery)\n        self.metrics[\"masks_sold_daily\"].append(sold_today)\n        self.metrics[\"masks_sold_cum\"] += sold_today\n        self.metrics[\"fines_collected_cum\"] += fines_today\n        if self.vendor.inventory <= 0:\n            self.metrics[\"stockout_steps\"] += 1\n        self.vendor.restock()\n        self.metrics[\"masks_restocked_cum\"] += self.vendor.restock_per_day\n        self.vendor.adjust_price(self.target_inventory)\n        if self.disease_enabled:\n            self._disease_step()\n        adoption_today = sum(1 for p in self.people if p.is_wearing_mask) / max(1, self.n)\n        self.metrics[\"adoption_rate_over_time\"].append(clamp01(adoption_today))\n        self.metrics[\"mandate_active_ts\"].append(mandate)\n        self.day += 1\n        self._validate_step()\n\n    def _disease_step(self) -> None:\n        new_exposed = []\n        infectious_ids = [i for i, s in enumerate(self.health_states) if s == 'I']\n        for src in infectious_ids:\n            contacts = self.rng.sample(self.people[src].neighbors, k=min(len(self.people[src].neighbors), max(1, int(self.contacts_comm))))\n            for tgt in contacts:\n                if self.health_states[tgt] != 'S':\n                    continue\n                p_base = self.base_transmission_prob\n                if self.people[src].is_wearing_mask:\n                    p_base *= (1.0 - self.mask_effectiveness_source)\n                if self.people[tgt].is_wearing_mask:\n                    p_base *= (1.0 - self.mask_effectiveness_wearer)\n                if self.rng.random() < p_base:\n                    new_exposed.append(tgt)\n        for i in range(self.n):\n            if self.health_states[i] == 'E':\n                self.days_in_state[i] += 1\n                if self.days_in_state[i] >= self.incubation_period:\n                    self.health_states[i] = 'I'\n                    self.days_in_state[i] = 0\n                    self.is_symptomatic[i] = (self.rng.random() < self.symptomatic_fraction)\n            elif self.health_states[i] == 'I':\n                self.days_in_state[i] += 1\n                if self.days_in_state[i] >= self.infectious_period:\n                    self.health_states[i] = 'R'\n                    self.days_in_state[i] = 0\n        for idx in set(new_exposed):\n            if self.health_states[idx] == 'S':\n                self.health_states[idx] = 'E'\n                self.days_in_state[idx] = 0\n        self.metrics[\"infections_ts\"].append(len(new_exposed))\n\n    def results(self) -> dict:\n        series = self.metrics[\"adoption_rate_over_time\"]\n        n_days = len(series)\n        overall_avg = sum(series) / max(1, n_days)\n        t50 = next((d for d, v in enumerate(series) if v >= 0.5), None)\n        equity_gap = self._gini_by_income()\n        supply_demand_ratio = (sum(self.metrics[\"masks_sold_daily\"]) + self.vendor.inventory) / max(1, sum(self.metrics[\"masks_sold_daily\"]) + self.metrics.get(\"demand_attempts\", 0)) if self.metrics.get(\"demand_attempts\") else 1.0\n        cumulative_infections = sum(self.metrics.get(\"infections_ts\", []))\n        return {\n            \"overall_adoption_rate\": overall_avg,\n            \"time_to_50_percent_adoption\": t50,\n            \"equity_gap_in_adoption\": equity_gap,\n            \"supply_demand_ratio\": supply_demand_ratio,\n            \"cumulative_infections\": cumulative_infections,\n            \"adoption_rate_over_time\": series,\n        }\n\n    def _validate_step(self) -> None:\n        if self.metrics[\"adoption_rate_over_time\"]:\n            self.metrics[\"adoption_rate_over_time\"][-1] = clamp01(self.metrics[\"adoption_rate_over_time\"][-1])\n        self.vendor.inventory = max(0, self.vendor.inventory)\n\n    def _early_stop(self) -> bool:\n        s = self.metrics[\"adoption_rate_over_time\"]\n        if len(s) < 21:\n            return False\n        last = s[-14:]\n        ma = sum(last) / len(last)\n        prev = s[-21:-7]\n        ma_prev = sum(prev) / len(prev)\n        return abs(ma - ma_prev) < 0.005\n\n    def peer_share(self, i: int, adopt_flags: list) -> float:\n        neigh = self.neighbors[i]\n        if not neigh:\n            return sum(adopt_flags) / max(1, len(adopt_flags))\n        return sum(adopt_flags[j] for j in neigh) / max(1, len(neigh))\n\n\ndef main():\n    params = {\"population_size\": 1000, \"time_horizon_days\": 120, \"seed\": 42}\n    sim = Simulation(params)\n    results = sim.run()\n    print(json.dumps(results))\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def sell(self, max_units: int, budget: float, subsidy_level: float) -> int:\n    pass\n    if self.inventory <= 0 or max_units <= 0:\n        return 0\n    eff_price = self.effective_price(subsidy_level)\n    affordable_units = int(budget // eff_price) if eff_price > 0 else max_units\n    units = min(max_units, self.inventory, max(0, affordable_units))\n    self.inventory -= units\n    assert self.inventory >= 0\n    return units",
+      "after": "def sell(self, max_units: int, budget: float, subsidy_level: float) -> int:\n    if self.inventory <= 0 or max_units <= 0:\n        return 0\n    eff_price = max(self.min_price, self.effective_price(subsidy_level))\n    if eff_price <= 0:\n        eff_price = self.min_price\n    affordable_units = int(max(0.0, budget) // eff_price)\n    units = min(max_units, self.inventory, affordable_units)\n    self.inventory = max(0, self.inventory - units)\n    return units",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def generate_small_world(n: int, k: int, beta: float, rng: random.Random) -> List[List[int]]:\n    pass\n    if n <= 1:\n        return [[] for _ in range(n)]\n    neighbors = [list() for _ in range(n)]\n    ...\n    return [sorted(set(lst)) for lst in neighbors]",
+      "after": "def generate_small_world(n: int, k: int, beta: float, rng: random.Random) -> List[List[int]]:\n    if n <= 1:\n        return [[] for _ in range(n)]\n    neigh = [set() for _ in range(n)]\n    half_k = max(1, k // 2)\n    for i in range(n):\n        for d in range(1, half_k + 1):\n            j = (i + d) % n\n            neigh[i].add(j); neigh[j].add(i)\n            j2 = (i - d) % n\n            neigh[i].add(j2); neigh[j2].add(i)\n    for i in range(n):\n        for j in list(neigh[i]):\n            if j > i and rng.random() < beta:\n                neigh[i].discard(j); neigh[j].discard(i)\n                candidates = [x for x in range(n) if x != i and x not in neigh[i]]\n                if candidates:\n                    new_j = rng.choice(candidates)\n                    neigh[i].add(new_j); neigh[new_j].add(i)\n    return [sorted(lst) for lst in neigh]",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "score = (\n    weights.get('social_weight', 0.4) * self.peer_susceptibility * peer_rate\n    + weights.get('risk_weight', 0.5) * self.risk_perception\n    + weights.get('policy_weight', 0.4) * clamp01(penalty_pressure)\n    + weights.get('habit_weight', 0.3) * self.habit\n    - weights.get('fatigue_weight', 0.3) * self.fatigue\n    - weights.get('cost_weight', 0.3) * cost_pressure\n)\np = sigmoid(score)",
+      "after": "# Optional: parameterized logit adoption model if coefficients provided\ncoefs = self_adopt_coefs  # assume pulled from self.p at init\nif coefs:\n    x = (\n        self.p.get('adoption_logit_intercept', -1.5)\n        + coefs['peer_prev'] * peer_rate\n        + coefs['media_signal'] * clamp01(policy_signal)  # or net media effect passed in\n        + coefs['risk_perception'] * self.risk_perception\n        + coefs['mandate'] * policy_signal\n        + coefs['enforcement'] * enforcement_strength\n        + coefs['price'] * (-cost_pressure)\n        + coefs['availability'] * float(self.mask_inventory > 0)\n        + coefs['income'] * clamp01(self.income_percentile)\n    )\n    p = sigmoid(x)\nelse:\n    score = (\n        weights.get('social_weight', 0.4) * self.peer_susceptibility * peer_rate\n        + weights.get('risk_weight', 0.5) * self.risk_perception\n        + weights.get('policy_weight', 0.4) * clamp01(penalty_pressure)\n        + weights.get('habit_weight', 0.3) * self.habit\n        - weights.get('fatigue_weight', 0.3) * self.fatigue\n        - weights.get('cost_weight', 0.3) * cost_pressure\n    )\n    p = sigmoid(score)",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest diff adds many good foundations (policy/media parameters, economic penalty via fine_amount, improved parameter names, disease state placeholders) but removed the previously drafted step/results logic. Some new issues were introduced (O(n^2) percentile).",
+    "positive_impacts": [
+      "Introduced fines into adoption decision utility, making policy tradeoffs more realistic.",
+      "Mapped several parameters from the spec (weights, enforcement, campaign budgets, disease toggles).",
+      "Seeded initial infections and added placeholders for disease parameters and metrics.",
+      "Added income_percentile and wealth effect on adoption sensitivity."
+    ],
+    "negative_impacts": [
+      "Core simulation loop and metrics were removed or left incomplete, making the simulation unrunnable.",
+      "Percentile computation now uses list.index inside a loop, causing O(n^2) and incorrect handling of duplicate incomes.",
+      "Policy-driven supply distribution is parameterized but unused.",
+      "Validation and metrics computation are still missing, preventing verification."
+    ],
+    "suggestions": [
+      "Reintroduce step(), run(), results() and wire in the new parameters to actual daily computations.",
+      "Fix percentile ranking with an O(n log n) average-rank map.",
+      "Implement disease dynamics and policy-driven distribution to fully leverage the newly added parameters.",
+      "Add validation checks and compute the full set of requested metrics; ensure main() runs the sim and prints results."
+    ]
+  }
+}

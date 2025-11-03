@@ -1,0 +1,196 @@
+{
+  "summary": "The latest iteration introduced substantial structural improvements (multi-retailer, parametric risk signal, better enforcement API) but left the simulation non-functional: main() does nothing, Simulation.step() is unfinished, and metrics are not computed. Several previously connected components (purchasing, enforcement, household interactions) are now disconnected. Restoring a complete daily loop, implementing run(), connecting purchases/enforcement/metrics, and fixing degree bounds in the small-world generator are top priorities for the next iteration.",
+  "critical_issues": [
+    {
+      "issue": "Empty main() and no run() method",
+      "impact": "The program produces no output and cannot be executed by the sandbox, causing JSON parsing errors upstream and preventing any simulation results.",
+      "solution": "Implement main() to parse parameters, run the simulation across simulation_duration_days, compute policy_effect_size with a counterfactual, and print JSON. Add Simulation.run() to encapsulate the daily loop.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Simulation.step() is incomplete",
+      "impact": "The daily cycle (media, beliefs, decisions, purchases, visits, enforcement, household dynamics, and metrics) does not execute, so metrics remain empty and no behavior occurs.",
+      "solution": "Implement the full daily cycle: compute risk/media signals, update beliefs, attempt purchases, decide wearing, pre-sample visits and allocate to locations, run enforcement, update household norms and pooling, apply fatigue/propensity updates, and update metrics including enforcement/denials and inventory history.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Purchasing logic is disconnected from the decision process",
+      "impact": "Even if agents decide to wear a mask, they may not obtain one, causing systematic under-wearing and unrealistic shortages.",
+      "solution": "Call _restock_retailers() at the start of step(), and _purchase_if_needed() before or immediately after a positive wear decision to ensure inventory changes reflect decisions; increment mask_shortage_incidents when shortages occur.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Enforcement API changed but step() does not consume it",
+      "impact": "Location.enforce_mask_policy now returns (actions, denials) but Simulation.step() never invokes it or accumulates metrics, leading to enforcement metrics always zero.",
+      "solution": "Use _pre_sample_visits() to build visitor lists, distribute them to locations honoring capacity, call enforce_mask_policy(), and accumulate enforcement_actions_count and denials_count.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Small-world generator does not bound k by n-1 and evenness consistently",
+      "impact": "For small n and large k, the generator can produce near-complete graphs and unnecessary work; in edge cases, rewiring can be skewed.",
+      "solution": "Clamp k <= n-1 and ensure evenness while preserving a connected lattice.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Metrics defined but never updated",
+      "impact": "Outputs are missing key time series (adoption_rate_over_time, churn, compliance), impairing evaluation and calibration.",
+      "solution": "Within step(), compute adoption rate, churn vs previous snapshot, accumulate enforcement and denials, update retailer inventory history, and compute compliance_by_location_type_agg.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Daily decision-to-purchase coupling",
+      "current_approach": "decide_to_wear_mask includes market gating but inventory is not actually purchased during the step.",
+      "suggested_approach": "Attempt actual purchases via _purchase_if_needed() when inventory is zero before decisions and/or after a positive decision, then decrement inventory when wearing.",
+      "expected_benefit": "Aligns intentions, affordability, and inventory dynamics; produces realistic adoption and shortage patterns."
+    },
+    {
+      "aspect": "Observed public wearing and signage feedback",
+      "current_approach": "Observed wearing is not computed in the current step implementation.",
+      "suggested_approach": "Compute observed_public_wearing from the previous day\u2019s wearing rate and add average signage boosts (broadcast_signage).",
+      "expected_benefit": "Captures environmental cues and feedback loops that drive adoption."
+    },
+    {
+      "aspect": "Enforcement targeting by location type",
+      "current_approach": "No enforcement currently run; avg_enforcement was used in older code.",
+      "suggested_approach": "Run per-location enforcement using sampled visitors and location-specific enforcement_level; track actions and denials.",
+      "expected_benefit": "More realistic compliance incentives and measurable policy impact by venue."
+    },
+    {
+      "aspect": "Risk signal configuration",
+      "current_approach": "Parametric, but unused within step() in the current iteration.",
+      "suggested_approach": "Blend individual risk_perception with _risk_signal(day) during beliefs updates.",
+      "expected_benefit": "Enables exogenous or endogenous risk dynamics to affect behavior."
+    },
+    {
+      "aspect": "Network degree bounds",
+      "current_approach": "k not bounded by n-1 and evenness for small n.",
+      "suggested_approach": "Clamp k to an even number less than n and adjust half_k accordingly.",
+      "expected_benefit": "Stable network topology across parameter ranges and smaller runtimes."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Implement main() to parse params, run baseline and counterfactual simulations, and print JSON; add Simulation.run().",
+      "reason": "Restores end-to-end execution and JSON output required by the sandbox.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Complete Simulation.step(): restocks, media/guidance/risk updates, peer influence, purchasing, decisions with fatigue, visits allocation, enforcement, household norms/pooling, and metrics.",
+      "reason": "Reinstates the core daily loop that drives the simulation and metrics.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use _pre_sample_visits() and distribute visitors to locations by capacity; sum enforcement actions and denials.",
+      "reason": "Connects enforcement and observed compliance by location type.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Bound k in generate_small_world() to ensure evenness and k < n.",
+      "reason": "Prevents pathological graphs and reduces computation for small n.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Update metrics each day (adoption_rate_over_time, compliance_over_time, churn_over_time, mask_shortage_incidents, enforcement_actions_count, denials_count, retailer_inventory_history) and compute compliance_by_location_type_agg.",
+      "reason": "Provides usable outputs for evaluation and calibration.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Minor cleanup: remove redundant pass statements and add basic parameter validation and clamping.",
+      "reason": "Improves readability and robustness.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Adoption rate over time",
+      "current_gap": "No calibration to empirical adoption curves; currently purely mechanistic.",
+      "suggestion": "Calibrate social_influence_weight, policy_compliance_weight, and observation_weight against historical mask adoption data from comparable regions; use AIC/BIC-based model selection on validation windows."
+    },
+    {
+      "metric": "Shortage incidents and price dynamics",
+      "current_gap": "Restocking and pricing are stylized and not tuned.",
+      "suggestion": "Fit restock_interval_days, restock_lot_size, and price_per_mask adjustment to observed retail inventory/price time series; incorporate supply_capacity_per_day consistent with production/import data."
+    },
+    {
+      "metric": "Enforcement outcomes",
+      "current_gap": "No empirical grounding for enforcement intensity and fines.",
+      "suggestion": "Match fine_amount and enforcement_intensity to jurisdictional policies and observed citation/denial rates; validate enforcement_actions_count per day against reported inspection data."
+    },
+    {
+      "metric": "Mobility and exposure",
+      "current_gap": "Mobility profile is random and not aligned with real mobility patterns.",
+      "suggestion": "Initialize daily_mobility_profile using Google Mobility or similar datasets to reflect work/store/transport visitation probabilities over time or scenario."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement main() and Simulation.run() to restore end-to-end execution with JSON output.",
+    "Complete Simulation.step() with purchases, decisions, visits, enforcement, household dynamics, fatigue, and metrics.",
+    "Integrate _pre_sample_visits() and collect enforcement actions and denials per location.",
+    "Update metrics each day and compute policy_effect_size using a counterfactual.",
+    "Bound k in generate_small_world() by n and ensure evenness; add parameter validation.",
+    "Remove redundant pass statements and add basic clamping on input parameters.",
+    "Profile and cap location counts for large populations to maintain performance."
+  ],
+  "additional_comments": "The architectural direction is good\u2014moving to multi-retailer, parametric risk, and richer enforcement. The immediate blocking issues are wiring and completing the daily loop and output. After restoring functionality, consider adding workplace/school bipartite edges to the network to better capture clustered exposures and social influence.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass\n",
+      "after": "def main():\n    try:\n        parser = argparse.ArgumentParser()\n        parser.add_argument('--params', type=str, default=None, help='Path to JSON params or JSON string')\n        args, _ = parser.parse_known_args()\n        params: Dict[str, Any] = {}\n        if args.params:\n            if os.path.exists(args.params):\n                with open(args.params, 'r') as f:\n                    params = json.load(f)\n            else:\n                params = json.loads(args.params)\n        else:\n            raw = sys.stdin.read().strip()\n            if raw:\n                params = json.loads(raw)\n        # Baseline\n        sim = Simulation(params)\n        result = sim.run()\n        # Counterfactual: no mandate within horizon\n        cf_params = dict(params)\n        horizon = result.get('time_horizon_days', params.get('simulation_duration_days', 60))\n        cf_params['mandate_start_day'] = int(horizon) + 1000\n        cf_params['seed'] = int(params.get('seed', params.get('random_seed', 42)))\n        cf_sim = Simulation(cf_params)\n        cf_result = cf_sim.run()\n        series = result['metrics']['adoption_rate_over_time']\n        cf_series = cf_result['metrics']['adoption_rate_over_time']\n        H = min(len(series), len(cf_series))\n        auc_diff = sum(series[:H]) - sum(cf_series[:H])\n        result['metrics']['policy_effect_size'] = auc_diff / max(1, H)\n        print(json.dumps(result))\n    except Exception as e:\n        print(json.dumps({'error': str(e)}))\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    ...\n    def step(self, day: int) -> None:\n        \"\"\"\n        Perform a single simulation day update: policy, media, decisions, purchases, enforcement, and metrics.\n\n        Args:\n            day (int): Day index\n        \"\"\"\n        pass\n        self.authority.set_or_update_policy(day)\n        self._update_location_policies()\n        self.authority.allocate_enforcement(self.locations)\n\n        # Media and guidance combined delta; only a fraction reached\n",
+      "after": "class Simulation:\n    ...\n    def step(self, day: int) -> None:\n        # Policy updates and restocking\n        self.authority.set_or_update_policy(day)\n        self._update_location_policies()\n        self.authority.allocate_enforcement(self.locations)\n        self._restock_retailers(day)\n\n        # Media and guidance\n        media_delta = self.media.broadcast_messages(self.rng)\n        guidance = self.authority.issue_public_guidance()\n        combined = {\n            'risk': media_delta['risk'] + guidance['risk'],\n            'trust_gov': guidance['trust_gov'],\n            'attitude': media_delta['attitude'] + guidance['attitude'],\n        }\n\n        # Observed wearing and signage boost\n        prev_wearing_rate = sum(1 for p in self.people.values() if p.wearing_mask) / max(1, len(self.people))\n        signage_boost = sum(loc.broadcast_signage() for loc in self.locations) / max(1, len(self.locations))\n        observed_public_wearing = clamp01(prev_wearing_rate + signage_boost)\n\n        # Average enforcement across non-home locations\n        non_home = [loc for loc in self.locations if loc.type != 'home']\n        avg_enforcement = (sum(loc.enforcement_level for loc in non_home) / len(non_home)) if non_home else 0.0\n\n        # Market conditions\n        market_availability, avg_price = self._market_availability()\n\n        # Decisions and purchases\n        new_wearing_flags = [False] * self.population_size\n        shortage_incidents = 0\n        risk_signal_today = self._risk_signal(day)\n        for pid, person in self.people.items():\n            # Exposure to guidance/media\n            if self.rng.random() < self.media.reach:\n                person.update_beliefs_from_media(combined)\n            # Blend risk perception\n            person.risk_perception = clamp01(0.9 * person.risk_perception + 0.1 * risk_signal_today)\n            # Peer influence\n            neigh_att = [self.people[n].mask_attitude for n in person.social_network_neighbors if 0 <= n < self.population_size]\n            person.update_beliefs_from_peers(neigh_att)\n            # Peer wearing rate\n            peer_wearing = 0.0\n            if person.social_network_neighbors:\n                peer_wearing = sum(1 for n in person.social_network_neighbors if self.people.get(n).wearing_mask) / max(1, len(person.social_network_neighbors))\n            # Try to purchase if out of masks\n            if person.masks_inventory <= 0:\n                shortage = self._purchase_if_needed(person)\n                if shortage:\n                    shortage_incidents += 1\n            # Policy strength flag\n            policy_strength = 1.0 if self.authority.mandate_on else 0.0\n            decision = person.decide_to_wear_mask(\n                peer_adoption_rate=peer_wearing,\n                observed_public_wearing=observed_public_wearing,\n                policy_strength=policy_strength,\n                enforcement_probability=avg_enforcement,\n                market_availability=market_availability,\n                price_per_mask=avg_price,\n                subsidy_amount=self.subsidy_amount,\n                weights=self.weights,\n                rng=self.rng,\n                fatigue=self.mask_fatigue,\n            )\n            # If decided to wear but still no mask, try once more\n            if decision and person.masks_inventory <= 0:\n                shortage = self._purchase_if_needed(person)\n                if shortage:\n                    shortage_incidents += 1\n            # Consume mask if wearing\n            if decision and person.masks_inventory > 0:\n                person.masks_inventory -= 1\n                person.wearing_mask = True\n            else:\n                person.wearing_mask = False\n            person.respond_to_policy(self.compliance_decay_rate, positive_exposure=person.wearing_mask, fatigue=self.mask_fatigue)\n            new_wearing_flags[pid] = person.wearing_mask\n\n        # Household dynamics\n        for hh in self.households.values():\n            hh.share_norms(self.people)\n            hh.pool_resources_for_masks(self.people)\n\n        # Visits and enforcement\n        visitors_by_type = self._pre_sample_visits()\n        enforcement_actions = 0\n        denials = 0\n        # Track compliance by location type\n        comp_by_type = {}\n        for t, visitors in visitors_by_type.items():\n            if not visitors:\n                continue\n            locs = self.locations_by_type.get(t, [])\n            if not locs:\n                continue\n            # Distribute visitors round-robin by capacity\n            idx = 0\n            for loc in locs:\n                if idx >= len(visitors):\n                    break\n                cap = max(0, loc.capacity)\n                batch = visitors[idx: idx + cap]\n                idx += cap\n                if not batch:\n                    continue\n                # Compliance by type\n                wearing_count = sum(1 for p in batch if p.wearing_mask)\n                total = len(batch)\n                agg = comp_by_type.setdefault(t, {'wearing': 0, 'total': 0})\n                agg['wearing'] += wearing_count\n                agg['total'] += total\n                a, d = loc.enforce_mask_policy(batch, self.authority, self.rng)\n                enforcement_actions += a\n                denials += d\n\n        # Metrics\n        adoption_rate = sum(1 for v in new_wearing_flags if v) / max(1, len(new_wearing_flags))\n        churn = sum(1 for prev, cur in zip(self._last_wearing_snapshot, new_wearing_flags) if prev != cur) / max(1, len(new_wearing_flags))\n        self.metrics['adoption_rate_over_time'].append(adoption_rate)\n        self.metrics['compliance_over_time'].append(adoption_rate)\n        self.metrics['churn_over_time'].append(churn)\n        self.metrics['mask_shortage_incidents'] += int(shortage_incidents)\n        self.metrics['enforcement_actions_count'] += int(enforcement_actions)\n        self.metrics['denials_count'] += int(denials)\n        # Store retailer average inventory\n        avg_inv = sum(r.inventory_level for r in self.retailers) / max(1, len(self.retailers))\n        self.metrics['retailer_inventory_history'].append(avg_inv)\n        # Store compliance by location type (aggregated)\n        self.metrics['compliance_by_location_type_agg'] = {\n            t: (v['wearing'] / v['total'] if v['total'] > 0 else 0.0) for t, v in comp_by_type.items()\n        }\n        # Snapshot for next day churn\n        self._last_wearing_snapshot = new_wearing_flags\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    \"\"\"\n    Main simulation class coordinating agents, locations, retailers, and policy dynamics.\n    ...\n    \"\"\"\n    def __init__(self, params: Dict[str, Any]) -> None:\n        ...\n        # Internal state\n        self._last_wearing_snapshot: List[bool] = [p.wearing_mask for p in self.people.values()]\n",
+      "after": "class Simulation:\n    ...\n    def __init__(self, params: Dict[str, Any]) -> None:\n        ...\n        self._last_wearing_snapshot: List[bool] = [p.wearing_mask for p in self.people.values()]\n\n    def run(self) -> Dict[str, Any]:\n        for day in range(self.time_horizon_days):\n            self.step(day)\n        return {\n            'metrics': self.metrics,\n            'time_horizon_days': self.time_horizon_days,\n            'population_size': self.population_size,\n        }\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def generate_small_world(n: int, k: int, beta: float, rng: random.Random) -> List[List[int]]:\n    ...\n    k = max(2, int(k))\n    if k % 2 == 1:\n        k += 1\n    half_k = k // 2\n    nbrs = [set() for _ in range(n)]\n",
+      "after": "def generate_small_world(n: int, k: int, beta: float, rng: random.Random) -> List[List[int]]:\n    if n <= 1:\n        return [[] for _ in range(n)]\n    k = int(k)\n    # Ensure even and < n\n    k = max(2, min(k + (k % 2), (n - 1) - ((n - 1) % 2)))\n    half_k = k // 2\n    nbrs = [set() for _ in range(n)]\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _restock_retailers(self, day: int) -> None:\n    ...\n    # Track stockout retailer-days\n    self.stockout_days += sum(1 for r in self.retailers if r.inventory_level <= 0)\n",
+      "after": "def _restock_retailers(self, day: int) -> None:\n    ...\n    # Track stockout retailer-days\n    self.stockout_days += sum(1 for r in self.retailers if r.inventory_level <= 0)\n    # Note: per-day average inventory is captured in step() metrics\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The refactor introduced multi-retailer supply, parameterized risk signal, richer enforcement, and better mapping of parameters, but removed or left incomplete the core execution flow and outputs.",
+    "positive_impacts": [
+      "Introduced multiple retailers with restock scheduling and capacity.",
+      "Added risk_signal_mode and period, enabling flexible risk dynamics.",
+      "Enhanced enforcement to include fines, costs, denials, and violation counts.",
+      "Built person_to_household mapping for performance and correctness."
+    ],
+    "negative_impacts": [
+      "main() was replaced by a stub; no execution or output.",
+      "Simulation.step() is unfinished, leaving most components unexecuted.",
+      "Enforcement API changed but not integrated into the daily loop.",
+      "Metrics accumulation is not implemented, breaking downstream analysis."
+    ],
+    "suggestions": [
+      "Restore main(), add Simulation.run(), and fully implement Simulation.step().",
+      "Wire purchasing, pre-sampled visits, and enforcement; compute and store metrics.",
+      "Bound network degree and validate inputs to avoid edge-case failures.",
+      "Remove redundant pass statements and unused imports to improve readability."
+    ]
+  }
+}

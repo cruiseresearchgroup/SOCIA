@@ -1,0 +1,249 @@
+{
+  "summary": "The codebase is robust for a generic social adoption toy model, but it does not implement the Mask Adoption Dynamics Simulation as specified. The primary blockers are (1) a plan/schema mismatch, (2) missing entities and interactions (households, locations, retailers, enforcement, misinformation), and (3) absent required metrics. Recent changes improved resilience (get_param_or, network builder robustness, aggregator fix), but calibration still ignores the evaluator callback and I/O overhead remains high. The next iteration should add a schema adapter and minimal viable domain modules; implement purchases, enforcement, and misinformation exposure; compute all required metrics; and fix calibrators to use the evaluator.",
+  "critical_issues": [
+    {
+      "issue": "Plan/schema mismatch with the task specification",
+      "impact": "Simulation will not run with the Task Specification, blocking integration and producing wrong/missing outputs.",
+      "solution": "Add a plan adapter that maps the task schema (entities, interactions, parameters mapping) into the internal 'modules + parameter definitions' format and update validate_plan/ParameterRegistry.from_plan to accept dict-style parameters.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing domain entities and interactions (Person/Household/Location/PolicyMaker/Retailer/MediaChannel) and behaviors (purchases, enforcement, media misinformation, household norms)",
+      "impact": "The model cannot simulate mask adoption dynamics as required (supply constraints, policy compliance, misinformation). Metrics dependent on these processes cannot be computed.",
+      "solution": "Implement dedicated modules: HouseholdModule, LocationModule (attendance and enforcement), RetailerModule (inventory, restock, price, sales), MediaMisinformationModule (credibility, reach), PolicyMakerModule (mandates, enforcement, fines). Integrate with the decision pipeline and event logs.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Required metrics are not computed",
+      "impact": "Evaluation cannot report adoption_rate_over_time, peak_adoption_rate, time_to_70_percent_adoption, sustained_adoption_duration_over_80, adoption_inequality_gini, policy_effect_size, average_masks_purchased_per_person, enforcement_actions_count, misinformation_exposure_rate.",
+      "solution": "Extend aggregator/evaluator to compute and persist all requested metrics, backed by event logs (purchases, enforcement actions, misinformation exposures).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Calibrators ignore the provided evaluator callback",
+      "impact": "Calibrations may optimize against internal metrics that differ from the external evaluation needs; limits reusability.",
+      "solution": "Use evaluator(bundle, sim_copy, params, train_window) inside calibrators instead of calling sim_copy.evaluate() directly.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Performance/I/O overhead during calibration",
+      "impact": "Large number of trials cause slow runs and heavy disk usage; not scalable for the specified population.",
+      "solution": "Add a save_artifacts flag to skip per-trial writes; cache network and static agent features across trials; reduce default budget.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Transitions tracking can inflate denominators across timesteps",
+      "impact": "TransitionFit rates may be biased and non-comparable across runs.",
+      "solution": "Track per-timestep transitions and compute probabilities over a fixed window or daily denominators rather than cumulative counts.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Error handling uses sys.exit within utility functions",
+      "impact": "Hard exits reduce composability and testability.",
+      "solution": "Raise exceptions and handle exits in main().",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Insufficient seeding logic in Simulation.__init__",
+      "impact": "Non-deterministic behavior if 'random_seed' is absent from definitions.",
+      "solution": "Always use registry.get_param_or('random_seed', default) without checking definitions; respect CLI seed.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Supply constraints and purchasing",
+      "current_approach": "Absent. No Retailer or budgets/inventory.",
+      "suggested_approach": "Add RetailerModule with inventory, restock_rate, price, max_daily_sales; implement Person.purchase_masks() respecting mask_cost, budget, inventory; HouseholdModule.coordinate_purchases().",
+      "expected_benefit": "Reflects economic constraints and stockouts, enabling average_masks_purchased_per_person metric and realistic adoption ceilings."
+    },
+    {
+      "aspect": "Location attendance and enforcement",
+      "current_approach": "Absent. No Location or enforcement.",
+      "suggested_approach": "Add LocationModule with types, capacity, baseline_contact_rate, mask_policy_required, enforcement_strictness; Person.attend_locations per mobility_schedule; Location.enforce_mask_policy to admit/reject and fine.",
+      "expected_benefit": "Captures policy compliance, enforcement_actions_count, and policy_effect_size via pre/post or counterfactual."
+    },
+    {
+      "aspect": "Media/misinformation and campaigns",
+      "current_approach": "Single broadcast media signal; no credibility/reach/misinformation.",
+      "suggested_approach": "Add MediaChannel entities with message_type, credibility, reach, misinformation_rate; model exposure sampling, credibility-weighted belief updates, and track misinformation_exposure_rate.",
+      "expected_benefit": "Captures realistic belief dynamics and enables misinformation exposure metrics."
+    },
+    {
+      "aspect": "Household norms and coordination",
+      "current_approach": "Absent.",
+      "suggested_approach": "HouseholdModule.reinforce_household_norms() to update shared_norm_pro_mask and members\u2019 beliefs; coordinate purchases to share inventory.",
+      "expected_benefit": "Adds within-household correlation and reduces inequality artifacts; improves policy targeting effects."
+    },
+    {
+      "aspect": "Inequality measurement",
+      "current_approach": "Two group rates only.",
+      "suggested_approach": "Compute Gini coefficient over groups (income, age, risk_group) for adoption_inequality_gini; optionally Theil index.",
+      "expected_benefit": "Quantifies disparities and supports targeted interventions."
+    },
+    {
+      "aspect": "Policy effect estimation",
+      "current_approach": "Simple policy effect signal without counterfactual.",
+      "suggested_approach": "Compute policy_effect_size via pre/post difference and via counterfactual run with policy disabled on identical initial state and random seed.",
+      "expected_benefit": "More robust inference on policy impact."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Add a plan adapter that converts the task specification (entities/interactions/parameters mapping) into the internal modules + parameter definitions format; update validate_plan and ParameterRegistry.from_plan to accept dict-style parameters.",
+      "reason": "Unblocks running with the provided schema and eliminates hard exits due to validation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement new modules: HouseholdModule, LocationModule, RetailerModule, MediaMisinformationModule, PolicyMakerModule; extend AgentInitializer to include all Person attributes (age, risk_group, budget, masks inventory).",
+      "reason": "Implements required entities and interactions for the mask adoption simulation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add event logs for purchases, enforcement actions, and misinformation exposures; update Simulation.evaluate to compute all required metrics.",
+      "reason": "Enables adoption_rate_over_time, purchases per person, enforcement actions, and misinformation exposure metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use the provided evaluator callback in all calibrators; add a save_artifacts flag to reduce per-trial I/O and reuse static state (network, static agent features) across trials.",
+      "reason": "Improves calibration fidelity and performance.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Refactor error handling: raise exceptions in parse_json and validate_plan; catch in main() to decide exit.",
+      "reason": "Improves library composability and testing.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Fix seeding logic to always use registry.get_param_or('random_seed', default) and override with CLI seed.",
+      "reason": "Ensures deterministic behavior across runs.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Revise transitions tracking to store per-day counts and compute TransitionFit on a rolling window.",
+      "reason": "Prevents denominator inflation and yields interpretable transition rates.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "No mask supply constraints or policy enforcement; adoption can be unrealistically smooth.",
+      "suggestion": "Introduce purchasing with inventory constraints and location-level enforcement to create realistic plateaus and jumps (e.g., mandate start)."
+    },
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "No counterfactual comparison; effect conflates with social influence and media.",
+      "suggestion": "Run a counterfactual with identical random seed and initial states but policy disabled; compute difference in mean adoption over the mandate window."
+    },
+    {
+      "metric": "adoption_inequality_gini",
+      "current_gap": "Not computed; group dynamics simplified.",
+      "suggestion": "Compute Gini across income/age/risk groups; calibrate group-specific sensitivity and budget constraints using external datasets."
+    },
+    {
+      "metric": "average_masks_purchased_per_person",
+      "current_gap": "Purchases not modeled.",
+      "suggestion": "Track purchase events and inventory; calibrate mask_cost and restock_rate from retail data where available."
+    },
+    {
+      "metric": "enforcement_actions_count",
+      "current_gap": "No location enforcement or fines modeled.",
+      "suggestion": "Implement admit/reject + fine events at locations with mask_policy_required; tally totals per day."
+    },
+    {
+      "metric": "misinformation_exposure_rate",
+      "current_gap": "No misinformation process modeled.",
+      "suggestion": "Add MediaChannel with misinformation_rate and credibility; simulate exposures per day and store per-agent counts."
+    }
+  ],
+  "prioritized_actions": [
+    "Add a schema adapter and update plan/parameter loaders to accept the task specification.",
+    "Implement minimal functional RetailerModule, LocationModule (attendance/enforcement), MediaMisinformationModule, and HouseholdModule.",
+    "Extend AgentInitializer to include all Person attributes and Household construction mapping.",
+    "Add event logs and compute all required metrics in Simulation.evaluate.",
+    "Modify calibrators to use the evaluator callback and add a save_artifacts flag; reduce default budget and reuse static state.",
+    "Refactor error handling to raise exceptions; improve seeding determinism.",
+    "Revise transitions tracking to avoid cumulative denominators.",
+    "Add unit tests for schema adapter, purchases, enforcement, misinformation, and metrics."
+  ],
+  "additional_comments": "The direct call to main() at the end matches the sandbox requirement and should be kept. The recent changes improved robustness (get_param_or usage, aggregator memory fix, network builder mapping). Focus next on domain completeness and metric computation; then optimize calibration performance.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def validate_plan(plan: Dict[str, Any]) -> None:\n    if not isinstance(plan, dict):\n        eprint(\"Plan must be a JSON object\")\n        sys.exit(1)\n    modules = plan.get(\"modules\", [])\n    if not isinstance(modules, list) or len(modules) < 3:\n        eprint(\"Plan must contain at least 3 modules\")\n        sys.exit(1)\n    names = [m.get(\"name\", m.get(\"type\")) for m in modules]\n    if any(n is None for n in names):\n        eprint(\"Each module must include 'name' or 'type'\")\n        sys.exit(1)\n    if len(set(names)) != len(names):\n        eprint(\"Module names must be unique\")\n        sys.exit(1)\n    params = plan.get(\"parameters\", [])\n    if not isinstance(params, list) or not params:\n        eprint(\"Plan must contain a non-empty 'parameters' list\")\n        sys.exit(1)\n",
+      "after": "def validate_plan(plan: Dict[str, Any]) -> None:\n    if not isinstance(plan, dict):\n        raise ValueError(\"Plan must be a JSON object\")\n    # Accept either task spec schema or internal schema\n    if \"modules\" in plan and isinstance(plan.get(\"modules\"), list):\n        # internal schema\n        names = [m.get(\"name\", m.get(\"type\")) for m in plan[\"modules\"]]\n        if any(n is None for n in names):\n            raise ValueError(\"Each module must include 'name' or 'type'\")\n        if len(set(names)) != len(names):\n            raise ValueError(\"Module names must be unique\")\n    elif all(k in plan for k in (\"entities\", \"interactions\", \"parameters\")):\n        # task spec schema - OK; will be adapted later\n        pass\n    else:\n        raise ValueError(\"Unknown plan schema: expected either internal {modules,parameters} or task spec {entities,interactions,parameters}\")\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class ParameterRegistry:\n    @classmethod\n    def from_plan(cls, plan: Dict[str, Any]) -> \"ParameterRegistry\":\n        defs: Dict[str, ParameterDefinition] = {}\n        params_list = plan.get(\"parameters\", [])\n        for p in params_list:\n            key = p[\"key\"]\n            dtype = p.get(\"dtype\", \"float\")\n            default = p.get(\"default\")\n            bounds = p.get(\"bounds\")\n            owner = p.get(\"owner_module\", \"global\")\n            frozen = p.get(\"frozen\", False)\n            description = p.get(\"description\", \"\")\n            defs[key] = ParameterDefinition(\n                key=key,\n                dtype=dtype,\n                default=default,\n                bounds=bounds,\n                owner_module=owner,\n                description=description,\n                frozen=frozen,\n            )\n        return cls(defs)\n",
+      "after": "class ParameterRegistry:\n    @classmethod\n    def from_plan(cls, plan: Dict[str, Any]) -> \"ParameterRegistry\":\n        defs: Dict[str, ParameterDefinition] = {}\n        if isinstance(plan.get(\"parameters\"), list):\n            params_list = plan[\"parameters\"]\n            for p in params_list:\n                key = p[\"key\"]\n                dtype = p.get(\"dtype\", \"float\")\n                default = p.get(\"default\")\n                bounds = p.get(\"bounds\")\n                owner = p.get(\"owner_module\", \"global\")\n                frozen = p.get(\"frozen\", False)\n                description = p.get(\"description\", \"\")\n                defs[key] = ParameterDefinition(key, dtype, default, bounds, owner, description, frozen)\n        elif isinstance(plan.get(\"parameters\"), dict):\n            # task spec: parameters is a dict of domain keys -> value\n            for key, default in plan[\"parameters\"].items():\n                dtype = \"float\" if isinstance(default, (int, float)) else \"bool\" if isinstance(default, bool) else \"str\"\n                defs[key] = ParameterDefinition(key, dtype, default, None, \"global\")\n        else:\n            raise ValueError(\"Unsupported 'parameters' format in plan\")\n        return cls(defs)\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def load_plan(source_file: Optional[str], source_url: Optional[str], timeout: float, retries: int) -> Dict[str, Any]:\n    if bool(source_file) == bool(source_url):\n        eprint(\"Provide exactly one of --plan-file or --plan-url\")\n        sys.exit(1)\n    try:\n        if source_file:\n            text = load_text_from_file(source_file)\n        else:\n            text = load_text_from_url(source_url, timeout=timeout, retries=retries)\n    except Exception as ex:\n        eprint(f\"Failed to load plan: {ex}\")\n        sys.exit(1)\n    plan = parse_json(text)\n    validate_plan(plan)\n    return plan\n",
+      "after": "def load_plan(source_file: Optional[str], source_url: Optional[str], timeout: float, retries: int) -> Dict[str, Any]:\n    if bool(source_file) == bool(source_url):\n        raise ValueError(\"Provide exactly one of --plan-file or --plan-url\")\n    text = load_text_from_file(source_file) if source_file else load_text_from_url(source_url, timeout=timeout, retries=retries)\n    plan = parse_json(text)\n    validate_plan(plan)\n    # Adapt task spec schema to internal if needed\n    if \"modules\" not in plan and \"entities\" in plan:\n        plan = adapt_task_spec_to_internal_plan(plan)\n    return plan\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class LogitHeadCalibrator(Calibrator):\n    def fit(...):\n        ...\n        for i in range(budget):\n            ...\n            sim_copy.run(start, end)\n            metrics = sim_copy.evaluate()\n            score = score_from_metrics(metrics)\n            ...\n",
+      "after": "class LogitHeadCalibrator(Calibrator):\n    def fit(...):\n        ...\n        for i in range(budget):\n            ...\n            # Use provided evaluator for scoring\n            metrics = evaluator(bundle, sim_copy, cand, (start, end))\n            score = score_from_metrics(metrics)\n            ...\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate(self, ground_truth: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:\n    obs = self.state.get(\"observables\", {})\n    sim_series_full = obs.get(\"observable.adoption_rate_daily\", [])\n    ...\n    metrics = {\n        \"RMSE_aggregate\": rmse,\n        \"MAE_aggregate\": mae,\n        \"PeakError\": peak_error,\n        \"TimeToPeak\": ttp,\n        \"Brier\": brier,\n        \"TransitionFit\": transfit,\n        \"FinalAdoption\": (sim_series_vals[-1] if sim_series_vals else None),\n        \"MeanAdoption\": (mean(sim_series_vals) if sim_series_vals else None),\n    }\n",
+      "after": "def evaluate(self, ground_truth: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:\n    obs = self.state.get(\"observables\", {})\n    series = obs.get(\"observable.adoption_rate_daily\", [])\n    adoption_over_time = [pt[\"value\"] for pt in series]\n    peak_adoption_rate = max(adoption_over_time) if adoption_over_time else None\n    time_to_70 = next((pt[\"t\"] for pt in series if pt[\"value\"] >= 0.7), None)\n    sustained_over_80 = sum(1 for pt in series if pt[\"value\"] >= 0.8)\n    # Compute inequality (Gini) across groups from last day\n    last_state = self.state.get(\"agents\", [])\n    if last_state:\n        groups = {}\n        for a in last_state:\n            g = a.get(\"group\", \"all\"); groups.setdefault(g, [0,0])\n            groups[g][0] += a.get(\"adoption_state\", 0); groups[g][1] += 1\n        group_rates = [v[0]/v[1] for v in groups.values() if v[1] > 0]\n        adoption_inequality_gini = gini(group_rates) if len(group_rates) > 1 else 0.0\n    else:\n        adoption_inequality_gini = None\n    # Policy effect via counterfactual if policy window exists\n    policy_effect = compute_policy_effect(self)\n    # Purchases/enforcement/misinformation from event logs\n    avg_masks_purchased = safe_mean(self.state.get(\"counters\", {}).get(\"purchases_per_person\", []))\n    enforcement_actions = self.state.get(\"counters\", {}).get(\"enforcement_actions\", 0)\n    misinfo_rate = compute_misinformation_exposure_rate(self)\n    # Existing aggregate errors retained\n    ... # keep RMSE/MAE if ground truth provided\n    metrics.update({\n        \"adoption_rate_over_time\": adoption_over_time,\n        \"peak_adoption_rate\": peak_adoption_rate,\n        \"time_to_70_percent_adoption\": time_to_70,\n        \"sustained_adoption_duration_over_80\": sustained_over_80,\n        \"adoption_inequality_gini\": adoption_inequality_gini,\n        \"policy_effect_size\": policy_effect,\n        \"average_masks_purchased_per_person\": avg_masks_purchased,\n        \"enforcement_actions_count\": enforcement_actions,\n        \"misinformation_exposure_rate\": misinfo_rate,\n    })\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def parse_json(text: str) -> Any:\n    try:\n        return json.loads(text)\n    except json.JSONDecodeError as e:\n        ...\n        sys.exit(1)\n",
+      "after": "def parse_json(text: str) -> Any:\n    try:\n        return json.loads(text)\n    except json.JSONDecodeError as e:\n        lines = text.splitlines()\n        start = max(0, e.lineno - 2)\n        end = min(len(lines), e.lineno + 1)\n        context = \"\\n\".join((f\"{i+1}: {lines[i]}\" for i in range(start, end)))\n        raise ValueError(f\"JSON parse error at line {e.lineno}, column {e.colno}: {e.msg}\\n{context}\")\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    def __init__(..., seed: Optional[int] = None, ...):\n        self.seed = seed if seed is not None else int(registry.get_param_or(\"random_seed\", 0)) if \"random_seed\" in registry.definitions else None\n        if self.seed is not None:\n            random.seed(self.seed)\n",
+      "after": "class Simulation:\n    def __init__(..., seed: Optional[int] = None, ...):\n        self.seed = seed if seed is not None else int(registry.get_param_or(\"random_seed\", 0))\n        random.seed(self.seed)\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    adapter = PlanParamsAdapter(...)\n    sim_copy = Simulation(...)\n    sim_copy.registry.values = dict(simulator.registry.values)\n    adapter.apply(sim_copy, params)\n    start, end = window\n    sim_copy.run(start, end)\n    metrics = sim_copy.evaluate()\n    ...\n",
+      "after": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    adapter = PlanParamsAdapter(...)\n    sim_copy = Simulation(...)\n    # reuse network and static agents if available to speed up calibration\n    if simulator.state.get(\"graph\") and simulator.state.get(\"agents\"):\n        sim_copy.state[\"graph\"] = simulator.state[\"graph\"]\n        sim_copy.state[\"neighbors\"] = simulator.state[\"neighbors\"]\n        sim_copy.state[\"agents\"] = copy_static_agent_features(simulator.state[\"agents\"])  # no dynamic fields\n    sim_copy.registry.values = dict(simulator.registry.values)\n    adapter.apply(sim_copy, params)\n    start, end = window\n    sim_copy.run(start, end)\n    metrics = sim_copy.evaluate()\n    ...\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes increased robustness (get_param_or, network type mapping, aggregator no-op fix, added socket.timeout handling, improved metrics outputs). However, they didn't address the domain mismatch with the task spec or the calibration evaluator issue. I/O footprint remains high.",
+    "positive_impacts": [
+      "More tolerant parameter access via get_param_or reduces KeyErrors.",
+      "NetworkBuilder now supports synonyms and defaults for mean degree.",
+      "AdoptionAggregator avoids mutating state in forward and uses append buffers.",
+      "Evaluation now aligns time by 't' and computes final/mean adoption for fallback scoring."
+    ],
+    "negative_impacts": [
+      "Plan validation still enforces the internal schema and exits, preventing direct use of the task specification.",
+      "Calibrators still bypass the evaluator callback, reducing flexibility.",
+      "Per-trial artifact writes in calibration can create significant I/O overhead.",
+      "Transitions aggregation remains cumulative, risking denominator inflation."
+    ],
+    "suggestions": [
+      "Implement a schema adapter and accept dict-style parameters in the registry.",
+      "Refactor calibrators to use the evaluator and add a save_artifacts flag.",
+      "Cache network and static agents across calibration trials to reduce runtime.",
+      "Revise transitions tracking to report per-day rates and rolling averages."
+    ]
+  }
+}

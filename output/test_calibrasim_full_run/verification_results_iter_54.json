@@ -1,0 +1,91 @@
+{
+  "passed": false,
+  "summary": "The code is syntactically valid and runs, with a modular agent-based adoption simulation. However, it diverges materially from the specified task: several entities/interactions are missing or only loosely approximated, key parameters are mismatched, several required metrics are absent, and there are logic issues (e.g., time horizon handling, household initialization at t=0, adoption independent of inventory). There is also a notable performance issue during calibration due to counterfactual reruns in evaluation.",
+  "issues": [
+    {
+      "type": "implementation",
+      "severity": "critical",
+      "description": "Missing core entities/interactions from the task spec: EpidemiologicalContext with risk feedback, explicit InformationSource broadcasting, detailed PolicyAuthority enforcement, and a proper MaskMarket with supply_shock_schedule. Social influence exists, but risk feedback and information dissemination are not implemented as specified.",
+      "location": "Overall design (no classes for EpidemiologicalContext, InformationSource; PolicyMakerModule and MediaMisinformationModule only approximate behavior)",
+      "solution": "Add modules/entities to represent EpidemiologicalContext (provide_case_rate_for_day with reporting lag and smoothing), InformationSource (broadcast messages with credibility, bias, frequency, effect size, misinformation_rate), and a MaskMarket handling price, availability_index, restock_rate_per_day, supply_shock_schedule. Wire risk_feedback into agents\u2019 risk perception and decision."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "Several required metrics are missing or mis-specified: time_to_50_percent_adoption, sustained_adoption_days_above_threshold (total days, not max run), adoption_by_location_type, fine_incidents_per_1000_entries (requires counting entries), exposure_weighted_adoption.",
+      "location": "Simulation.evaluate() and modules that would produce the necessary inputs",
+      "solution": "Compute time_to_50_percent_adoption explicitly, accumulate total days above a threshold (parameterized), track location-type-specific mask-wearing and entries to compute adoption_by_location_type and fine_incidents_per_1000_entries, and compute exposure_weighted_adoption using location risk levels/contact intensity."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "Parameter naming mismatches with the task plan impede correct behavior: average_degree (task) vs mean_degree (code), mask_price vs mask_cost, restock_rate_per_day vs restock_rate, mandate_on_day/mandate_off_day/fine_amount/enforcement_probability_per_entry vs policy_* fields used by modules.",
+      "location": "NetworkBuilder.forward(), RetailerModule.forward(), PolicyMakerModule.forward(), LocationModule.forward(), PolicyIntervention.forward()",
+      "solution": "Map/normalize task parameter names in ParameterRegistry or adapter: accept average_degree, mask_price, restock_rate_per_day, mandate_on_day/mandate_off_day/fine_amount/enforcement_probability_per_entry and translate to the module parameters. Prefer task plan keys when present."
+    },
+    {
+      "type": "logic",
+      "severity": "major",
+      "description": "Simulation horizon uses initialization.time_horizon_days default (60) set by adapter, overshadowing the task parameter time_horizon_days=180.",
+      "location": "main(): time_horizon resolution; adapt_task_spec_to_internal_plan() sets default initialization.time_horizon_days=60",
+      "solution": "Prefer the registry parameter 'time_horizon_days' if defined. In the adapter, if task parameters include time_horizon_days, propagate it to initialization; otherwise do not set initialization so that registry controls it."
+    },
+    {
+      "type": "logic",
+      "severity": "major",
+      "description": "Adoption decision is decoupled from mask inventory/supply constraints. Agents can adopt even when they have no masks; supply does not affect adoption probability.",
+      "location": "AdoptionDecision.forward() and Household/Retailer logic",
+      "solution": "Incorporate mask_inventory and market availability/price into adoption decision (e.g., reduce net signal or increase threshold when inventory is zero or affordability is low). Optionally require a mask to be worn for adoption in public contexts."
+    },
+    {
+      "type": "implementation",
+      "severity": "major",
+      "description": "Location types and mobility/contact structure required by the task (home, work, public spaces with type-specific policies/risk) are not modeled; enforcement is not per-location.",
+      "location": "LocationModule.forward()",
+      "solution": "Introduce multiple Location entities with types, capacities, risk_level, per-location mask_policy and enforcement. Track agent movements per mobility profile and compute context-dependent masking/adoption plus enforcement per entry."
+    },
+    {
+      "type": "logic",
+      "severity": "minor",
+      "description": "Households are not created at t=0 due to reliance on state instead of buffers for agents; therefore, no purchase requests occur on day 0.",
+      "location": "HouseholdModule.forward()",
+      "solution": "Read agents from buffers if present: agents = buffers.get('agents', state.get('agents', [])). Alternatively, commit after AgentInitializer or run initialization phase separately before t=0."
+    },
+    {
+      "type": "performance",
+      "severity": "major",
+      "description": "Evaluation computes policy_impact_effect_size by running a full counterfactual simulation each time Simulation.evaluate() is called. During calibration, this occurs for each candidate, causing heavy overhead.",
+      "location": "Simulation._compute_policy_effect(), called from Simulation.evaluate()",
+      "solution": "Gate counterfactual computation behind a flag (e.g., evaluate(policy_effect=False) during calibration) or cache results per seed/params. Alternatively, compute a pre/post effect without counterfactual during calibration."
+    },
+    {
+      "type": "implementation",
+      "severity": "minor",
+      "description": "The sustained adoption metric uses max consecutive days above 0.8, not total days above a configurable threshold as in the task spec.",
+      "location": "Simulation.evaluate(): sustained_over_80 via max_consecutive_ge",
+      "solution": "Compute total days above a configurable threshold (e.g., parameter sustained_threshold=0.7) or provide both metrics."
+    },
+    {
+      "type": "implementation",
+      "severity": "minor",
+      "description": "Risk perception updates from case trends (risk_feedback) are not implemented; EpidemiologicalContext parameters case_reporting_lag_days and case_smoothing_window_days are unused.",
+      "location": "No EpidemiologicalContext module; MediaMisinformation/MediaInfluence only",
+      "solution": "Add EpidemiologicalContext with exogenous_case_rate_series, lag, and smoothing. Update each agent\u2019s risk perception daily and use it in adoption decision."
+    },
+    {
+      "type": "logic",
+      "severity": "minor",
+      "description": "Initial retailer inventory is restocked immediately on day 0, effectively adding restock_rate to the initial stock.",
+      "location": "RetailerModule.forward()",
+      "solution": "Skip restock on t==0 or define behavior explicitly via a parameter (e.g., restock_on_day0 boolean)."
+    }
+  ],
+  "verification_details": {
+    "syntax_check": true,
+    "imports_check": true,
+    "implementation_check": false,
+    "logic_check": false,
+    "error_handling_check": true,
+    "performance_check": false
+  }
+}

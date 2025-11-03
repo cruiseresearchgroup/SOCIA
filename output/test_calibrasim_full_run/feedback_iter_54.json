@@ -1,0 +1,271 @@
+{
+  "summary": "The simulation is modular and runs, but it diverges from the task specification in key areas: missing entities (EpidemiologicalContext, InformationSource, MaskMarket), incomplete interactions (risk feedback, detailed enforcement, mobility/location structure), parameter mismatches, and missing metrics. There are also logic and performance issues (household initialization timing, adoption ignoring inventory, costly counterfactuals during calibration, and time horizon overriding). Recent changes improved robustness (I/O guards, double-count prevention, Brier correction, network/agent reuse) but did not address core alignment gaps. The next iteration should focus on adding risk and information modules, aligning parameters, integrating supply constraints into adoption, and completing required metrics with efficient evaluation.",
+  "critical_issues": [
+    {
+      "issue": "Missing core entities and interactions (EpidemiologicalContext, InformationSource, MaskMarket)",
+      "impact": "Breaks fidelity to the task: no risk feedback from cases, no explicit information campaign dynamics, no market supply shocks; adoption dynamics omit primary drivers specified in the task.",
+      "solution": "Add modules: EpidemiologicalContext (smoothed exogenous case rates with lag), InformationSource (broadcasts with credibility/bias/frequency/effect size/misinformation_rate), and MaskMarket (price, availability_index, restock_rate_per_day, supply_shock_schedule). Wire them into agents\u2019 risk perception and adoption decision, and to purchasing.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Adoption decision ignores inventory and affordability",
+      "impact": "Agents can adopt regardless of mask availability or budget, disconnecting adoption from supply constraints and leading to unrealistic dynamics.",
+      "solution": "In AdoptionDecision, include a supply penalty when mask_inventory==0 and scale adoption probability by affordability versus mask price. Optionally require mask_inventory>0 for adoption in public contexts.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Parameter mismatches with the task spec",
+      "impact": "Key behaviors are not controlled correctly because expected parameters (average_degree, mask_price, restock_rate_per_day, mandate_on_day/off_day, fine_amount, enforcement_probability_per_entry) are not used by modules.",
+      "solution": "Implement parameter normalization/fallbacks: read task keys and map to internal ones (e.g., mask_price -> mask_cost). Update PolicyMaker/Location/Retailer/NetworkBuilder to prefer task keys.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing required metrics and supporting counters",
+      "impact": "Cannot validate per spec: time_to_50_percent_adoption, sustained_adoption_days_above_threshold (total days), adoption_by_location_type, fine_incidents_per_1000_entries, exposure_weighted_adoption are absent.",
+      "solution": "Track entries and masking per location type in Location module; compute fine rate per 1000 entries; compute exposure-weighted adoption using risk levels. Add time_to_50 and sustained-days-above-threshold in evaluate().",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Households not initialized at t=0 due to state/buffer timing",
+      "impact": "No day-0 purchase requests; early dynamics skewed and inventory constraints underutilized.",
+      "solution": "Have HouseholdModule read agents from buffers when available: agents = buffers.get('agents', state.get('agents', [])).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Performance: evaluation runs a counterfactual policy simulation for every evaluation",
+      "impact": "During calibration, each candidate triggers a full counterfactual run, causing large overhead and slow iterations.",
+      "solution": "Add a flag compute_policy_effect to evaluate(); disable during calibration; cache results by seed/params if needed.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Time horizon overridden by adapter default 60 days",
+      "impact": "Ignores task parameter time_horizon_days=180 and truncates simulation, misaligning outputs and metrics.",
+      "solution": "In adapt_task_spec_to_internal_plan, propagate task parameters\u2019 time_horizon_days to initialization if present; otherwise don\u2019t set a default; main() should prefer registry parameter.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Restock occurs on day 0",
+      "impact": "Inflates initial supply beyond initial_inventory, distorting early adoption and purchases.",
+      "solution": "Skip restock on t==0 or control with a boolean parameter (restock_on_day0).",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Risk feedback from cases",
+      "current_approach": "No epidemiological context; only media and peer influences affect adoption.",
+      "suggested_approach": "Add EpidemiologicalContext that provides a smoothed, lagged case rate, then update each agent\u2019s risk perception which feeds into adoption decision as an additional signal.",
+      "expected_benefit": "Captures observed dynamics where risk perceptions track case trends, improving realism and fit."
+    },
+    {
+      "aspect": "Information campaigns and misinformation",
+      "current_approach": "MediaInfluence is a simple decaying signal; MediaMisinformation only shifts thresholds statically per day.",
+      "suggested_approach": "Add InformationSource entities that broadcast messages with credibility/bias/frequency/effect size and misinformation_rate; target audiences based on demographic attributes; combine with agent trust_in_authorities.",
+      "expected_benefit": "Richer and targetable information dynamics; enables policy scenario analyses and calibration to real campaigns."
+    },
+    {
+      "aspect": "Mask supply and market dynamics",
+      "current_approach": "RetailerModule with fixed restock and price; no availability_index or supply shocks.",
+      "suggested_approach": "Implement MaskMarket with availability_index and supply_shock_schedule; use availability to constrain purchases and inform adoption (higher perceived cost/inconvenience when availability low).",
+      "expected_benefit": "Better reflection of supply constraints and shock effects; adoption follows availability constraints."
+    },
+    {
+      "aspect": "Mobility and location-specific policy",
+      "current_approach": "Single generic attendance with uniform enforcement; no location types or risk levels.",
+      "suggested_approach": "Introduce multiple Location entities by type (home, work, transit, retail, leisure) with mask policies and enforcement; move agents according to mobility profile; collect per-location adoption metrics.",
+      "expected_benefit": "Enables adoption_by_location_type and exposure-weighted adoption; supports location-targeted policies."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Normalize task-spec parameters to internal keys in modules (mean_degree<-average_degree, mask_cost<-mask_price, restock_rate<-restock_rate_per_day, policy_*<-mandate_on/off_day and fine_amount, enforcement_probability_per_entry).",
+      "reason": "Ensures the simulator uses the task\u2019s parameters correctly without requiring plan rewrites.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Adjust HouseholdModule to read agents from buffers if present.",
+      "reason": "Fixes day-0 household initialization and purchase requests.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "In AdoptionDecision, penalize adoption when inventory is zero and scale by affordability vs. mask price.",
+      "reason": "Connects adoption to supply constraints and price sensitivity per task.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add compute_policy_effect flag to Simulation.evaluate() and disable during calibration evaluator.",
+      "reason": "Removes counterfactual overhead during calibration, improving performance substantially.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Fix time horizon preference in adapter: propagate time_horizon_days from parameters to initialization if present; otherwise avoid setting a default of 60.",
+      "reason": "Prevents unintended truncation to 60 days; honors task\u2019s 180-day horizon.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Skip restock on t==0 and map restock_rate_per_day; map mask_price consistently.",
+      "reason": "Prevents inventory overcount on day 0 and aligns to task key names.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Track entries and masked entries in LocationModule; compute fine_incidents_per_1000_entries and adoption_by_location_type (initially \u2018public\u2019) in evaluate().",
+      "reason": "Enables required metrics and better observability for policy enforcement impact.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add EpidemiologicalContext module, wire risk signal into AdoptionDecision.",
+      "reason": "Implements risk_feedback interaction from task spec.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "overall_adoption_rate_over_time",
+      "current_gap": "Lacks sensitivity to case trends and supply shocks; smooth media and peer effects only.",
+      "suggestion": "Integrate smoothed case rates as a risk signal; add supply shock schedule and availability_index to mask market; adjust adoption accordingly."
+    },
+    {
+      "metric": "policy_impact_effect_size",
+      "current_gap": "Computed via pre/post or counterfactual without controlling for concurrent trends; expensive during calibration.",
+      "suggestion": "Use difference-in-differences against counterfactual only in final evaluation; use pre/post during calibration with a fixed window size; optionally cache per seed/params."
+    },
+    {
+      "metric": "adoption_by_location_type",
+      "current_gap": "Not computed; no per-location tracking.",
+      "suggestion": "Track entries/masking per location type; compute rates per type and exposure-weighted adoption using risk_level."
+    },
+    {
+      "metric": "fine_incidents_per_1000_entries",
+      "current_gap": "Not computed; entries are not counted.",
+      "suggestion": "Count entries and fines per day/location; compute fines/1000 entries in evaluate()."
+    },
+    {
+      "metric": "adoption_inequality_gini",
+      "current_gap": "Computed across income groups only at final day; ignores demographic group variation.",
+      "suggestion": "Compute Gini across specified demographic groups; emit time series or final-day values per plan."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement parameter normalization (average_degree, mask_price, restock_rate_per_day, mandate_on/off_day, fine_amount, enforcement_probability_per_entry) and fix time horizon handling.",
+    "Integrate inventory and affordability into AdoptionDecision; fix HouseholdModule to read buffers at t=0; skip restock on day 0.",
+    "Add counters for entries and masked entries; compute time_to_50_percent_adoption and total sustained days above threshold in evaluate(); add fine_incidents_per_1000_entries.",
+    "Add EpidemiologicalContext module with risk signal and wire into decisions.",
+    "Add compute_policy_effect flag to evaluate() and disable during calibration to improve performance.",
+    "Extend LocationModule toward multiple location types and risk levels; later, add InformationSource and MaskMarket with supply shocks."
+  ],
+  "additional_comments": "Recent changes improved robustness (I/O guards, Brier computation, double-count prevention, reuse of network/agents), which is positive. However, the core misalignment with the task spec remains. Implementing parameter mapping and supply-aware adoption will immediately improve plausibility and allow more faithful calibration. Add risk feedback next to capture case-driven adoption swings, then iterate on richer information and location models.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "mean_degree = self.registry.get_param_or(\"mean_degree\", None)\nif mean_degree is None:\n    mean_degree = self.registry.get_param_or(\"avg_social_degree\", 6)\nmean_degree = float(mean_degree)",
+      "after": "mean_degree = self.registry.get_param_or(\"mean_degree\", None)\nif mean_degree is None:\n    mean_degree = self.registry.get_param_or(\"average_degree\", None)\nif mean_degree is None:\n    mean_degree = self.registry.get_param_or(\"avg_social_degree\", 6)\nmean_degree = float(mean_degree)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "retailer = state.get(\"retailer\", {\"inventory\": 0, \"price\": float(self.registry.get_param_or(\"mask_cost\", 2.0))})\nif t == 0:\n    inventory_init = int(self.registry.get_param_or(\"initial_inventory\", 1000))\n    retailer[\"inventory\"] = inventory_init\n    retailer[\"price\"] = float(self.registry.get_param_or(\"mask_cost\", 2.0))\n    retailer[\"max_daily_sales\"] = int(self.registry.get_param_or(\"max_daily_sales\", 1000))\n    out[\"retailer\"] = retailer\n# Restock\nrestock = int(self.registry.get_param_or(\"restock_rate\", 100))\nretailer_inventory = retailer.get(\"inventory\", 0) + restock\nprice = float(self.registry.get_param_or(\"mask_cost\", retailer.get(\"price\", 2.0)))",
+      "after": "price_cfg = float(self.registry.get_param_or(\"mask_cost\", self.registry.get_param_or(\"mask_price\", 2.0)))\nretailer = state.get(\"retailer\", {\"inventory\": 0, \"price\": price_cfg})\nif t == 0:\n    inventory_init = int(self.registry.get_param_or(\"initial_inventory\", 1000))\n    retailer[\"inventory\"] = inventory_init\n    retailer[\"price\"] = price_cfg\n    retailer[\"max_daily_sales\"] = int(self.registry.get_param_or(\"max_daily_sales\", 1000))\n    out[\"retailer\"] = retailer\n# Restock (skip on day 0)\nrestock = int(self.registry.get_param_or(\"restock_rate_per_day\", self.registry.get_param_or(\"restock_rate\", 100)))\nif t == 0:\n    retailer_inventory = retailer.get(\"inventory\", 0)\nelse:\n    retailer_inventory = retailer.get(\"inventory\", 0) + restock\nprice = float(self.registry.get_param_or(\"mask_cost\", self.registry.get_param_or(\"mask_price\", retailer.get(\"price\", 2.0))))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "agents = state.get(\"agents\", [])\nif not agents:\n    self.io_log[t] = {\"note\": \"no agents\"}\n    return out",
+      "after": "agents = buffers.get(\"agents\", state.get(\"agents\", []))\nif not agents:\n    self.io_log[t] = {\"note\": \"no agents\"}\n    return out",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "net_signal = peer_sig[idx] + media_sig[idx] + policy_sig[idx] - a[\"threshold\"]\nmem_prop_prev = a.get(\"memory_propensity\", 0.0)\nmem_prop_new = (1 - prop_mem_decay) * mem_prop_prev + prop_mem_decay * net_signal\nlatent = mem_prop_new - social_inertia * (1 if a[\"adoption_state\"] == 1 else 0)\np = 1.0 / (1.0 + math.exp(-adoption_slope * latent))\np = clamp(p + random.gauss(0.0, noise_scale), 0.0, 1.0)",
+      "after": "net_signal = peer_sig[idx] + media_sig[idx] + policy_sig[idx] - a[\"threshold\"]\nmem_prop_prev = a.get(\"memory_propensity\", 0.0)\nmem_prop_new = (1 - prop_mem_decay) * mem_prop_prev + prop_mem_decay * net_signal\n# Supply and affordability constraints\ninv = a.get(\"mask_inventory\", 0)\nmask_price = float(self.registry.get_param_or(\"mask_cost\", self.registry.get_param_or(\"mask_price\", 2.0)))\nafford = 1.0 if a.get(\"budget\", 0.0) >= mask_price else 0.5\nsupply_penalty = 0.0 if inv > 0 else 0.5\nlatent = mem_prop_new - social_inertia * (1 if a[\"adoption_state\"] == 1 else 0) - supply_penalty\np = 1.0 / (1.0 + math.exp(-adoption_slope * latent))\np *= afford\np = clamp(p + random.gauss(0.0, noise_scale), 0.0, 1.0)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "policy_type = self.registry.get_param_or(\"policy_type\", \"none\")\nstart = int(self.registry.get_param_or(\"policy_start_day\", 10**9))\nend = int(self.registry.get_param_or(\"policy_end_day\", -10**9))",
+      "after": "policy_type = self.registry.get_param_or(\"policy_type\", \"none\")\nstart = int(self.registry.get_param_or(\"policy_start_day\", self.registry.get_param_or(\"mandate_on_day\", 10**9)))\nend = int(self.registry.get_param_or(\"policy_end_day\", self.registry.get_param_or(\"mandate_off_day\", -10**9)))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "enforcement_strictness = float(self.registry.get_param_or(\"enforcement_strictness\", 0.5))\npenalty_amount = float(self.registry.get_param_or(\"penalty_amount\", 10.0))",
+      "after": "enforcement_strictness = float(self.registry.get_param_or(\"enforcement_strictness\", self.registry.get_param_or(\"enforcement_probability_per_entry\", 0.5)))\npenalty_amount = float(self.registry.get_param_or(\"penalty_amount\", self.registry.get_param_or(\"fine_amount\", 10.0)))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "for i, a in enumerate(agents):\n    if random.random() < attendance_rate:\n        wears_mask = (a.get(\"adoption_state\", 0) == 1)\n        if policy_active and not wears_mask:\n            prob_enforce = clamp(enforcement_strictness * (1.0 + enforcement_strength), 0.0, 1.0)\n            if random.random() < prob_enforce:\n                enforcement_actions += 1\n                delta_budget[i] -= penalty_amount\nout[\"delta.budget.enforcement\"] = delta_budget\nout[\"event.enforcement_actions\"] = int(enforcement_actions)",
+      "after": "entries = 0\nmasked_entries = 0\nfor i, a in enumerate(agents):\n    if random.random() < attendance_rate:\n        entries += 1\n        wears_mask = (a.get(\"adoption_state\", 0) == 1)\n        if wears_mask:\n            masked_entries += 1\n        if policy_active and not wears_mask:\n            prob_enforce = clamp(enforcement_strictness * (1.0 + enforcement_strength), 0.0, 1.0)\n            if random.random() < prob_enforce:\n                enforcement_actions += 1\n                delta_budget[i] -= penalty_amount\nout[\"delta.budget.enforcement\"] = delta_budget\nout[\"event.enforcement_actions\"] = int(enforcement_actions)\nout[\"event.entries\"] = int(entries)\nout[\"event.masked_entries\"] = int(masked_entries)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate(self, ground_truth: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:",
+      "after": "def evaluate(self, ground_truth: Optional[Dict[str, List[Dict[str, Any]]]] = None, compute_policy_effect: bool = True) -> Dict[str, Any]:",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "policy_effect = self._compute_policy_effect()",
+      "after": "policy_effect = self._compute_policy_effect() if compute_policy_effect else 0.0",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "metrics = sim_copy.evaluate()",
+      "after": "metrics = sim_copy.evaluate(compute_policy_effect=False)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "\"initialization\": task_plan.get(\"initialization\", {\"time_horizon_days\": 60}),",
+      "after": "horizon = task_plan.get(\"parameters\", {}).get(\"time_horizon_days\")\ninit = task_plan.get(\"initialization\", {})\nif horizon is not None:\n    init = dict(init)\n    init[\"time_horizon_days\"] = int(horizon)\n\"initialization\": init,",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# No EpidemiologicalContext module\n",
+      "after": "class EpidemiologicalContext(SimModule):\n    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], t: int) -> Dict[str, Any]:\n        out: Dict[str, Any] = {}\n        agents = state.get(\"agents\", [])\n        if not agents:\n            return out\n        series = self.registry.get_param_or(\"exogenous_case_rate_series\", [])\n        lag = int(self.registry.get_param_or(\"case_reporting_lag_days\", 3))\n        win = int(self.registry.get_param_or(\"case_smoothing_window_days\", 7))\n        idx = max(0, t - lag)\n        if isinstance(series, list) and series:\n            vals = series[max(0, idx - win + 1):idx + 1]\n            case_val = mean(vals) if vals else 0.0\n        else:\n            case_val = 0.0\n        risk_weight = float(self.registry.get_param_or(\"risk_sensitivity_weight\", 0.3))\n        signals = [risk_weight * case_val] * len(agents)\n        out[\"signal.risk_effect\"] = signals\n        return out\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "peer_sig = buffers.get(\"signal.peer_pressure\", [0.0] * len(agents))\nmedia_sig = buffers.get(\"signal.media_effect\", [0.0] * len(agents))\npolicy_sig = buffers.get(\"signal.policy_effect\", [0.0] * len(agents))",
+      "after": "peer_sig = buffers.get(\"signal.peer_pressure\", [0.0] * len(agents))\nmedia_sig = buffers.get(\"signal.media_effect\", [0.0] * len(agents))\npolicy_sig = buffers.get(\"signal.policy_effect\", [0.0] * len(agents))\nrisk_sig = buffers.get(\"signal.risk_effect\", [0.0] * len(agents))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "net_signal = peer_sig[idx] + media_sig[idx] + policy_sig[idx] - a[\"threshold\"]",
+      "after": "net_signal = peer_sig[idx] + media_sig[idx] + policy_sig[idx] + risk_sig[idx] - a[\"threshold\"]",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest changes add robustness (I/O guards, reuse of static state, corrected Brier and Gini, safer seeding, and reduced calibration I/O). They do not introduce notable new bugs but fail to address core task-spec gaps and some logic/performance issues.",
+    "positive_impacts": [
+      "Prevented double-counting of purchases and improved metrics correctness (Brier).",
+      "Guarded artifact writes and reduced I/O during calibration/evaluation.",
+      "Reused network and agent initialization to speed calibration.",
+      "Improved robustness of gini calculation and URL loading."
+    ],
+    "negative_impacts": [
+      "Counterfactual policy effect is still run within evaluate(), which is called per calibration trial, retaining a performance bottleneck.",
+      "Adapter still defaults to 60-day horizon, likely overriding the task's 180-day horizon.",
+      "Households still read agents only from state, not buffers, leading to day-0 purchase omission."
+    ],
+    "suggestions": [
+      "Add evaluate(compute_policy_effect=False) during calibration to avoid the counterfactual run.",
+      "Fix time horizon propagation in the adapter to respect task parameters.",
+      "Modify HouseholdModule to read agents from buffers and state.",
+      "Implement parameter normalization mapping for task keys and integrate supply constraints in AdoptionDecision."
+    ]
+  }
+}

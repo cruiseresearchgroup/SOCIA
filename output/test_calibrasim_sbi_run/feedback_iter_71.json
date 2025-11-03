@@ -1,0 +1,202 @@
+{
+  "summary": "The codebase includes many core components (agents, small-world network, policy enforcement scaffolding, supply market), but it lacks a runnable simulation loop, metrics computation, and integrated interactions. The main() function is a no-op. Several parameter names do not match the provided specification, causing configuration mismatches. Adoption decisions are not constrained by mask inventory, and media reach, capacity effects, and counterfactual metrics (campaign lift) are not implemented. The recent changes improved structure and added utilities, but did not resolve the absence of a run loop or metrics.",
+  "critical_issues": [
+    {
+      "issue": "No simulation loop (run()) and main() does nothing",
+      "impact": "The simulation cannot execute; no metrics are produced and the system fails verification.",
+      "solution": "Implement Simulation.run() to iterate over days, integrate peer influence, information diffusion, supply acquisition, enforcement, habit/fatigue, and metrics logging. Populate main() to construct Simulation from spec-compatible params, call run(), and print results.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Parameter name mismatches with the spec",
+      "impact": "User-provided configuration is ignored or misapplied (e.g., simulation_duration_days, random_seed, supply_restock_rate_per_day). Results will not reflect intended scenarios.",
+      "solution": "Add mapping for spec keys to internal fields in Simulation.__init__ (random_seed->seed; simulation_duration_days->time_horizon_days; supply_restock_rate_per_day->production_rate; enforcement_probability, etc.).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Adoption not gated by inventory/supply constraints",
+      "impact": "Agents can 'adopt' without masks, overstating adoption and breaking supply-demand dynamics.",
+      "solution": "Only set adoption_state=True if the person has inventory>0. If the decision is to adopt but inventory is 0, queue a mask demand; after market allocation, update inventory and adoption_state accordingly.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "SupplyMarket.update_daily double-counts sales when used with allocate()",
+      "impact": "If both update_daily (which subtracts sold units) and allocate() (which also subtracts) are used, inventory can be depleted twice, distorting price/supply dynamics.",
+      "solution": "Refactor update_daily to adjust price and restock only; move the actual stock decrement exclusively into allocate().",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Metrics from the spec are not computed or exposed",
+      "impact": "No evaluation is possible: adoption_rate_over_time, final_adoption_rate, peak, time_to_50%, compliance under mandate, violation rate, adoption by location, and campaign lift are missing.",
+      "solution": "Compute and store all requested metrics in Simulation.run(). For campaign_effect_lift, run a counterfactual with campaign_intensity=0 or track a shadow series.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Media reach and influence decay not integrated into daily updates",
+      "impact": "Information diffusion is unrealistic; all agents get the same media signal and attitudes do not decay, biasing adoption dynamics.",
+      "solution": "Apply media signals only to a subset of agents based on reach, and update latent attitudes with an influence decay parameter.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Daily decision pipeline",
+      "current_approach": "No run loop; scattered helper functions.",
+      "suggested_approach": "Implement a daily sequence: update location policies; compute neighbor adoption; gather authority/media signals; update latent attitudes with decay; decide adoption; request masks; market update + allocation; enforce at locations; update fatigue/habit; log metrics.",
+      "expected_benefit": "A runnable, integrated simulation consistent with spec interactions and metrics."
+    },
+    {
+      "aspect": "Supply-demand coupling",
+      "current_approach": "update_daily subtracts 'sold' and allocate also subtracts; adoption ignores inventory.",
+      "suggested_approach": "Make update_daily restock and price-adjust only; allocate decrements stock; gate adoption on inventory.",
+      "expected_benefit": "Eliminates double counting and aligns adoption with resource constraints."
+    },
+    {
+      "aspect": "Information diffusion",
+      "current_approach": "broadcast_guidance and broadcast_messages exist but are not applied to agents; media reach unused.",
+      "suggested_approach": "Each day, compute authority signal; compute media signal and apply it to a random subset of agents per reach; call Person.receive_information to update trust/risk.",
+      "expected_benefit": "More realistic uptake dynamics influenced by media coverage and authority credibility."
+    },
+    {
+      "aspect": "Peer influence and attitude inertia",
+      "current_approach": "observe_peers exists but not integrated; no decay parameter used.",
+      "suggested_approach": "Maintain per-agent attitude with inertia and daily update: attitude = (1 - decay)*attitude + w_peer*peer_delta + w_auth*authority + w_risk*risk - w_cost*cost.",
+      "expected_benefit": "Smoother, credible adoption curves and sensitivity to social norms."
+    },
+    {
+      "aspect": "Compliance metrics under mandates",
+      "current_approach": "enforce_policy used within a visit stub; not aggregated into metrics.",
+      "suggested_approach": "Track entries into mandated locations, compliant entries, and violations; compute daily and overall rates.",
+      "expected_benefit": "Enables evaluation of policy effectiveness and enforcement strength."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Add Simulation.run() implementing the daily loop and metrics logging.",
+      "reason": "Core execution flow is missing; enables the simulation to produce results.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Populate main() to load params (mapping spec keys), run the simulation, and print JSON results.",
+      "reason": "Allows the sandbox to execute the simulation end-to-end.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Map spec parameters to internal fields in __init__.",
+      "reason": "Ensures user inputs match the expected configuration.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Refactor SupplyMarket.update_daily to stop subtracting sold units; let allocate() handle stock decrement.",
+      "reason": "Removes double decrement and makes supply logic consistent.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use MediaChannel.reach when applying media signals and add influence decay in attitude updates.",
+      "reason": "Improves realism of information diffusion and temporal dynamics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Gate adoption by inventory; implement market demand and allocation before setting adoption_state.",
+      "reason": "Aligns decisions with supply constraints.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute all metrics in the spec and return them; include logistic fit R^2 for QA.",
+      "reason": "Satisfies evaluation requirements and helps diagnose curve shape.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "No series computed; adoption likely too fast without inertia and inventory gating.",
+      "suggestion": "Introduce attitude inertia and inventory gating; calibrate peer_influence_strength and influence_decay_per_day to produce S-shaped curves; validate with logistic_fit_r2."
+    },
+    {
+      "metric": "compliance_rate_under_mandate",
+      "current_gap": "Not computed; enforcement strength not tied to authority resources or location type.",
+      "suggestion": "Scale Location.enforcement_strength by PublicHealthAuthority.enforcement_resources; compute daily/overall compliance and violation rates."
+    },
+    {
+      "metric": "adoption_by_location_type",
+      "current_gap": "Aggregations missing; capacity and policy heterogeneity not leveraged.",
+      "suggestion": "Cap entrants by capacity; compute masked/total per location type; use observed compliance to feed back into next-day attitudes as perceived norms."
+    },
+    {
+      "metric": "campaign_effect_lift",
+      "current_gap": "No counterfactual baseline modeled.",
+      "suggestion": "Run a counterfactual with campaign_intensity=0 using same seed/network to compute lift as delta in final or post-campaign average adoption."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement Simulation.run() with the full daily pipeline and metrics logging.",
+    "Populate main() to execute the simulation and output results as JSON.",
+    "Map spec parameters to internal names in __init__ to ensure config correctness.",
+    "Refactor SupplyMarket.update_daily to stop subtracting sold units; gate adoption by inventory and perform allocation.",
+    "Apply media reach and influence decay in per-agent attitude updates.",
+    "Compute and return all required metrics, including campaign_effect_lift via a counterfactual run.",
+    "Optionally incorporate capacity constraints and feedback from observed location norms."
+  ],
+  "additional_comments": "The presence of 'pass' statements before implemented bodies is harmless but confusing; consider removing them for clarity. Unused imports (argparse, csv, json, statistics, sys) can be retained if you add CLI output, but otherwise they should be pruned. Update the Simulation docstring to reflect implemented methods, or implement save_results/visualize if desired.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    ...\n    def __init__(self, params: Dict[str, Any]) -> None:\n        ...\n        self._build_world()\n",
+      "after": "class Simulation:\n    ...\n    def __init__(self, params: Dict[str, Any]) -> None:\n        # Map spec keys to internal names\n        p = params.copy()\n        p.setdefault(\"seed\", p.get(\"random_seed\", 42))\n        p.setdefault(\"time_horizon_days\", p.get(\"simulation_duration_days\", 180))\n        p.setdefault(\"average_degree\", p.get(\"average_degree\", 8))\n        p.setdefault(\"campaign_intensity\", p.get(\"campaign_intensity\", 0.3))\n        p.setdefault(\"campaign_start_day\", p.get(\"campaign_start_day\", 14))\n        p.setdefault(\"misinformation_intensity\", p.get(\"misinformation_intensity\", 0.2))\n        p.setdefault(\"misinformation_start_day\", p.get(\"misinformation_start_day\", 10))\n        p.setdefault(\"enforcement_probability\", p.get(\"enforcement_probability\", 0.5))\n        p.setdefault(\"mask_supply_level\", p.get(\"mask_supply_level\", 1000.0))\n        p.setdefault(\"supply_restock_rate_per_day\", p.get(\"supply_restock_rate_per_day\", 200.0))\n        # Initialize from mapped params\n        self.params = p\n        self.seed = int(p[\"seed\"])\n        self.rng = random.Random(self.seed)\n        self.population_size = int(p.get(\"population_size\", 1000))\n        self.days = int(p.get(\"time_horizon_days\", 180))\n        ...\n        self._build_world()\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class SupplyMarket:\n    ...\n    def update_daily(self, demand: float) -> None:\n        ...\n        self.mask_supply_level = max(0.0, self.mask_supply_level + self.production_rate - self.distribution_rate)\n        sold = min(self.mask_supply_level, demand)\n        unmet = max(0.0, demand - sold)\n        stress = 0.0 if demand <= 0 else unmet / demand\n        target_factor = 1.0 + 0.2 * (2.0 * stress - 1.0)\n        self.price = max(0.1, self.price * (1.0 + self.elasticity * (target_factor - 1.0)))\n        self.mask_supply_level -= sold\n",
+      "after": "class SupplyMarket:\n    ...\n    def update_daily(self, demand: float) -> None:\n        # Adjust price based on demand pressure but do not subtract stock here.\n        available = max(0.0, self.mask_supply_level)\n        sold_cap = min(available, max(0.0, demand))\n        unmet = max(0.0, demand - sold_cap)\n        stress = 0.0 if demand <= 0 else unmet / demand\n        target_factor = 1.0 + 0.2 * (2.0 * stress - 1.0)\n        self.price = max(0.1, self.price * (1.0 + self.elasticity * (target_factor - 1.0)))\n        # Then restock/redistribute\n        self.mask_supply_level = max(0.0, self.mask_supply_level + self.production_rate - self.distribution_rate)\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    ...\n    pass\n",
+      "after": "class Simulation:\n    ...\n    def run(self) -> Dict[str, Any]:\n        influence_decay = float(self.params.get(\"influence_decay_per_day\", 0.02))\n        adoption_series: List[float] = []\n        mandated_compliance: List[float] = []\n        violation_series: List[float] = []\n        by_type_series: Dict[str, List[float]] = {lt: [] for lt in self.location_types}\n        for day in range(self.days):\n            # Update policies and enforcement\n            self._update_location_policies(day)\n            for loc in self.locations:\n                loc.enforcement_strength = min(1.0, max(0.0, loc.enforcement_strength * self.authority.enforcement_resources))\n            # Social observation\n            neigh_frac = self._compute_neighbor_adoption()\n            # Signals\n            authority_signal = self.authority.broadcast_guidance(day)\n            media_signal = self.media.broadcast_messages(day, self.rng)\n            # Info diffusion and attitude update\n            will_adopt_ids: List[int] = []\n            demand_ids: List[int] = []\n            for i, person in enumerate(self.people):\n                peer_delta = person.observe_peers(neigh_frac[i])\n                seen_media = (self.rng.random() < self.media.reach)\n                media_for_person = media_signal if seen_media else 0.0\n                person.receive_information(authority_signal, media_for_person)\n                # Update latent attitude with decay and peer influence\n                attitude = getattr(person, \"attitude\", 0.0)\n                attitude = (1.0 - influence_decay) * attitude + self.peer_influence_strength * peer_delta + 0.2 * authority_signal\n                setattr(person, \"attitude\", max(-1.0, min(1.0, attitude)))\n                # Decide adoption intent\n                intent = person.decide_adoption(attitude, self.market.price, self.rng)\n                if intent:\n                    will_adopt_ids.append(i)\n                    if person.mask_inventory <= 0:\n                        demand_ids.append(i)\n            # Market update and allocation\n            self.market.update_daily(demand=float(len(demand_ids)))\n            allocated = set(self.market.allocate(demand_ids, self.rng))\n            for i in will_adopt_ids:\n                person = self.people[i]\n                if person.mask_inventory <= 0 and i in allocated:\n                    person.acquire_masks(1)\n                person.adoption_state = (person.mask_inventory > 0)\n            # Visits and enforcement metrics\n            wearing = [p.adoption_state for p in self.people]\n            comp, viol, by_type = self._simulate_visits_and_enforcement(wearing)\n            mandated_compliance.append(comp)\n            violation_series.append(viol)\n            for lt, v in by_type.items():\n                by_type_series[lt].append(v)\n            # Habit and fatigue updates\n            for p in self.people:\n                p.update_fatigue_and_habit()\n            # Daily adoption rate\n            adoption_series.append(sum(1 for p in self.people if p.adoption_state) / self.population_size)\n        # Aggregate metrics\n        final_rate = adoption_series[-1] if adoption_series else 0.0\n        peak_rate = max(adoption_series) if adoption_series else 0.0\n        peak_day = adoption_series.index(peak_rate) if adoption_series else None\n        t50 = next((d for d, v in enumerate(adoption_series) if v >= 0.5), None)\n        avg_comp = sum(mandated_compliance)/len(mandated_compliance) if mandated_compliance else 1.0\n        avg_viol = sum(violation_series)/len(violation_series) if violation_series else 0.0\n        by_type_avg = {lt: (sum(vals)/len(vals) if vals else 0.0) for lt, vals in by_type_series.items()}\n        r2 = logistic_fit_r2(adoption_series) if adoption_series else None\n        results = {\n            \"adoption_rate_over_time\": adoption_series,\n            \"final_adoption_rate\": final_rate,\n            \"peak_adoption_rate\": {\"value\": peak_rate, \"day\": peak_day},\n            \"time_to_50_percent_adoption\": t50,\n            \"compliance_rate_under_mandate\": avg_comp,\n            \"violation_rate\": avg_viol,\n            \"adoption_by_location_type\": by_type_avg,\n            \"adoption_logistic_fit_r2\": r2,\n        }\n        return results\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass\n",
+      "after": "def main():\n    # Basic CLI: read params JSON from stdin or fallback to defaults\n    try:\n        raw = sys.stdin.read().strip()\n        params = json.loads(raw) if raw else {}\n    except Exception:\n        params = {}\n    # Ensure spec-to-internal mapping happens in __init__\n    sim = Simulation(params)\n    results = sim.run()\n    print(json.dumps(results))\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _simulate_visits_and_enforcement(self, wearing_mask: List[bool]) -> Tuple[float, float, Dict[str, float]]:\n    ...\n    for i, p in enumerate(self.people):\n        lt = choose_type()\n        locs = loc_by_type.get(lt, [])\n        if not locs:\n            continue\n        loc = self.rng.choice(locs)\n        allowed, violation = loc.enforce_policy(wearing_mask[i], self.rng)\n        ...\n",
+      "after": "def _simulate_visits_and_enforcement(self, wearing_mask: List[bool]) -> Tuple[float, float, Dict[str, float]]:\n    ...\n    # Respect capacity by counting entrants per location\n    loc_load: Dict[int, int] = {loc.id: 0 for loc in self.locations}\n    for i, p in enumerate(self.people):\n        lt = choose_type()\n        locs = loc_by_type.get(lt, [])\n        if not locs:\n            continue\n        loc = self.rng.choice(locs)\n        if loc_load[loc.id] >= loc.capacity:\n            continue  # capacity reached\n        allowed, violation = loc.enforce_policy(wearing_mask[i], self.rng)\n        if loc.mask_policy == \"required\":\n            entries_mandated += 1\n            if wearing_mask[i]:\n                compliant_entries += 1\n            if violation:\n                violations += 1\n        if allowed:\n            loc_load[loc.id] += 1\n            type_entries[lt] += 1\n            if wearing_mask[i]:\n                type_masked_entries[lt] += 1\n    ...\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent changes added a substantial amount of scaffolding: agent classes, helper functions, small-world network generation, policy and market classes, and enforcement logic. However, the simulation still lacks a run loop and main execution wiring. Some implemented methods include extraneous 'pass' statements followed by working code, which is harmless but confusing. A supply logic change introduced a potential double-decrement when combining update_daily with allocate.",
+    "positive_impacts": [
+      "Clearer structure with dataclasses for Person, Location, PublicHealthAuthority, MediaChannel, and SupplyMarket.",
+      "Implemented small-world neighbor generation without external dependencies.",
+      "Added enforcement logic and location policies with a reasonable default scheme.",
+      "Utility functions (sigmoid, logistic_fit_r2) support analysis and QA."
+    ],
+    "negative_impacts": [
+      "Still no Simulation.run() and main() remains a no-op, leaving the system non-functional.",
+      "SupplyMarket.update_daily subtracts sold units while allocate also subtracts, risking double-count.",
+      "Parameter names in __init__ do not align with the provided spec, leading to configuration drift.",
+      "Media reach and influence decay are not integrated, undermining realism."
+    ],
+    "suggestions": [
+      "Implement the run loop immediately and integrate all interactions and metrics.",
+      "Refactor supply logic to avoid double-decrement and gate adoption on inventory.",
+      "Map spec parameters to internal names during initialization.",
+      "Apply media reach and influence decay; compute campaign lift via a counterfactual run."
+    ]
+  }
+}
