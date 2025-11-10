@@ -1,0 +1,204 @@
+{
+  "summary": "The current simulation has several critical implementation bugs (syntax/indentation, mis-mapped coefficients, ignoring observed received_info) that will either prevent execution or severely degrade calibration quality. Conceptually, the model deviates from the task spec in a few places (improper temporal holdout, reliance on external test_data.csv, day index handling for interventions), which leads to biased forecasts that over-predict aggregate adoption and underfit the observed downward trend. Prioritize fixing syntax, correcting the logistic coefficient mapping, using observed received_info, and enforcing a proper temporal holdout. Then, align intervention timing to absolute days and remove the dependency on a non-specified test_data.csv. The provided code patches directly address these issues.",
+  "critical_issues": [
+    {
+      "issue": "Indentation/syntax errors in evaluate_on_validation and posterior sampling block",
+      "impact": "Causes immediate runtime failure; the code will not execute.",
+      "solution": "Fix indentation of init_states computation, observed transition slicing, and the if/else block for posterior_samples in main.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Logistic calibrator mis-maps coefficients to features",
+      "impact": "Calibrated parameters are incorrect (risk and info effects mapped from neighbor-shares), producing biased predictions and poor interpretability.",
+      "solution": "Map beta indices to their actual feature positions: [intercept, wear_prev, share_f, share_w, share_c, risk, mem_info, age_oh..., occ_oh...]; set theta_f/w/c from their positions; beta_r from risk; beta_i from mem_info; then extract demographics using correct offsets.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Calibrator ignores observed received_info (uses zeros)",
+      "impact": "Prevents learning the effect of information exposure and government intervention; contributes to over-persistence and over-predicted adoption rates.",
+      "solution": "Pass received_info into the calibrator bundle and build mem_info from the real received_info.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Demographic effects never applied due to name mismatches",
+      "impact": "Age/occupation effects are effectively zero, reducing model fidelity and missing heterogeneity.",
+      "solution": "Use actual category names from encode_demographics as keys when storing and applying coefficients; stop hardcoding category names in evaluate_params.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Temporal holdout not enforced; reliance on non-specified test_data.csv",
+      "impact": "Potential data leakage or failure when test_data.csv is unavailable; misalignment with the task that requests forecasting days 30–39 from train_data.",
+      "solution": "Use build_train_validation_splits(days, 0.8) on train_data.csv to train on days 0–29 and validate/forecast on days 30–39 directly, removing the external test file dependency.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Intervention timing uses relative day numbering inside simulate_window",
+      "impact": "When evaluating later windows (e.g., days 30–39), intervention day threshold erroneously triggers as if global day is near zero, distorting info broadcast after day 10.",
+      "solution": "Add a base_day parameter to simulate_window and use global_day = base_day + (d+1) to compare against the absolute intervention day.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Temporal holdout and forecasting protocol",
+      "current_approach": "Uses all train_data for calibration, then loads an external test_data.csv for evaluation.",
+      "suggested_approach": "Split train_data.csv using build_train_validation_splits (80/20). Calibrate on 0–29, simulate and evaluate on 30–39, and use the last observed train day as the initial state.",
+      "expected_benefit": "Removes external dependency, prevents leakage, matches the task spec, and improves reproducibility."
+    },
+    {
+      "aspect": "Information exposure modeling",
+      "current_approach": "Calibrator uses a zero received_info placeholder; simulation uses heuristic phi and lambda.",
+      "suggested_approach": "Use observed received_info in calibration to estimate beta_i and rho_info_decay; optionally calibrate phi_* and lambda_broadcast_base/factor using calibrate_info_params_simple or by moment matching daily received_info prevalence.",
+      "expected_benefit": "Improves responsiveness to campaigns and peer diffusion, reduces over-persistence, and better matches observed adoption declines."
+    },
+    {
+      "aspect": "Layer influence and peer effects",
+      "current_approach": "theta_f/w/c fixed to 1.0 in LogitHeadCalibrator; layer_weights present but unused in compute_logit.",
+      "suggested_approach": "Fit theta_f/w/c from the logistic head, and/or convert them into normalized weights with derive_layer_weights_and_betas; update compute_logit to incorporate either slopes or normalized weights consistently.",
+      "expected_benefit": "Captures heterogeneous influence strengths across family/work/community layers, improving micro-to-macro fidelity."
+    },
+    {
+      "aspect": "Government intervention timing",
+      "current_approach": "Threshold compares to local simulation day index.",
+      "suggested_approach": "Simulate with a base_day (absolute day index) so that day 10 intervention applies correctly in later windows (e.g., day 30–39).",
+      "expected_benefit": "Correctly applies exogenous changes across different windows, improving predictive alignment."
+    },
+    {
+      "aspect": "Stochastic vs deterministic runs",
+      "current_approach": "Always stochastic sampling per day.",
+      "suggested_approach": "Add an option to run in expectation mode (use probabilities as states) for fast evaluation or gradient-based calibration.",
+      "expected_benefit": "Stabilizes evaluation, speeds up calibration, and enables deterministic baselines to reduce MC variance."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Fix indentation in evaluate_on_validation and the posterior_samples if/else block in main.",
+      "reason": "Prevents runtime crashes and ensures evaluation flow executes.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Correct the coefficient mapping in LogitHeadCalibrator.fit to align with build_feature_matrix feature order.",
+      "reason": "Ensures calibrated parameters correspond to the intended features (risk, info, and layer shares).",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Pass received_info in the calibrator bundle and build mem_info from observed received_info in LogitHeadCalibrator.",
+      "reason": "Allows estimation of information effects and proper handling of intervention.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove hardcoded demographic names in evaluate_params; use actual age_cat_names and occ_cat_names.",
+      "reason": "Applies learned demographic effects instead of zeroing them.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use build_train_validation_splits on train_data.csv and remove dependence on test_data.csv; forecast days 30–39 directly.",
+      "reason": "Aligns with the task specification and prevents file-not-found failures.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add base_day parameter to simulate_window and propagate it from evaluate_on_validation and simulate_forecast to handle global intervention day comparison.",
+      "reason": "Ensures intervention happens at absolute day 10, not relative to the simulation window.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Optionally add expectation mode to simulate_window to use probabilities directly (no Bernoulli sampling) for evaluation.",
+      "reason": "Reduces MC error and speeds up calibration iterations.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "RMSE_aggregate_mean and MAE_aggregate_mean",
+      "current_gap": "Predicted aggregate rates hover ~0.66 vs observed varying 0.48–0.65; MAE ~0.119.",
+      "suggestion": "Reduce inertia gamma and intercept alpha via proper calibration; incorporate observed received_info to better capture drops; calibrate phi_* and lambda to match daily info prevalence."
+    },
+    {
+      "metric": "TransitionFit_mean (~0.10)",
+      "current_gap": "Misses switching dynamics (P01/P10) leading to over-persistence.",
+      "suggestion": "Fit beta_i and rho_info_decay using received_info; consider separate adoption vs retention coefficients (e.g., interaction with prev_state), or estimate gamma distinctly from P11/P00 moments."
+    },
+    {
+      "metric": "Brier_mean",
+      "current_gap": "Probability calibration could be improved; current Brier ~0.021.",
+      "suggestion": "Add L2 regularization tuning for logistic head; calibrate temperature tau on validation to improve probability sharpness; optionally perform isotonic/Platt scaling on validation probabilities."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix syntax/indentation in evaluate_on_validation and posterior sampling block to restore execution.",
+    "Correct logistic coefficient mapping and use observed received_info in LogitHeadCalibrator.",
+    "Remove test_data.csv dependency and implement temporal holdout on train_data.csv (0–29 train, 30–39 validate/forecast).",
+    "Pass demographic category names through evaluation and apply learned effects.",
+    "Add base_day to simulate_window so intervention occurs at absolute day 10.",
+    "Optionally enable expectation mode and tune regularization/tau for better probability calibration."
+  ],
+  "additional_comments": "SBI is currently falling back to a placeholder in environments without sbi; given the current mapping bugs and info omission, a corrected logit_head or random_search baseline may outperform the placeholder SBI path while being faster. Once the core path is fixed and aligned with the spec, revisit SBI with reduced dimensionality and K=1 observables to stabilize training.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def evaluate_on_validation(...):\n    if val_start_idx > 0:\n    init_states = wearing[val_start_idx - 1, :]\n    else:\n        init_states = wearing[val_start_idx, :]\n    ...\n    if val_end_idx - val_start_idx > 1:\n        if val_start_idx > 0:\n    prev_obs = wearing[val_start_idx - 1:val_end_idx - 1, :]\n    curr_obs = wearing[val_start_idx:val_end_idx, :]\n        else:\n            prev_obs = wearing[val_start_idx:val_end_idx - 1, :]\n            curr_obs = wearing[val_start_idx + 1:val_end_idx, :]\n    ...",
+      "after": "def evaluate_on_validation(..., base_day: int = 0):\n    # Initial state for validation\n    if val_start_idx > 0:\n        init_states = wearing[val_start_idx - 1, :]\n    else:\n        init_states = wearing[val_start_idx, :]\n    T_val = val_end_idx - val_start_idx\n    N = wearing.shape[1]\n    obs_rates = wearing[val_start_idx:val_end_idx, :].mean(axis=1)\n    if val_end_idx - val_start_idx > 1:\n        if val_start_idx > 0:\n            prev_obs = wearing[val_start_idx - 1:val_end_idx - 1, :]\n            curr_obs = wearing[val_start_idx:val_end_idx, :]\n        else:\n            prev_obs = wearing[val_start_idx:val_end_idx - 1, :]\n            curr_obs = wearing[val_start_idx + 1:val_end_idx, :]\n    else:\n        prev_obs = np.empty((0, N))\n        curr_obs = np.empty((0, N))\n    ...\n    for r in range(k_runs):\n        sim_states, sim_info, sim_probs = simulate_window(\n            start_states=init_states,\n            neighbors=neighbors,\n            risk=risk,\n            age_oh=age_oh,\n            occ_oh=occ_oh,\n            age_cat_names=age_cat_names,\n            occ_cat_names=occ_cat_names,\n            params=params,\n            start_day_index=val_start_idx - 1 if val_start_idx > 0 else -1,\n            end_day_index=val_end_idx - 1,\n            base_day=base_day + (val_start_idx if val_start_idx > 0 else 0)\n        )\n    ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class LogitHeadCalibrator(Calibrator):\n    ...\n    received_info = np.zeros_like(wearing)  # Placeholder - should be extracted from bundle if available\n    mem_info = compute_mem_info(received_info, cfg.rho_info_decay_default)\n    ...\n    decision_weights = {\n        'alpha': beta[0],\n        'gamma': beta[1],\n        'theta_f': 1.0,\n        'theta_w': 1.0,\n        'theta_c': 1.0,\n        'beta_r': beta[2] if len(beta) > 2 else 0.0,\n        'beta_i': beta[3] if len(beta) > 3 else 0.0,\n        'age_effects': {},\n        'occ_effects': {}\n    }\n    ...",
+      "after": "class LogitHeadCalibrator(Calibrator):\n    ...\n    # bundle now includes received_info\n    wearing, neighbors, risk, age_oh, occ_oh, received_info, cfg = bundle\n    mem_info = compute_mem_info(received_info, cfg.rho_info_decay_default)\n    ...\n    # Feature order: [intercept, wear_prev, share_f, share_w, share_c, risk, mem, age..., occ...]\n    n_age = age_oh.shape[1]\n    n_occ = occ_oh.shape[1]\n    alpha = beta[0]\n    gamma = beta[1]\n    theta_f = beta[2]\n    theta_w = beta[3]\n    theta_c = beta[4]\n    beta_r = beta[5] if len(beta) > 5 else 0.0\n    beta_i = beta[6] if len(beta) > 6 else 0.0\n    age_start = 7\n    occ_start = age_start + n_age\n    age_effects = {name: float(beta[age_start + i]) for i, name in enumerate(self.age_cat_names)} if n_age > 0 else {}\n    occ_effects = {name: float(beta[occ_start + i]) for i, name in enumerate(self.occ_cat_names)} if n_occ > 0 else {}\n    decision_weights = {\n        'alpha': alpha,\n        'gamma': gamma,\n        'theta_f': theta_f,\n        'theta_w': theta_w,\n        'theta_c': theta_c,\n        'beta_r': beta_r,\n        'beta_i': beta_i,\n        'age_effects': age_effects,\n        'occ_effects': occ_effects\n    }\n    ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def simulate_window(...):\n    ...\n    for d in range(days_count):\n        global_day = start_day_index + d + 1\n        lam = params.lambda_broadcast_base * (params.lambda_broadcast_factor_after_day10 if global_day >= 10 else 1.0)\n        ...",
+      "after": "def simulate_window(..., base_day: int = 0, use_expectation: bool = False):\n    ...\n    for d in range(days_count):\n        global_day = base_day + d + 1\n        lam = params.lambda_broadcast_base * (params.lambda_broadcast_factor_after_day10 if global_day >= 10 else 1.0)\n        ...\n        p = sigmoid(logits)\n        probs[d, :] = p\n        if use_expectation:\n            new_states = p.astype(np.float64)\n        else:\n            new_states = (np.random.rand(N) < p).astype(np.float64)\n        states[d, :] = new_states\n        prev_states = new_states\n    return states, info, probs",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Prepare bundle for calibrator\nbundle = (wearing, neighbors, risk_perception, age_oh, occ_oh, cfg)",
+      "after": "# Prepare bundle for calibrator (include received_info and category names)\n# Ensure calibrators have access to category names\ncalibrator.age_cat_names = age_cat_names\ncalibrator.occ_cat_names = occ_cat_names\nbundle = (wearing, neighbors, risk_perception, age_oh, occ_oh, received, cfg)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Validation using external test_data.csv ...\ntry:\n    test_df = load_train_data(test_path)\n    ...\nexcept Exception as e:\n    print(f\"Failed to load test data: {e}\")\n    return\n...",
+      "after": "# Temporal holdout on train_data.csv\ntrain_end_idx, val_start_idx, val_end_idx = build_train_validation_splits(days, cfg.val_split_ratio)\ntrain_window = (1, train_end_idx)\nval_window = (val_start_idx, val_end_idx)\n...\n# Evaluate on validation (days 30-39)\nmetrics = evaluate_on_validation(\n    wearing=wearing,\n    neighbors=neighbors,\n    risk=risk_perception,\n    age_oh=age_oh,\n    occ_oh=occ_oh,\n    age_cat_names=age_cat_names,\n    occ_cat_names=occ_cat_names,\n    params=params,\n    val_start_idx=val_start_idx,\n    val_end_idx=val_end_idx,\n    k_runs=cfg.k_runs,\n    base_day=val_start_idx  # absolute day index\n)\n...\n# Forecast next cfg.forecast_days from last observed validation day\nforecast = simulate_forecast(\n    wearing=wearing,\n    neighbors=neighbors,\n    risk=risk_perception,\n    age_oh=age_oh,\n    occ_oh=occ_oh,\n    age_cat_names=age_cat_names,\n    occ_cat_names=occ_cat_names,\n    params=params,\n    last_train_day_idx=val_end_idx - 1,\n    forecast_days=cfg.forecast_days,\n    k_runs=cfg.k_runs,\n)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "if posterior_samples is None:\n    print(\"❌ Failed to sample from posterior, falling back to point estimate\")\n    # Fallback to point estimate using fitted_params\nmetrics = evaluate_on_validation(\n        wearing=wearing_test,\n        neighbors=neighbors_test,\n        risk=risk_perception_test,\n        age_oh=age_oh_test,\n        occ_oh=occ_oh_test,\n        age_cat_names=age_cat_names_test,\n        occ_cat_names=occ_cat_names_test,\n    params=params,\n        val_start_idx=test_start_idx,\n        val_end_idx=test_end_idx,\n    k_runs=cfg.k_runs,\n)\nelse:\n    print(f\"✓ Sampled {posterior_samples.shape[0]} parameter sets from posterior\")\n    ...",
+      "after": "if posterior_samples is None:\n    print(\"❌ Failed to sample from posterior, falling back to point estimate\")\n    metrics = evaluate_on_validation(\n        wearing=wearing,\n        neighbors=neighbors,\n        risk=risk_perception,\n        age_oh=age_oh,\n        occ_oh=occ_oh,\n        age_cat_names=age_cat_names,\n        occ_cat_names=occ_cat_names,\n        params=params,\n        val_start_idx=val_start_idx,\n        val_end_idx=val_end_idx,\n        k_runs=cfg.k_runs,\n        base_day=val_start_idx\n    )\nelse:\n    print(f\"✓ Sampled {posterior_samples.shape[0]} parameter sets from posterior\")\n    # Double Monte Carlo path ...",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "There is no explicit diff provided. Based on the current state, the code integrates a flexible calibrator architecture with an SBI option, but contains blocking syntax errors and several conceptual misalignments with the spec.",
+    "positive_impacts": [
+      "Modular calibrator interface (logit_head, random_search, sbi) allows experimentation.",
+      "Multiplex network construction correctly symmetrizes edges and handles layers.",
+      "Evaluation function design supports K-run Monte Carlo and transition metrics."
+    ],
+    "negative_impacts": [
+      "Blocking syntax/indentation errors prevent execution.",
+      "Mis-mapped logistic coefficients corrupt parameter estimation.",
+      "Ignoring observed received_info undermines core mechanism calibration.",
+      "Hardcoded demographic names nullify learned demographic effects.",
+      "Intervention timing uses relative indexing, misapplying policy shocks on later windows.",
+      "Dependency on test_data.csv deviates from task spec and can fail."
+    ],
+    "suggestions": [
+      "Fix syntax and mapping bugs as first priority.",
+      "Use observed received_info and implement temporal holdout on train_data.csv.",
+      "Pass category names through the entire pipeline to apply effects.",
+      "Add base_day in simulation to properly time interventions.",
+      "Consider defaulting to corrected logit_head or random_search until SBI is properly trained."
+    ]
+  }
+}
