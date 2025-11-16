@@ -187,6 +187,11 @@ def parse_cli() -> argparse.Namespace:
     parser.add_argument("--demand_family", type=str, default="Poisson",
                         choices=["Poisson", "NegBin", "AR1"],
                         help="Demand family for calibration.")
+    parser.add_argument("--fixed_lead_time", type=int, default=2,
+                        help="Fixed lead_time value (not optimized). Used for in-distribution (default: 2).")
+    parser.add_argument("--fixed_arrival_convention", type=str, default="deliver_at_remaining_0",
+                        choices=["deliver_at_remaining_0", "deliver_at_remaining_1"],
+                        help="Fixed arrival convention (not optimized). Default: deliver_at_remaining_0")
     parser.add_argument("--train_file", type=str, default="train_data.csv",
                         help="Training data filename.")
     parser.add_argument("--val_file", type=str, default="val_data.csv",
@@ -557,13 +562,20 @@ class DemandModel:
 
 class PoissonDemandModel(DemandModel):
     """
-    Poisson demand model with optional sinusoidal seasonality on the mean.
+    Poisson demand model with optional seasonal variation, trend, volatility, shift, and scale.
     """
 
-    def __init__(self, base_lambda: float,
-                 seasonal_amplitude: float = 0.0,
-                 seasonal_period: int = 7,
-                 rng: Optional[np.random.Generator] = None) -> None:
+    def __init__(
+        self, 
+        base_lambda: float,
+        seasonal_amplitude: float = 0.0,
+        seasonal_period: int = 7,
+        demand_trend: float = 0.0,
+        demand_volatility: float = 0.0,
+        demand_shift: float = 0.0,
+        demand_scale: float = 1.0,
+        rng: Optional[np.random.Generator] = None
+    ) -> None:
         super().__init__(rng=rng)
         if base_lambda < 0.0:
             raise ValueError("base_lambda must be >= 0.")
@@ -574,21 +586,42 @@ class PoissonDemandModel(DemandModel):
         self.base_lambda = float(base_lambda)
         self.seasonal_amplitude = float(seasonal_amplitude)
         self.seasonal_period = int(seasonal_period)
+        self.demand_trend = float(demand_trend)
+        self.demand_volatility = float(demand_volatility)
+        self.demand_shift = float(demand_shift)
+        self.demand_scale = float(demand_scale)
+        self._t_base = 0  # Base time for trend calculation
 
     def reset(self) -> None:
-        return
+        self._t_base = 0
 
     def _mean_t(self, t: int) -> float:
-        if self.seasonal_amplitude <= 1e-8:
-            return max(0.0, self.base_lambda)
-        val = self.base_lambda + self.seasonal_amplitude * math.sin(
-            2.0 * math.pi * (t % self.seasonal_period) / float(self.seasonal_period)
-        )
-        return max(0.0, val)
+        # Base lambda
+        lam = self.base_lambda
+        
+        # Seasonal component
+        if self.seasonal_amplitude > 1e-8:
+            lam += self.seasonal_amplitude * math.sin(
+                2.0 * math.pi * (t % self.seasonal_period) / float(self.seasonal_period)
+            )
+        
+        # Trend component (linear)
+        lam += self.demand_trend * (t - self._t_base)
+        
+        # Shift and scale
+        lam = (lam + self.demand_shift) * self.demand_scale
+        
+        return max(0.0, lam)
 
     def sample(self, t: int) -> int:
         lam = self._mean_t(t)
-        d = self.rng.poisson(lam=lam)
+        
+        # Add volatility (additional noise)
+        if self.demand_volatility > 1e-8:
+            volatility_noise = self.rng.normal(0.0, self.demand_volatility)
+            lam = max(0.0, lam + volatility_noise)
+        
+        d = self.rng.poisson(lam=max(0.0, lam))
         return int(d)
 
 
@@ -656,7 +689,8 @@ def create_demand_model_from_params(params: Dict[str, Any], rng: Optional[np.ran
     Factory to create demand model instance from params dict.
 
     Supports:
-        - Poisson: keys 'poisson_lambda', optional 'seasonal_amplitude', 'seasonal_period'
+        - Poisson: keys 'poisson_lambda', optional 'seasonal_amplitude', 'seasonal_period', 
+                   'demand_trend', 'demand_volatility', 'demand_shift', 'demand_scale'
         - NegBin: keys 'negbin_mu' and 'negbin_r'
         - AR1: keys 'ar1_mu', 'ar1_phi', 'ar1_sigma'
     """
@@ -666,6 +700,10 @@ def create_demand_model_from_params(params: Dict[str, Any], rng: Optional[np.ran
             base_lambda=float(params.get("poisson_lambda", 5.0)),
             seasonal_amplitude=float(params.get("seasonal_amplitude", 0.0)),
             seasonal_period=int(params.get("seasonal_period", 7)),
+            demand_trend=float(params.get("demand_trend", 0.0)),
+            demand_volatility=float(params.get("demand_volatility", 0.0)),
+            demand_shift=float(params.get("demand_shift", 0.0)),
+            demand_scale=float(params.get("demand_scale", 1.0)),
             rng=rng,
         )
     elif fam == "NegBin":
@@ -1082,6 +1120,8 @@ class SBICalibrator:
         alpha_params: Optional[List[str]] = None,
         alpha_max_ratio: float = 0.5,
         alpha_mode: str = "additive",
+        fixed_lead_time: int = 2,
+        fixed_arrival_convention: str = "deliver_at_remaining_0",
     ) -> None:
         if demand_family not in {"Poisson", "NegBin", "AR1"}:
             raise ValueError("Unsupported demand family.")
@@ -1115,6 +1155,14 @@ class SBICalibrator:
         self.alpha_mode = alpha_mode
         self.alpha_max_ratio = float(alpha_max_ratio)
         self.alpha_params_requested = list(alpha_params) if alpha_params else []
+        
+        # Fixed parameters (not optimized) - used to control in/out distribution
+        self.fixed_lead_time = int(fixed_lead_time)
+        if self.fixed_lead_time < 1 or self.fixed_lead_time > 8:
+            raise ValueError(f"fixed_lead_time must be between 1 and 8, got {self.fixed_lead_time}")
+        self.fixed_arrival_convention = str(fixed_arrival_convention)
+        if self.fixed_arrival_convention not in {"deliver_at_remaining_0", "deliver_at_remaining_1"}:
+            raise ValueError(f"Invalid fixed_arrival_convention: {self.fixed_arrival_convention}")
 
         # Base parameter space (without alpha augmentation)
         (
@@ -1141,28 +1189,120 @@ class SBICalibrator:
         self.posterior_samples: Optional[np.ndarray] = None
 
     def _get_base_param_space(self, family: str) -> Tuple[List[str], np.ndarray, np.ndarray]:
+        """
+        Get parameter space for SBI optimization.
+        Note: lead_time_L and arrival_flag are FIXED (not optimized) to control in/out distribution.
+        """
         if family == "Poisson":
-            names = ["lead_time_L", "arrival_flag", "poisson_lambda"]
-            low = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-            high = np.array([8.0, 1.0, 20.0], dtype=np.float32)
+            # Extended parameter space with at least 10 parameters
+            names = [
+                "poisson_lambda",           # 1. Base demand rate
+                "seasonal_amplitude",       # 2. Seasonal variation amplitude
+                "seasonal_period",          # 3. Seasonal period (days)
+                "demand_trend",             # 4. Linear trend coefficient
+                "demand_volatility",        # 5. Additional volatility factor
+                "init_inventory_mean",      # 6. Mean initial inventory
+                "init_inventory_std",       # 7. Std of initial inventory
+                "order_smoothing",          # 8. Order smoothing factor (0-1)
+                "safety_stock_factor",      # 9. Safety stock multiplier
+                "demand_shift",             # 10. Demand shift parameter
+                "demand_scale",             # 11. Demand scaling factor
+                "noise_level",              # 12. Observation noise level
+            ]
+            low = np.array([
+                0.0,    # poisson_lambda
+                0.0,    # seasonal_amplitude
+                3.0,    # seasonal_period (min 3 days)
+                0.0,    # demand_trend
+                0.0,    # demand_volatility
+                10.0,   # init_inventory_mean
+                0.0,    # init_inventory_std
+                0.0,    # order_smoothing
+                0.0,    # safety_stock_factor
+                -5.0,   # demand_shift
+                0.5,    # demand_scale
+                0.0,    # noise_level
+            ], dtype=np.float32)
+            high = np.array([
+                20.0,   # poisson_lambda
+                10.0,   # seasonal_amplitude
+                30.0,   # seasonal_period (max 30 days)
+                2.0,    # demand_trend
+                5.0,    # demand_volatility
+                50.0,   # init_inventory_mean
+                20.0,   # init_inventory_std
+                1.0,    # order_smoothing
+                3.0,    # safety_stock_factor
+                5.0,    # demand_shift
+                2.0,    # demand_scale
+                2.0,    # noise_level
+            ], dtype=np.float32)
             return names, low, high
         if family == "NegBin":
-            names = ["lead_time_L", "arrival_flag", "negbin_mu", "negbin_r"]
-            low = np.array([1.0, 0.0, 0.0, 0.1], dtype=np.float32)
-            high = np.array([8.0, 1.0, 20.0, 50.0], dtype=np.float32)
+            names = [
+                "negbin_mu", "negbin_r",
+                "seasonal_amplitude", "seasonal_period",
+                "demand_trend", "demand_volatility",
+                "init_inventory_mean", "init_inventory_std",
+                "order_smoothing", "safety_stock_factor",
+                "demand_shift", "demand_scale", "noise_level",
+            ]
+            low = np.array([
+                0.0, 0.1,  # negbin_mu, negbin_r
+                0.0, 3.0,  # seasonal_amplitude, seasonal_period
+                0.0, 0.0,  # demand_trend, demand_volatility
+                10.0, 0.0, # init_inventory_mean, init_inventory_std
+                0.0, 0.0,  # order_smoothing, safety_stock_factor
+                -5.0, 0.5, # demand_shift, demand_scale
+                0.0,       # noise_level
+            ], dtype=np.float32)
+            high = np.array([
+                20.0, 50.0, # negbin_mu, negbin_r
+                10.0, 30.0, # seasonal_amplitude, seasonal_period
+                2.0, 5.0,   # demand_trend, demand_volatility
+                50.0, 20.0, # init_inventory_mean, init_inventory_std
+                1.0, 3.0,   # order_smoothing, safety_stock_factor
+                5.0, 2.0,   # demand_shift, demand_scale
+                2.0,        # noise_level
+            ], dtype=np.float32)
             return names, low, high
         if family == "AR1":
-            names = ["lead_time_L", "arrival_flag", "ar1_mu", "ar1_phi", "ar1_sigma"]
-            low = np.array([1.0, 0.0, 0.0, -0.95, 0.0], dtype=np.float32)
-            high = np.array([8.0, 1.0, 20.0, 0.95, 10.0], dtype=np.float32)
+            names = [
+                "ar1_mu", "ar1_phi", "ar1_sigma",
+                "seasonal_amplitude", "seasonal_period",
+                "demand_trend", "demand_volatility",
+                "init_inventory_mean", "init_inventory_std",
+                "order_smoothing", "safety_stock_factor",
+                "demand_shift", "demand_scale", "noise_level",
+            ]
+            low = np.array([
+                0.0, -0.95, 0.0,  # ar1_mu, ar1_phi, ar1_sigma
+                0.0, 3.0,          # seasonal_amplitude, seasonal_period
+                0.0, 0.0,          # demand_trend, demand_volatility
+                10.0, 0.0,         # init_inventory_mean, init_inventory_std
+                0.0, 0.0,          # order_smoothing, safety_stock_factor
+                -5.0, 0.5,         # demand_shift, demand_scale
+                0.0,               # noise_level
+            ], dtype=np.float32)
+            high = np.array([
+                20.0, 0.95, 10.0,  # ar1_mu, ar1_phi, ar1_sigma
+                10.0, 30.0,        # seasonal_amplitude, seasonal_period
+                2.0, 5.0,          # demand_trend, demand_volatility
+                50.0, 20.0,        # init_inventory_mean, init_inventory_std
+                1.0, 3.0,          # order_smoothing, safety_stock_factor
+                5.0, 2.0,          # demand_shift, demand_scale
+                2.0,               # noise_level
+            ], dtype=np.float32)
             return names, low, high
         raise ValueError(f"Unsupported family: {family}")
 
     def _default_alpha_param_candidates(self) -> List[str]:
+        # Alpha parameters can be applied to any optimizable parameter (excluding fixed ones)
         if self.demand_family == "Poisson":
-            return ["poisson_lambda"]
+            # Return a subset of key parameters for alpha embedding
+            return ["poisson_lambda", "demand_trend", "demand_volatility"]
         if self.demand_family == "NegBin":
-            return ["negbin_mu", "negbin_r"]
+            return ["negbin_mu", "negbin_r", "demand_trend"]
         if self.demand_family == "AR1":
             return ["ar1_mu", "ar1_phi", "ar1_sigma"]
         return []
@@ -1253,12 +1393,10 @@ class SBICalibrator:
         base_vals = {
             name: float(base_theta[idx]) for idx, name in enumerate(self.base_param_names)
         }
-        L = int(np.clip(np.round(base_vals.get("lead_time_L", 2.0)), 1, 8))
-        base_vals["lead_time_L"] = float(L)
-
-        arrival_flag = float(np.clip(np.round(base_vals.get("arrival_flag", 1.0)), 0.0, 1.0))
-        base_vals["arrival_flag"] = arrival_flag
-        arrival_convention = "deliver_at_remaining_1" if arrival_flag >= 0.5 else "deliver_at_remaining_0"
+        
+        # Use fixed lead_time and arrival_convention (not optimized)
+        L = self.fixed_lead_time
+        arrival_convention = self.fixed_arrival_convention
 
         params: Dict[str, Any] = {
             "lead_time_L": L,
@@ -1268,25 +1406,74 @@ class SBICalibrator:
 
         if self.demand_family == "Poisson":
             lam = float(np.clip(base_vals.get("poisson_lambda", 5.0), *self.param_bounds["poisson_lambda"]))
+            seasonal_amp = float(np.clip(base_vals.get("seasonal_amplitude", 0.0), *self.param_bounds["seasonal_amplitude"]))
+            seasonal_per = float(np.clip(base_vals.get("seasonal_period", 7.0), *self.param_bounds["seasonal_period"]))
+            demand_trend = float(np.clip(base_vals.get("demand_trend", 0.0), *self.param_bounds["demand_trend"]))
+            demand_vol = float(np.clip(base_vals.get("demand_volatility", 0.0), *self.param_bounds["demand_volatility"]))
+            demand_shift = float(np.clip(base_vals.get("demand_shift", 0.0), *self.param_bounds["demand_shift"]))
+            demand_scale = float(np.clip(base_vals.get("demand_scale", 1.0), *self.param_bounds["demand_scale"]))
+            
             base_vals["poisson_lambda"] = lam
             params.update({
                 "poisson_lambda": lam,
-                "seasonal_amplitude": 0.0,
-                "seasonal_period": 7,
+                "seasonal_amplitude": seasonal_amp,
+                "seasonal_period": int(seasonal_per),
+                "demand_trend": demand_trend,
+                "demand_volatility": demand_vol,
+                "demand_shift": demand_shift,
+                "demand_scale": demand_scale,
+            })
+            
+            # Additional parameters for simulation
+            params.update({
+                "init_inventory_mean": float(np.clip(base_vals.get("init_inventory_mean", 30.0), *self.param_bounds["init_inventory_mean"])),
+                "init_inventory_std": float(np.clip(base_vals.get("init_inventory_std", 10.0), *self.param_bounds["init_inventory_std"])),
+                "order_smoothing": float(np.clip(base_vals.get("order_smoothing", 0.5), *self.param_bounds["order_smoothing"])),
+                "safety_stock_factor": float(np.clip(base_vals.get("safety_stock_factor", 1.0), *self.param_bounds["safety_stock_factor"])),
+                "noise_level": float(np.clip(base_vals.get("noise_level", 0.0), *self.param_bounds["noise_level"])),
             })
         elif self.demand_family == "NegBin":
             mu = float(np.clip(base_vals.get("negbin_mu", 5.0), *self.param_bounds["negbin_mu"]))
             r = float(np.clip(base_vals.get("negbin_r", 5.0), *self.param_bounds["negbin_r"]))
+            seasonal_amp = float(np.clip(base_vals.get("seasonal_amplitude", 0.0), *self.param_bounds["seasonal_amplitude"]))
+            seasonal_per = float(np.clip(base_vals.get("seasonal_period", 7.0), *self.param_bounds["seasonal_period"]))
+            demand_trend = float(np.clip(base_vals.get("demand_trend", 0.0), *self.param_bounds["demand_trend"]))
+            demand_vol = float(np.clip(base_vals.get("demand_volatility", 0.0), *self.param_bounds["demand_volatility"]))
+            demand_shift = float(np.clip(base_vals.get("demand_shift", 0.0), *self.param_bounds["demand_shift"]))
+            demand_scale = float(np.clip(base_vals.get("demand_scale", 1.0), *self.param_bounds["demand_scale"]))
+            
             base_vals["negbin_mu"] = mu
             base_vals["negbin_r"] = r
             params.update({
                 "negbin_mu": mu,
                 "negbin_r": r,
+                "seasonal_amplitude": seasonal_amp,
+                "seasonal_period": int(seasonal_per),
+                "demand_trend": demand_trend,
+                "demand_volatility": demand_vol,
+                "demand_shift": demand_shift,
+                "demand_scale": demand_scale,
+            })
+            
+            # Additional parameters for simulation
+            params.update({
+                "init_inventory_mean": float(np.clip(base_vals.get("init_inventory_mean", 30.0), *self.param_bounds["init_inventory_mean"])),
+                "init_inventory_std": float(np.clip(base_vals.get("init_inventory_std", 10.0), *self.param_bounds["init_inventory_std"])),
+                "order_smoothing": float(np.clip(base_vals.get("order_smoothing", 0.5), *self.param_bounds["order_smoothing"])),
+                "safety_stock_factor": float(np.clip(base_vals.get("safety_stock_factor", 1.0), *self.param_bounds["safety_stock_factor"])),
+                "noise_level": float(np.clip(base_vals.get("noise_level", 0.0), *self.param_bounds["noise_level"])),
             })
         elif self.demand_family == "AR1":
             mu = float(np.clip(base_vals.get("ar1_mu", 5.0), *self.param_bounds["ar1_mu"]))
             phi = float(np.clip(base_vals.get("ar1_phi", 0.0), *self.param_bounds["ar1_phi"]))
             sigma = float(np.clip(base_vals.get("ar1_sigma", 1.0), *self.param_bounds["ar1_sigma"]))
+            seasonal_amp = float(np.clip(base_vals.get("seasonal_amplitude", 0.0), *self.param_bounds["seasonal_amplitude"]))
+            seasonal_per = float(np.clip(base_vals.get("seasonal_period", 7.0), *self.param_bounds["seasonal_period"]))
+            demand_trend = float(np.clip(base_vals.get("demand_trend", 0.0), *self.param_bounds["demand_trend"]))
+            demand_vol = float(np.clip(base_vals.get("demand_volatility", 0.0), *self.param_bounds["demand_volatility"]))
+            demand_shift = float(np.clip(base_vals.get("demand_shift", 0.0), *self.param_bounds["demand_shift"]))
+            demand_scale = float(np.clip(base_vals.get("demand_scale", 1.0), *self.param_bounds["demand_scale"]))
+            
             base_vals["ar1_mu"] = mu
             base_vals["ar1_phi"] = phi
             base_vals["ar1_sigma"] = sigma
@@ -1294,6 +1481,21 @@ class SBICalibrator:
                 "ar1_mu": mu,
                 "ar1_phi": phi,
                 "ar1_sigma": sigma,
+                "seasonal_amplitude": seasonal_amp,
+                "seasonal_period": int(seasonal_per),
+                "demand_trend": demand_trend,
+                "demand_volatility": demand_vol,
+                "demand_shift": demand_shift,
+                "demand_scale": demand_scale,
+            })
+            
+            # Additional parameters for simulation
+            params.update({
+                "init_inventory_mean": float(np.clip(base_vals.get("init_inventory_mean", 30.0), *self.param_bounds["init_inventory_mean"])),
+                "init_inventory_std": float(np.clip(base_vals.get("init_inventory_std", 10.0), *self.param_bounds["init_inventory_std"])),
+                "order_smoothing": float(np.clip(base_vals.get("order_smoothing", 0.5), *self.param_bounds["order_smoothing"])),
+                "safety_stock_factor": float(np.clip(base_vals.get("safety_stock_factor", 1.0), *self.param_bounds["safety_stock_factor"])),
+                "noise_level": float(np.clip(base_vals.get("noise_level", 0.0), *self.param_bounds["noise_level"])),
             })
         else:
             raise ValueError(f"Unsupported family: {self.demand_family}")
@@ -1366,8 +1568,20 @@ class SBICalibrator:
             horizon = int(np.sum(mask))
             if horizon <= 0:
                 continue
+            
+            # Use optimized initial inventory if provided, otherwise use observed
+            init_inv = int(tr.init_inventory)
+            if "init_inventory_mean" in params and "init_inventory_std" in params:
+                # Override with sampled initial inventory from optimized distribution
+                init_inv_mean = params["init_inventory_mean"]
+                init_inv_std = params["init_inventory_std"]
+                if init_inv_std > 0:
+                    init_inv = int(np.clip(rng.normal(init_inv_mean, init_inv_std), 0, 100))
+                else:
+                    init_inv = int(init_inv_mean)
+            
             node = InventoryNode(
-                init_inventory=int(tr.init_inventory),
+                init_inventory=init_inv,
                 init_backlog=int(tr.init_backlog),
                 init_pipeline=[Item(int(it.qty), int(it.remaining)) for it in tr.init_pipeline],
                 lead_time=int(params["lead_time_L"]),
@@ -1520,8 +1734,19 @@ class SBICalibrator:
             horizon = int(np.sum(tr.t <= te))
             if horizon <= 0:
                 continue
+            
+            # Use optimized initial inventory if provided, otherwise use observed
+            init_inv = int(tr.init_inventory)
+            if "init_inventory_mean" in params and "init_inventory_std" in params:
+                init_inv_mean = params["init_inventory_mean"]
+                init_inv_std = params["init_inventory_std"]
+                if init_inv_std > 0:
+                    init_inv = int(np.clip(rng.normal(init_inv_mean, init_inv_std), 0, 100))
+                else:
+                    init_inv = int(init_inv_mean)
+            
             node = InventoryNode(
-                init_inventory=int(tr.init_inventory),
+                init_inventory=init_inv,
                 init_backlog=int(tr.init_backlog),
                 init_pipeline=[Item(int(it.qty), int(it.remaining)) for it in tr.init_pipeline],
                 lead_time=int(params["lead_time_L"]),
@@ -1732,8 +1957,18 @@ class BeerGameSimulator:
         occ_obs: Dict[str, List[np.ndarray]] = {}
 
         for tr in trajectories:
+            # Use optimized initial inventory if provided, otherwise use observed
+            init_inv = int(tr.init_inventory)
+            if "init_inventory_mean" in self.params and "init_inventory_std" in self.params:
+                init_inv_mean = self.params["init_inventory_mean"]
+                init_inv_std = self.params["init_inventory_std"]
+                if init_inv_std > 0:
+                    init_inv = int(np.clip(rng.normal(init_inv_mean, init_inv_std), 0, 100))
+                else:
+                    init_inv = int(init_inv_mean)
+            
             node = InventoryNode(
-                init_inventory=int(tr.init_inventory),
+                init_inventory=init_inv,
                 init_backlog=int(tr.init_backlog),
                 init_pipeline=[Item(int(it.qty), int(it.remaining)) for it in tr.init_pipeline],
                 lead_time=int(self.params["lead_time_L"]),
@@ -2419,6 +2654,8 @@ def main() -> None:
         alpha_params=args.alpha_params,
         alpha_max_ratio=args.alpha_max_ratio,
         alpha_mode=args.alpha_mode,
+        fixed_lead_time=args.fixed_lead_time,
+        fixed_arrival_convention=args.fixed_arrival_convention,
     )
     optimized_params = calibrator.fit()
 
