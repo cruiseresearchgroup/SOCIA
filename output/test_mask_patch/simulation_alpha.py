@@ -1,3 +1,4 @@
+import argparse
 import json
 import math
 import os
@@ -9,6 +10,30 @@ from typing import Dict, List, Tuple, Any, Optional
 
 import numpy as np
 import pandas as pd
+
+# G-Sim dependencies (optional)
+try:
+    from scipy.stats import wasserstein_distance
+    _HAVE_SCIPY = True
+except ImportError:
+    _HAVE_SCIPY = False
+    wasserstein_distance = None
+
+try:
+    import torch
+    _HAVE_TORCH = True
+except ImportError:
+    _HAVE_TORCH = False
+    torch = None
+
+try:
+    from sbi import utils as sbi_utils
+    from sbi.inference import SNPE as SNPEngine
+    _HAVE_SBI = True
+except (ImportError, ModuleNotFoundError):
+    _HAVE_SBI = False
+    sbi_utils = None
+    SNPEngine = None
 
 
 @dataclass
@@ -579,7 +604,7 @@ def evaluate_on_validation(
     # Initial state: use first day of validation window
     # If val_start_idx > 0, use previous day; otherwise use first day
     if val_start_idx > 0:
-    init_states = wearing[val_start_idx - 1, :]
+        init_states = wearing[val_start_idx - 1, :]
     else:
         init_states = wearing[val_start_idx, :]
     T_val = val_end_idx - val_start_idx
@@ -590,8 +615,8 @@ def evaluate_on_validation(
     # Handle case when val_start_idx = 0 (test_data case)
     if val_end_idx - val_start_idx > 1:
         if val_start_idx > 0:
-    prev_obs = wearing[val_start_idx - 1:val_end_idx - 1, :]
-    curr_obs = wearing[val_start_idx:val_end_idx, :]
+            prev_obs = wearing[val_start_idx - 1:val_end_idx - 1, :]
+            curr_obs = wearing[val_start_idx:val_end_idx, :]
         else:
             # For test_data: use consecutive days within validation window
             prev_obs = wearing[val_start_idx:val_end_idx - 1, :]
@@ -2004,6 +2029,552 @@ def get_calibrator(name: str, config_path: str = None, **kwargs):
     return CALIBRATOR_REGISTRY[name](**kwargs)
 
 
+# ============================================================================
+# G-Sim Baseline Functions
+# ============================================================================
+
+SUMMARY_FEATURES_PER_DAY = 5
+
+
+def compute_transition_stats(wearing_window: np.ndarray) -> np.ndarray:
+    """逐日统计转移概率，返回形状 (T, 4) : p01,p11,p10,p00."""
+    T = wearing_window.shape[0]
+    stats = np.zeros((T, 4), dtype=np.float32)
+    if T <= 1:
+        return stats
+    prev = wearing_window[:-1]
+    curr = wearing_window[1:]
+    prev_bin = (prev >= 0.5).astype(np.int8)
+    curr_bin = (curr >= 0.5).astype(np.int8)
+    p01 = ((prev_bin == 0) & (curr_bin == 1)).mean(axis=1)
+    p11 = ((prev_bin == 1) & (curr_bin == 1)).mean(axis=1)
+    p10 = ((prev_bin == 1) & (curr_bin == 0)).mean(axis=1)
+    p00 = ((prev_bin == 0) & (curr_bin == 0)).mean(axis=1)
+    stats[1:, 0] = p01
+    stats[1:, 1] = p11
+    stats[1:, 2] = p10
+    stats[1:, 3] = p00
+    return stats
+
+
+def make_summary(wearing_window: np.ndarray, window: int) -> np.ndarray:
+    """生成固定长度 summary（window * 5）：日均采纳率、标准差、转移概率 p01/p11/p10."""
+    window = int(window)
+    assert window > 0, "window 必须为正"
+    T = wearing_window.shape[0]
+    means = wearing_window.mean(axis=1)
+    stds = wearing_window.std(axis=1)
+    transitions = compute_transition_stats(wearing_window)
+    features: List[float] = []
+    for idx in range(window):
+        ref = min(idx, T - 1)
+        mean_val = float(means[ref]) if T > 0 else 0.0
+        std_val = float(stds[ref]) if T > 0 else 0.0
+        p01 = float(transitions[ref, 0]) if T > 0 else 0.0
+        p11 = float(transitions[ref, 1]) if T > 0 else 0.0
+        p10 = float(transitions[ref, 2]) if T > 0 else 0.0
+        features.extend([mean_val, std_val, p01, p11, p10])
+    return np.array(features, dtype=np.float32)
+
+
+def param_vector_to_parameters(
+    theta: np.ndarray,
+    param_names: List[str],
+    age_cat_names: List[str],
+    occ_cat_names: List[str],
+    default_layer_weights: Optional[Dict[str, float]] = None,
+) -> Parameters:
+    """将参数向量转换为 Parameters 对象。"""
+    if default_layer_weights is None:
+        default_layer_weights = {"family": 1.0, "work_school": 1.0, "community": 1.0}
+    
+    param_dict = {param_names[i]: float(theta[i]) for i in range(len(param_names))}
+    
+    # Decision parameters
+    alpha = param_dict.get("alpha", 0.0)
+    gamma = param_dict.get("gamma", 1.0)
+    theta_f = param_dict.get("theta_f", 1.0)
+    theta_w = param_dict.get("theta_w", 1.0)
+    theta_c = param_dict.get("theta_c", 1.0)
+    beta_r = param_dict.get("beta_r", 0.0)
+    beta_i = param_dict.get("beta_i", 0.0)
+    tau = param_dict.get("tau", 1.0)
+    
+    # Layer weights
+    w_family = param_dict.get("family", default_layer_weights.get("family", 1.0))
+    w_work = param_dict.get("work_school", default_layer_weights.get("work_school", 1.0))
+    w_community = param_dict.get("community", default_layer_weights.get("community", 1.0))
+    
+    # Normalize layer weights
+    w_sum = w_family + w_work + w_community
+    if w_sum > 0:
+        w_family /= w_sum
+        w_work /= w_sum
+        w_community /= w_sum
+    
+    # Info parameters
+    phi_family = param_dict.get("phi_family", 0.1)
+    phi_work = param_dict.get("phi_work", 0.1)
+    phi_community = param_dict.get("phi_community", 0.1)
+    lambda_broadcast_base = param_dict.get("lambda_broadcast_base", 0.05)
+    lambda_broadcast_factor_after_day10 = param_dict.get("lambda_broadcast_factor_after_day10", 1.5)
+    rho_info_decay = param_dict.get("rho_info_decay", 0.5)
+    
+    # Demographic effects
+    age_effects: Dict[str, float] = {}
+    for i, cat in enumerate(age_cat_names):
+        key = f"age_{i}"
+        if key in param_dict:
+            age_effects[cat] = param_dict[key]
+    
+    occ_effects: Dict[str, float] = {}
+    for i, cat in enumerate(occ_cat_names):
+        key = f"occ_{i}"
+        if key in param_dict:
+            occ_effects[cat] = param_dict[key]
+    
+    return Parameters(
+        alpha=alpha,
+        gamma=gamma,
+        theta_f=theta_f,
+        theta_w=theta_w,
+        theta_c=theta_c,
+        beta_r=beta_r,
+        beta_i=beta_i,
+        age_effects=age_effects,
+        occ_effects=occ_effects,
+        tau=tau,
+        w_family=w_family,
+        w_work=w_work,
+        w_community=w_community,
+        phi_family=phi_family,
+        phi_work=phi_work,
+        phi_community=phi_community,
+        lambda_broadcast_base=lambda_broadcast_base,
+        lambda_broadcast_factor_after_day10=lambda_broadcast_factor_after_day10,
+        rho_info_decay=rho_info_decay,
+    )
+
+
+def load_prior_info(path: str) -> Tuple[List[str], Dict[str, Tuple[float, float]]]:
+    """从 JSON 文件加载 prior_info。"""
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    names = data["parameter_names"]
+    bounds_raw: Dict[str, List[float]] = data["prior_bounds"]
+    bounds = {k: (float(v[0]), float(v[1])) for k, v in bounds_raw.items()}
+    return names, bounds
+
+
+def generate_simulation_bank(
+    bundle: Tuple,
+    param_names: List[str],
+    prior_bounds: Dict[str, Tuple[float, float]],
+    bank_size: int,
+    train_window: Tuple[int, int],
+    summary_window: int,
+    seed: int,
+    bank_path: str,
+    age_cat_names: List[str],
+    occ_cat_names: List[str],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """生成 simulation bank：从先验采样参数，运行模拟，计算 summary。"""
+    wearing, neighbors, risk, age_oh, occ_oh, cfg = bundle
+    train_start, train_end = train_window
+    
+    ensure_dir(os.path.dirname(bank_path) or ".")
+    rng = np.random.default_rng(seed)
+    theta_samples = np.zeros((bank_size, len(param_names)), dtype=np.float32)
+    summary_samples = np.zeros((bank_size, summary_window * SUMMARY_FEATURES_PER_DAY), dtype=np.float32)
+    
+    # 获取初始状态
+    if train_start > 0:
+        init_states = wearing[train_start - 1, :]
+    else:
+        init_states = wearing[train_start, :]
+    
+    for idx in range(bank_size):
+        # 从先验采样参数
+        theta_vec = np.zeros(len(param_names), dtype=np.float32)
+        for j, name in enumerate(param_names):
+            low, high = prior_bounds[name]
+            val = rng.uniform(low, high)
+            theta_vec[j] = float(val)
+        
+        # 转换为 Parameters 对象
+        params = param_vector_to_parameters(
+            theta_vec, param_names, age_cat_names, occ_cat_names
+        )
+        
+        # 运行模拟
+        # simulate_window 返回 [start_day_index+1..end_day_index] 的状态
+        # 要得到 [train_start..train_end-1] 的状态，需要传入 start_day_index=train_start-1, end_day_index=train_end-1
+        set_global_seed(seed + idx)
+        # 计算正确的索引：要得到 [train_start..train_end-1]，需要 start_day_index+1 = train_start
+        start_idx = train_start - 1
+        end_idx = train_end - 1
+        sim_states, _, _ = simulate_window(
+            start_states=init_states,
+            neighbors=neighbors,
+            risk=risk,
+            age_oh=age_oh,
+            occ_oh=occ_oh,
+            age_cat_names=age_cat_names,
+            occ_cat_names=occ_cat_names,
+            params=params,
+            start_day_index=start_idx,
+            end_day_index=end_idx,
+        )
+        
+        # 计算 summary
+        wearing_pred = np.clip(sim_states, 0.0, 1.0)
+        summary_vec = make_summary(wearing_pred, summary_window)
+        
+        theta_samples[idx, :] = theta_vec
+        summary_samples[idx, :] = summary_vec
+        
+        if (idx + 1) % max(1, bank_size // 10) == 0:
+            print(f"[Bank] 生成 {idx + 1}/{bank_size}")
+    
+    # 保存 bank
+    np.savez_compressed(
+        bank_path,
+        theta=theta_samples,
+        summary=summary_samples,
+        param_names=np.array(param_names),
+        train_window=np.array([train_start, train_end], dtype=np.int32),
+        summary_window=np.array([summary_window], dtype=np.int32),
+    )
+    return theta_samples, summary_samples
+
+
+def load_simulation_bank(bank_path: str) -> Tuple[np.ndarray, np.ndarray, List[str], int, Tuple[int, int]]:
+    """加载已保存的 simulation bank。"""
+    data = np.load(bank_path, allow_pickle=True)
+    theta = data["theta"]
+    summary = data["summary"]
+    param_names = data["param_names"].tolist()
+    summary_window = int(data["summary_window"][0])
+    train_start, train_end = data["train_window"].tolist()
+    return theta, summary, param_names, summary_window, (int(train_start), int(train_end))
+
+
+def train_snpe_posterior(
+    theta_samples: np.ndarray,
+    summary_samples: np.ndarray,
+    param_names: List[str],
+    prior_bounds: Dict[str, Tuple[float, float]],
+    device: str = "cpu",
+):
+    """训练 SNPE posterior。"""
+    # 延迟导入，避免模块级别的导入错误
+    try:
+        import torch
+        from sbi import utils as sbi_utils
+        # 尝试直接导入 SNPE，避免触发 pymc 依赖
+        try:
+            from sbi.inference.snpe import SNPE as SNPEngine
+        except ImportError:
+            from sbi.inference import SNPE as SNPEngine
+    except (ImportError, ModuleNotFoundError) as e:
+        raise ImportError(f"sbi 未安装或导入失败，无法训练 SNPE posterior。错误: {e}") from e
+    
+    theta = torch.tensor(theta_samples, dtype=torch.float32)
+    x = torch.tensor(summary_samples, dtype=torch.float32)
+    if device == "cuda":
+        theta = theta.to(device)
+        x = x.to(device)
+    
+    prior_low = torch.tensor([prior_bounds[name][0] for name in param_names], dtype=torch.float32)
+    prior_high = torch.tensor([prior_bounds[name][1] for name in param_names], dtype=torch.float32)
+    prior = sbi_utils.BoxUniform(low=prior_low, high=prior_high)
+    
+    inference = SNPEngine(prior=prior, device=device)
+    density_estimator = inference.append_simulations(theta, x).train(show_train_summary=False)
+    posterior = inference.build_posterior(density_estimator)
+    return posterior
+
+
+def posterior_predictive_curves(
+    bundle: Tuple,
+    posterior,
+    param_names: List[str],
+    train_window: Tuple[int, int],
+    posterior_samples: int,
+    mc_per_sample: int,
+    seed: int,
+    x_observed: np.ndarray,
+    age_cat_names: List[str],
+    occ_cat_names: List[str],
+    device: str = "cpu",
+) -> np.ndarray:
+    """对每个 posterior 样本运行模拟，返回预测曲线矩阵。"""
+    # 延迟导入
+    try:
+        import torch
+    except ImportError:
+        raise ImportError("torch 未安装，无法进行 posterior predictive 评估")
+    
+    wearing, neighbors, risk, age_oh, occ_oh, cfg = bundle
+    train_start, train_end = train_window
+    
+    # 获取初始状态
+    if train_start > 0:
+        init_states = wearing[train_start - 1, :]
+    else:
+        init_states = wearing[train_start, :]
+    
+    # 从 posterior 采样参数
+    x_tensor = torch.tensor(x_observed, dtype=torch.float32)
+    if x_tensor.ndim == 1:
+        x_tensor = x_tensor.unsqueeze(0)
+    if device == "cuda":
+        x_tensor = x_tensor.to(device)
+    
+    samples = posterior.sample((posterior_samples,), x=x_tensor)
+    samples_np = samples.detach().cpu().numpy()
+    
+    curves = []
+    for idx, theta_vec in enumerate(samples_np):
+        # 转换为 Parameters
+        params = param_vector_to_parameters(
+            theta_vec, param_names, age_cat_names, occ_cat_names
+        )
+        
+        # 运行 mc_per_sample 次，取平均
+        # simulate_window 返回 [start_day_index+1..end_day_index] 的状态
+        # 要得到 [train_start..train_end-1] 的状态，需要传入 start_day_index=train_start-1, end_day_index=train_end-1
+        run_rates = []
+        for mc in range(mc_per_sample):
+            set_global_seed(seed + 10_000 + idx * mc_per_sample + mc)
+            # 计算正确的索引：要得到 [train_start..train_end-1]，需要 start_day_index+1 = train_start
+            start_idx = train_start - 1
+            end_idx = train_end - 1
+            sim_states, _, _ = simulate_window(
+                start_states=init_states,
+                neighbors=neighbors,
+                risk=risk,
+                age_oh=age_oh,
+                occ_oh=occ_oh,
+                age_cat_names=age_cat_names,
+                occ_cat_names=occ_cat_names,
+                params=params,
+                start_day_index=start_idx,
+                end_day_index=end_idx,
+            )
+            wearing_pred = np.clip(sim_states, 0.0, 1.0)
+            rates = wearing_pred.mean(axis=1)
+            run_rates.append(rates)
+        
+        # 对每个样本的多次运行取平均
+        mean_rates = np.mean(np.stack(run_rates, axis=0), axis=0)
+        curves.append(mean_rates)
+    
+    return np.stack(curves, axis=0)
+
+
+def evaluate_curves(
+    curves: np.ndarray,
+    observed_rates: np.ndarray,
+) -> Dict[str, Any]:
+    """计算逐样本 Wasserstein 距离的平均值 + 其他指标。"""
+    if not _HAVE_SCIPY:
+        raise ImportError("scipy 未安装，无法计算 Wasserstein 距离")
+    
+    mean_curve = curves.mean(axis=0)
+    rmse_mean_curve = float(np.sqrt(np.mean((mean_curve - observed_rates) ** 2)))
+    mae_mean_curve = float(np.mean(np.abs(mean_curve - observed_rates)))
+    wdist_mean_curve = float(wasserstein_distance(observed_rates.flatten(), mean_curve.flatten()))
+    
+    # 逐样本 Wasserstein 距离
+    per_sample_w = [
+        float(wasserstein_distance(observed_rates.flatten(), curve.flatten()))
+        for curve in curves
+    ]
+    wdist_mean = float(np.mean(per_sample_w))
+    wdist_std = float(np.std(per_sample_w, ddof=1)) if len(per_sample_w) > 1 else 0.0
+    
+    lower = np.percentile(curves, 5, axis=0)
+    upper = np.percentile(curves, 95, axis=0)
+    
+    return {
+        "rmse_mean_curve": rmse_mean_curve,
+        "mae_mean_curve": mae_mean_curve,
+        "wasserstein_mean_curve": wdist_mean_curve,
+        "wasserstein_mean": wdist_mean,  # G-Sim 主要指标
+        "wasserstein_std": wdist_std,
+        "wasserstein_per_sample": per_sample_w,
+        "mean_curve": mean_curve.tolist(),
+        "ci5_curve": lower.tolist(),
+        "ci95_curve": upper.tolist(),
+    }
+
+
+def run_gsim_baseline(
+    cfg: SimulationConfig,
+    bank_size: int = 1000,
+    posterior_samples: int = 200,
+    mc_per_sample: int = 20,
+    summary_window: int = 11,
+    train_window: Tuple[int, int] = (0, 11),
+    prior_info_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    device: str = "cpu",
+    force_bank: bool = False,
+) -> Dict[str, Any]:
+    """G-Sim baseline 完整流程。"""
+    set_global_seed(cfg.seed)
+    
+    if output_dir is None:
+        output_dir = os.path.join(cfg.data_folder, "gsim_baseline")
+    ensure_dir(output_dir)
+    bank_path = os.path.join(output_dir, "simulation_bank.npz")
+    
+    # 加载数据（复用 main() 的逻辑）
+    agents_path = os.path.join(cfg.data_folder, "agent_attributes.csv")
+    social_path = os.path.join(cfg.data_folder, "social_network.json")
+    train_path = os.path.join(cfg.data_folder, "train_data.csv")
+    
+    try:
+        agents_df = load_agent_attributes(agents_path)
+        social_raw = load_social_network(social_path)
+        train_df = load_train_data(train_path)
+    except Exception as e:
+        print(f"数据加载失败: {e}")
+        return {}
+    
+    # 对齐 ID 和构建网络
+    common_ids, id2idx, agents_df, social_f, train_df = align_ids(agents_df, social_raw, train_df)
+    neighbors = build_multiplex_adjacency(social_f, id2idx, len(common_ids))
+    wearing, received, days = pivot_states(train_df, id2idx)
+    risk_perception = agents_df.set_index("agent_id").loc[common_ids]["risk_perception"].to_numpy(dtype=np.float64)
+    age_oh, age_cat_names, occ_oh, occ_cat_names = encode_demographics(agents_df, common_ids)
+    
+    bundle = (wearing, neighbors, risk_perception, age_oh, occ_oh, cfg)
+    T_total = wearing.shape[0]
+    train_start, train_end = train_window
+    train_start = max(0, train_start)
+    train_end = min(T_total, train_end)
+    
+    if train_end <= train_start:
+        raise ValueError("训练窗口无效 (train_end <= train_start)")
+    if (train_end - train_start) < summary_window:
+        raise ValueError("训练窗口长度必须不少于 summary_window")
+    
+    # 加载或生成 prior_info
+    if prior_info_path and os.path.exists(prior_info_path):
+        param_names, prior_bounds = load_prior_info(prior_info_path)
+        print(f"[Prior] 从文件加载: {prior_info_path}")
+    else:
+        # 使用默认先验（可以从 ParameterRegistry 或硬编码）
+        print("[Prior] 使用默认先验定义")
+        # 这里可以扩展为从 ParameterRegistry 自动生成
+        raise ValueError("需要提供 prior_info_path 或实现自动生成逻辑")
+    
+    # 生成或加载 simulation bank
+    if os.path.exists(bank_path) and not force_bank:
+        theta_samples, summary_samples, param_names_loaded, summary_window_loaded, window_loaded = load_simulation_bank(bank_path)
+        if param_names_loaded != param_names:
+            raise ValueError("加载的 bank 参数顺序与 prior_info 不一致，请重新生成 bank")
+        if summary_window_loaded != summary_window:
+            raise ValueError("加载的 bank summary_window 与当前设置不一致，请重新生成 bank")
+        if tuple(window_loaded) != (train_start, train_end):
+            raise ValueError("加载的 bank 训练窗口与当前设置不一致，请重新生成 bank")
+        print(f"[Bank] 复用已有 simulation bank: {bank_path}")
+    else:
+        theta_samples, summary_samples = generate_simulation_bank(
+            bundle=bundle,
+            param_names=param_names,
+            prior_bounds=prior_bounds,
+            bank_size=bank_size,
+            train_window=(train_start, train_end),
+            summary_window=summary_window,
+            seed=cfg.seed,
+            bank_path=bank_path,
+            age_cat_names=age_cat_names,
+            occ_cat_names=occ_cat_names,
+        )
+    
+    # 训练 SNPE posterior
+    print("[SNPE] 训练 posterior...")
+    posterior = train_snpe_posterior(
+        theta_samples=theta_samples,
+        summary_samples=summary_samples,
+        param_names=param_names,
+        prior_bounds=prior_bounds,
+        device=device,
+    )
+    
+    # 计算真实数据的 summary
+    observed_window = wearing[train_start:train_end]
+    observed_summary = make_summary(observed_window, summary_window)
+    observed_rates = observed_window.mean(axis=1)
+    
+    # Posterior predictive 评估
+    print(f"[Posterior] 生成 {posterior_samples} 个样本的预测曲线...")
+    curves = posterior_predictive_curves(
+        bundle=bundle,
+        posterior=posterior,
+        param_names=param_names,
+        train_window=(train_start, train_end),
+        posterior_samples=posterior_samples,
+        mc_per_sample=mc_per_sample,
+        seed=cfg.seed,
+        x_observed=observed_summary,
+        age_cat_names=age_cat_names,
+        occ_cat_names=occ_cat_names,
+        device=device,
+    )
+    
+    # 评估指标
+    metrics_id = evaluate_curves(curves, observed_rates)
+    
+    results = {
+        "train_window": [train_start, train_end],
+        "summary_window": summary_window,
+        "in_distribution": metrics_id,
+    }
+    
+    # OOD 评估（可选）
+    ood_shift = 5
+    ood_start = train_start + ood_shift
+    ood_end = train_end + ood_shift
+    if 0 <= ood_start < ood_end <= T_total:
+        ood_window = wearing[ood_start:ood_end]
+        ood_rates = ood_window.mean(axis=1)
+        ood_summary = make_summary(ood_window, summary_window)
+        ood_curves = posterior_predictive_curves(
+            bundle=bundle,
+            posterior=posterior,
+            param_names=param_names,
+            train_window=(ood_start, ood_end),
+            posterior_samples=posterior_samples,
+            mc_per_sample=mc_per_sample,
+            seed=cfg.seed + 123,
+            x_observed=ood_summary,
+            age_cat_names=age_cat_names,
+            occ_cat_names=occ_cat_names,
+            device=device,
+        )
+        metrics_ood = evaluate_curves(ood_curves, ood_rates)
+        results["ood_window"] = [ood_start, ood_end]
+        results["ood"] = metrics_ood
+    else:
+        results["ood"] = None
+        results["ood_window"] = None
+    
+    # 保存结果
+    metrics_path = os.path.join(output_dir, "metrics.json")
+    save_json(results, metrics_path)
+    np.savez_compressed(
+        os.path.join(output_dir, "posterior_curves.npz"),
+        curves=curves,
+        observed_rates=observed_rates,
+    )
+    print(f"完成 G-Sim baseline 复现，指标已保存到 {metrics_path}")
+    return results
+
+
 def main() -> None:
     """
     Orchestrates the multi-agent simulation:
@@ -2015,6 +2586,42 @@ def main() -> None:
     - Forecast days 30-39
     - Save outputs and configuration
     """
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description="Mask Adoption Simulation")
+    parser.add_argument("--mode", type=str, choices=["default", "gsim"], default="default",
+                       help="运行模式：default=原有校准流程，gsim=G-Sim baseline 复现")
+    parser.add_argument("--bank-size", type=int, default=1000, help="G-Sim: simulation bank 样本数")
+    parser.add_argument("--posterior-samples", type=int, default=200, help="G-Sim: posterior 采样数")
+    parser.add_argument("--mc-per-sample", type=int, default=20, help="G-Sim: 每个样本的 Monte Carlo 运行次数")
+    parser.add_argument("--summary-window", type=int, default=11, help="G-Sim: summary 时间窗口长度")
+    parser.add_argument("--train-start", type=int, default=0, help="G-Sim: 训练窗口起始 day index")
+    parser.add_argument("--train-end", type=int, default=11, help="G-Sim: 训练窗口结束 day index (exclusive)")
+    parser.add_argument("--prior-info", type=str, default=None, help="G-Sim: prior_info.json 路径")
+    parser.add_argument("--output-dir", type=str, default=None, help="G-Sim: 输出目录")
+    parser.add_argument("--device", type=str, choices=["cpu", "cuda"], default="cpu", help="G-Sim: SNPE 训练设备")
+    parser.add_argument("--force-bank", action="store_true", help="G-Sim: 强制重新生成 simulation bank")
+    parser.add_argument("--seed", type=int, default=42, help="随机种子")
+    
+    args = parser.parse_args()
+    
+    # 如果是 G-Sim 模式，运行 G-Sim baseline
+    if args.mode == "gsim":
+        cfg = SimulationConfig(seed=args.seed)
+        run_gsim_baseline(
+            cfg=cfg,
+            bank_size=args.bank_size,
+            posterior_samples=args.posterior_samples,
+            mc_per_sample=args.mc_per_sample,
+            summary_window=args.summary_window,
+            train_window=(args.train_start, args.train_end),
+            prior_info_path=args.prior_info,
+            output_dir=args.output_dir,
+            device=args.device,
+            force_bank=args.force_bank,
+        )
+        return
+    
+    # 原有流程
     cfg = SimulationConfig()
     set_global_seed(cfg.seed)
 
@@ -2196,7 +2803,7 @@ def main() -> None:
     if posterior_samples is None:
         print("❌ Failed to sample from posterior, falling back to point estimate")
         # Fallback to point estimate using fitted_params
-    metrics = evaluate_on_validation(
+        metrics = evaluate_on_validation(
             wearing=wearing_test,
             neighbors=neighbors_test,
             risk=risk_perception_test,
@@ -2204,11 +2811,11 @@ def main() -> None:
             occ_oh=occ_oh_test,
             age_cat_names=age_cat_names_test,
             occ_cat_names=occ_cat_names_test,
-        params=params,
+            params=params,
             val_start_idx=test_start_idx,
             val_end_idx=test_end_idx,
-        k_runs=cfg.k_runs,
-    )
+            k_runs=cfg.k_runs,
+        )
     else:
         print(f"✓ Sampled {posterior_samples.shape[0]} parameter sets from posterior")
         

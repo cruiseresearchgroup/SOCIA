@@ -1,0 +1,193 @@
+{
+  "summary": "The current codebase sets up a reasonably detailed multi-agent simulation with multiplex social influence and an SBI-based calibrator, but several critical issues prevent correct calibration/evaluation and alignment with the task. The largest blockers are: mismatched demographic naming causing shape errors or zeroed effects, incorrect coefficient mapping in the logistic calibrator, ignoring observed received_info, reliance on an absent test_data.csv instead of temporal holdout, and hard-coded assumptions (e.g., Day 10 intervention threshold) not wired to config. Addressing these will stabilize training, enable proper evaluation on the last 10 days, and improve forecast realism.",
+  "critical_issues": [
+    {
+      "issue": "Hard-coded demographic category names in evaluation leading to shape mismatch and zero demographic effects",
+      "impact": "Causes runtime errors in evaluate_params/evaluate_on_validation when age_oh/occ_oh column counts don’t match hard-coded lists; even when not crashing, demographic effects are silently zeroed, reducing model fidelity",
+      "solution": "Pass and use actual age_cat_names and occ_cat_names from encode_demographics throughout; remove hard-coded lists in evaluate_params/evaluate_on_validation and compute_logit",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "LogitHeadCalibrator maps coefficients incorrectly and ignores received_info",
+      "impact": "Neighbor influence, risk_perception, and info exposure coefficients are mis-assigned; received_info is set to all zeros, preventing learning of information effects; theta_f/w/c default to 1.0, losing fitted peer-layer effects",
+      "solution": "Include received_info in calibrator bundle; build correct feature index map; set theta_f/w/c from fitted betas for share_f/share_w/share_c; compute beta_i from the correct index; use derive_layer_weights_and_betas to normalize layer weights",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Using non-existent test_data.csv instead of temporal holdout",
+      "impact": "Main pipeline likely returns early with \"Failed to load test data\", producing no metrics and no forecast; deviates from the task that requires prediction for last 10 days",
+      "solution": "Split train_data.csv into train (days 0-29) and validation (days 30-39) using indices; evaluate on the last 10 days; then forecast forward from day 39 to 49",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Demographic effect naming mismatch in SBI Calibrator",
+      "impact": "Age/occupation effects sampled in prior use names 'age_0'/'occ_0' but compute_logit expects names aligned to the one-hot columns; results in zero influence of demographics during SBI simulations, wasting parameters and degrading inference",
+      "solution": "Standardize names to 'age_cat_i' and 'occ_cat_i' in both SBI prior/sample-to-params and compute_logit, or pass through real category names and use them consistently",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Hard-coded intervention day (>=10) in simulate_window",
+      "impact": "Ignores config.gov_intervention_day; prevents sensitivity analysis and incorrect behavior if configuration changes",
+      "solution": "Add gov_intervention_day to Parameters or pass cfg into simulate_window; use that value instead of hard-coded 10",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "evaluate_params uses fixed category lists and can crash on dimension mismatch",
+      "impact": "RandomSearch/Logit calibrators can repeatedly fail trials/evaluation, hampering calibration",
+      "solution": "Modify evaluate_params to accept (and forward) age_cat_names/occ_cat_names from bundle; remove hard-coded lists",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Information propagation calibration",
+      "current_approach": "Heuristic and unused calibrate_info_params_simple; received_info in training is ignored in logit calibrator",
+      "suggested_approach": "Use observed received_info to calibrate phi_family, phi_work, phi_community, and lambda_broadcast_base/factor via method-of-moments (calibrate_info_params_simple) and feed mem_info into the logit calibrator",
+      "expected_benefit": "Align endogenous/exogenous info dynamics with data, improve adoption dynamics and RMSE/Brier"
+    },
+    {
+      "aspect": "Demographic effects",
+      "current_approach": "One-hot built correctly, but effects not applied in evaluation or SBI due to naming mismatch",
+      "suggested_approach": "Standardize demographic keys across encode_demographics -> calibrators -> compute_logit; estimate fixed effects with regularization",
+      "expected_benefit": "Capture heterogeneity in adoption propensity; better TransitionFit and Brier"
+    },
+    {
+      "aspect": "Layer influence weighting",
+      "current_approach": "theta_f/w/c default to 1.0 in logit; layer_weights w_* unused",
+      "suggested_approach": "Fit theta_f/w/c from micro-data; derive normalized w_* and store both; use theta_* in compute_logit and w_* in diagnostics",
+      "expected_benefit": "Improved fit to network-structured spread; more realistic clustering effects"
+    },
+    {
+      "aspect": "Holdout strategy",
+      "current_approach": "Attempts to load external test_data.csv",
+      "suggested_approach": "Temporal holdout last 10 days from train_data.csv; initialize validation from last train state; then forecast beyond",
+      "expected_benefit": "Conforms to task specification; ensures evaluation always runs"
+    },
+    {
+      "aspect": "Intervention modeling",
+      "current_approach": "Binary change at day 10 with fixed factor",
+      "suggested_approach": "Parameterize intervention day and allow gradual ramp (e.g., linear ramp over 3 days) if supported by data",
+      "expected_benefit": "Smoother dynamics if adoption changes gradually; improved RMSE"
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Pass real category names through bundles and remove hard-coded age/occupation lists in evaluate_params/evaluate_on_validation",
+      "reason": "Prevents shape mismatches and ensures demographic effects are correctly applied",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Fix LogitHeadCalibrator feature mapping and include received_info in bundle to compute mem_info with actual data",
+      "reason": "Correctly estimate risk and info effects; enable fitting of peer layer coefficients",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Replace test_data.csv dependency with temporal holdout on train_data.csv (split days 0-29 train, 30-39 validation); forecast from day 39 onward",
+      "reason": "Ensures the pipeline runs end-to-end with provided data as per task",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Standardize demographic effect names in SBI: use 'age_cat_i'/'occ_cat_i' in priors and in _samples_to_fitted_params",
+      "reason": "Aligns with compute_logit and one-hot matrices created for SBI wrapper",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use cfg.gov_intervention_day in simulate_window instead of hard-coded 10",
+      "reason": "Config-driven behavior improves flexibility and correctness",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Calibrate info params from observed received_info via calibrate_info_params_simple and store in FittedParams for simulation",
+      "reason": "Leverages observed data to improve information dynamics",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "RMSE",
+      "current_gap": "Aggregate rates diverge due to uncalibrated info and mis-specified layer effects",
+      "suggestion": "Calibrate phi_* and lambda_broadcast_* from received_info; fit theta_f/w/c and gamma from transitions; include regularization and early stopping"
+    },
+    {
+      "metric": "Brier",
+      "current_gap": "Per-agent probabilities do not reflect observed heterogeneity",
+      "suggestion": "Apply correctly named demographic effects and risk_perception coefficient; include interaction term risk × info if available"
+    },
+    {
+      "metric": "TransitionFit",
+      "current_gap": "Persistence (P11) and abandonment (P10) not matched due to gamma misfit",
+      "suggestion": "Explicitly weight loss to match observed P11/P10 during logit fitting or add constraint; validate transition matrices"
+    }
+  ],
+  "prioritized_actions": [
+    "Remove hard-coded demographic category lists; pass and use actual age_cat_names/occ_cat_names everywhere",
+    "Fix LogitHeadCalibrator feature mapping and include received_info to compute mem_info correctly",
+    "Switch to temporal holdout using train_data.csv (days 30-39) instead of requiring test_data.csv",
+    "Standardize demographic naming in SBI to 'age_cat_i'/'occ_cat_i' and align with one-hot",
+    "Use cfg.gov_intervention_day (not fixed 10) in simulate_window",
+    "Calibrate information parameters from observed received_info and propagate into simulation"
+  ],
+  "additional_comments": "The SBI pipeline scaffolding is solid but currently uses priors and naming that decouple demographic parameters from the simulator, undermining inference quality. Start with stabilizing the end-to-end classical calibration (logit + temporal holdout) and accurate evaluation; then re-enable SBI with aligned parameterization. Also consider reducing n_simulations during development to speed iteration.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def evaluate_params(simulator, params: FittedParams, window) -> Dict[str, Any]:\n    # ...\n    # Get age and occupation category names (hardcoded for now)\n    age_cat_names = ['Youth', 'Young Adult', 'Middle Age']\n    occ_cat_names = ['Blue Collar', 'White Collar', 'Student']\n    \n    # Run simulation on the training window\n    result = evaluate_on_validation(\n        wearing, neighbors, risk, age_oh, occ_oh,\n        age_cat_names, occ_cat_names, legacy_params, \n        train_start, train_end, cfg.k_runs\n    )",
+      "after": "def evaluate_params(simulator, params: FittedParams, window) -> Dict[str, Any]:\n    # window now carries age_cat_names and occ_cat_names from encode_demographics\n    wearing, neighbors, risk, age_oh, occ_oh, age_cat_names, occ_cat_names, train_window, cfg = window\n    train_start, train_end = train_window\n\n    result = evaluate_on_validation(\n        wearing, neighbors, risk, age_oh, occ_oh,\n        age_cat_names, occ_cat_names, params.to_parameters(),\n        train_start, train_end, cfg.k_runs\n    )",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class LogitHeadCalibrator(Calibrator):\n    def fit(self, bundle, simulator, evaluator, train_window: Tuple[int, int], seed: int) -> FittedParams:\n        wearing, neighbors, risk, age_oh, occ_oh, cfg = bundle\n        # ...\n        received_info = np.zeros_like(wearing)  # Placeholder - should be extracted from bundle if available\n        mem_info = compute_mem_info(received_info, cfg.rho_info_decay_default)\n        # Build feature matrix\n        X, y = build_feature_matrix(\n            wearing=wearing,\n            mem_info=mem_info,\n            share_f_by_day=share_f_by_day,\n            share_w_by_day=share_w_by_day,\n            share_c_by_day=share_c_by_day,\n            risk=risk,\n            age_oh=age_oh,\n            occ_oh=occ_oh,\n            day_start=train_start,\n            day_end=train_end\n        )\n        # Fit\n        beta = fit_logistic_l2(X, y, self.l2_reg, self.max_iter, self.learning_rate, verbose=True)\n        decision_weights = {\n            'alpha': beta[0],\n            'gamma': beta[1],\n            'theta_f': 1.0,\n            'theta_w': 1.0,\n            'theta_c': 1.0,\n            'beta_r': beta[2] if len(beta) > 2 else 0.0,\n            'beta_i': beta[3] if len(beta) > 3 else 0.0,\n            'age_effects': {},\n            'occ_effects': {}\n        }",
+      "after": "class LogitHeadCalibrator(Calibrator):\n    def fit(self, bundle, simulator, evaluator, train_window: Tuple[int, int], seed: int) -> FittedParams:\n        # Unpack received and category names\n        wearing, neighbors, risk, age_oh, occ_oh, received, age_cat_names, occ_cat_names, cfg = bundle\n        train_start, train_end = train_window\n        set_global_seed(seed)\n\n        # Precompute daily neighbor shares\n        T, N = wearing.shape\n        share_f_by_day = np.zeros_like(wearing)\n        share_w_by_day = np.zeros_like(wearing)\n        share_c_by_day = np.zeros_like(wearing)\n        for t in range(T):\n            s_prev = wearing[t, :]\n            share_f_by_day[t, :] = compute_layer_neighbor_share(s_prev, neighbors['family'])\n            share_w_by_day[t, :] = compute_layer_neighbor_share(s_prev, neighbors['work_school'])\n            share_c_by_day[t, :] = compute_layer_neighbor_share(s_prev, neighbors['community'])\n\n        # Use actual received_info to build memory\n        mem_info = compute_mem_info(received, cfg.rho_info_decay_default)\n\n        # Build design matrix; feature order must match mapping below\n        X, y = build_feature_matrix(\n            wearing=wearing,\n            mem_info=mem_info,\n            share_f_by_day=share_f_by_day,\n            share_w_by_day=share_w_by_day,\n            share_c_by_day=share_c_by_day,\n            risk=risk,\n            age_oh=age_oh,\n            occ_oh=occ_oh,\n            day_start=train_start,\n            day_end=train_end\n        )\n\n        beta = fit_logistic_l2(X, y, self.l2_reg, self.max_iter, self.learning_rate, verbose=True)\n        # Feature indices from build_feature_matrix: 0:intercept, 1:prev, 2:share_f, 3:share_w, 4:share_c, 5:risk, 6:mem\n        alpha = float(beta[0]); gamma = float(beta[1])\n        theta_f = float(beta[2]); theta_w = float(beta[3]); theta_c = float(beta[4])\n        beta_r = float(beta[5]); beta_i = float(beta[6])\n        # Demographics after base 7\n        base_idx = 7\n        n_age = age_oh.shape[1]\n        n_occ = occ_oh.shape[1]\n        age_effects = {age_cat_names[i]: float(beta[base_idx + i]) for i in range(n_age)}\n        occ_effects = {occ_cat_names[i]: float(beta[base_idx + n_age + i]) for i in range(n_occ)}\n\n        # Normalize layer weights and expose both weights and thetas\n        w_f, w_w, w_c, _, _, _ = derive_layer_weights_and_betas(theta_f, theta_w, theta_c)\n\n        decision_weights = {\n            'alpha': alpha,\n            'gamma': gamma,\n            'theta_f': theta_f,\n            'theta_w': theta_w,\n            'theta_c': theta_c,\n            'beta_r': beta_r,\n            'beta_i': beta_i,\n            'age_effects': age_effects,\n            'occ_effects': occ_effects\n        }\n        layer_weights = {'family': w_f, 'work_school': w_w, 'community': w_c}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Load test data for validation (days 30-39)\n    test_path = os.path.join(cfg.data_folder, \"test_data.csv\")\n    try:\n        test_df = load_train_data(test_path)\n        print(f\"Loaded test data: {len(test_df)} records\")\n    except Exception as e:\n        print(f\"Failed to load test data: {e}\")\n        return",
+      "after": "# Temporal holdout: use last 10 days from train_data.csv\n    # Split indices for train/validation\n    all_days = days\n    if len(all_days) < 40:\n        print(f\"Warning: expected at least 40 days, found {len(all_days)}; using last 10 days as validation.\")\n    val_len = min(10, len(all_days) - 1)\n    test_start_idx = len(all_days) - val_len\n    test_end_idx = len(all_days)\n\n    wearing_test = wearing[test_start_idx:test_end_idx, :]\n    received_test = received[test_start_idx:test_end_idx, :]\n    days_test = all_days[test_start_idx:test_end_idx]\n\n    # Build neighbors/risk/demographics already aligned; reuse them",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def simulate_window(\n    start_states: np.ndarray,\n    neighbors: Dict[str, List[np.ndarray]],\n    risk: np.ndarray,\n    age_oh: np.ndarray,\n    occ_oh: np.ndarray,\n    age_cat_names: List[str],\n    occ_cat_names: List[str],\n    params: Parameters,\n    start_day_index: int,\n    end_day_index: int,\n) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:\n    # ...\n        lam = params.lambda_broadcast_base * (params.lambda_broadcast_factor_after_day10 if global_day >= 10 else 1.0)",
+      "after": "def simulate_window(\n    start_states: np.ndarray,\n    neighbors: Dict[str, List[np.ndarray]],\n    risk: np.ndarray,\n    age_oh: np.ndarray,\n    occ_oh: np.ndarray,\n    age_cat_names: List[str],\n    occ_cat_names: List[str],\n    params: Parameters,\n    start_day_index: int,\n    end_day_index: int,\n    gov_intervention_day: int = 10,\n) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:\n    # ...\n        lam_factor = params.lambda_broadcast_factor_after_day10 if global_day >= gov_intervention_day else 1.0\n        lam = params.lambda_broadcast_base * lam_factor",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _samples_to_fitted_params(self, sample: np.ndarray, param_names: List[str], \n                                  seed: int, train_window: Tuple[int, int]) -> FittedParams:\n    # ...\n    decision_weights = {\n        'alpha': lambda_dict.get('alpha', 0.0),\n        'gamma': lambda_dict.get('gamma', 1.0),\n        'theta_f': lambda_dict.get('theta_f', 1.0),\n        'theta_w': lambda_dict.get('theta_w', 1.0),\n        'theta_c': lambda_dict.get('theta_c', 1.0),\n        'beta_r': lambda_dict.get('beta_r', 0.0),\n        'beta_i': lambda_dict.get('beta_i', 0.0),\n        'age_effects': {\n            'age_0': lambda_dict.get('age_0', 0.0),\n            'age_1': lambda_dict.get('age_1', 0.0),\n            'age_2': lambda_dict.get('age_2', 0.0),\n        },\n        'occ_effects': {\n            'occ_0': lambda_dict.get('occ_0', 0.0),\n            'occ_1': lambda_dict.get('occ_1', 0.0),\n            'occ_2': lambda_dict.get('occ_2', 0.0),\n        }\n    }",
+      "after": "def _samples_to_fitted_params(self, sample: np.ndarray, param_names: List[str], \n                                  seed: int, train_window: Tuple[int, int]) -> FittedParams:\n    # ...\n    decision_weights = {\n        'alpha': lambda_dict.get('alpha', 0.0),\n        'gamma': lambda_dict.get('gamma', 1.0),\n        'theta_f': lambda_dict.get('theta_f', 1.0),\n        'theta_w': lambda_dict.get('theta_w', 1.0),\n        'theta_c': lambda_dict.get('theta_c', 1.0),\n        'beta_r': lambda_dict.get('beta_r', 0.0),\n        'beta_i': lambda_dict.get('beta_i', 0.0),\n        'age_effects': {\n            'age_cat_0': lambda_dict.get('age_cat_0', 0.0),\n            'age_cat_1': lambda_dict.get('age_cat_1', 0.0),\n            'age_cat_2': lambda_dict.get('age_cat_2', 0.0),\n        },\n        'occ_effects': {\n            'occ_cat_0': lambda_dict.get('occ_cat_0', 0.0),\n            'occ_cat_1': lambda_dict.get('occ_cat_1', 0.0),\n            'occ_cat_2': lambda_dict.get('occ_cat_2', 0.0),\n        }\n    }",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Compute mem_info array using default rho for training features\nrho_train = cfg.rho_info_decay_default\nmem_info = compute_mem_info(received, rho=rho_train)\n\n# Training window: use all train_data.csv (0-14 days)\ntrain_end_idx = T\ntrain_window = (1, train_end_idx)\n\n# Prepare bundle for calibrator\nbundle = (wearing, neighbors, risk_perception, age_oh, occ_oh, cfg)",
+      "after": "# Compute mem_info array using default rho for training features\nrho_train = cfg.rho_info_decay_default\nmem_info = compute_mem_info(received, rho=rho_train)\n\n# Training window: days 0..(T-11) for training; last 10 days for validation if possible\ntrain_end_idx = max(1, T - 10)\ntrain_window = (1, train_end_idx)\n\n# Calibrate info params using observed received_info\nphi_f, phi_w, phi_c, lam_base, lam_factor = calibrate_info_params_simple(\n    received_info=received,\n    share_f_by_day=share_f_by_day,\n    share_w_by_day=share_w_by_day,\n    share_c_by_day=share_c_by_day,\n    gov_intervention_day=cfg.gov_intervention_day,\n    default_factor=cfg.gov_lam_factor_default\n)\n\n# Prepare bundle for calibrator (now includes received and category names)\nage_cat_names = age_cat_names\nocc_cat_names = occ_cat_names\nbundle = (wearing, neighbors, risk_perception, age_oh, occ_oh, received, age_cat_names, occ_cat_names, cfg)",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent changes primarily introduced the SBI calibrator and a comprehensive pipeline for posterior estimation. However, demographic effect names in SBI are not aligned with compute_logit, and evaluation still uses hard-coded category names. The pipeline also assumes a test_data.csv that is not specified, so execution likely exits early.",
+    "positive_impacts": [
+      "Modular calibrator interface with multiple strategies (logit head, random search, SBI)",
+      "Robust evaluation function with RMSE/MAE/Brier/TransitionFit and K-run averaging",
+      "Multiplex network construction with symmetric deduplication"
+    ],
+    "negative_impacts": [
+      "SBI demographic effect naming mismatch ('age_0' vs 'age_cat_0') prevents demographic effects from influencing simulations",
+      "evaluate_params hard-codes category names, risking dimension mismatches and exceptions",
+      "Dependency on absent test_data.csv halts the pipeline"
+    ],
+    "suggestions": [
+      "Standardize demographic effect naming conventions across the entire codebase",
+      "Use temporal holdout on train_data.csv instead of loading test_data.csv",
+      "Thread cfg.gov_intervention_day into simulate_window and info calibration"
+    ]
+  }
+}
