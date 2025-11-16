@@ -1,0 +1,217 @@
+{
+  "summary": "The simulation runs and includes many sensible structures (small-world network, media exposure, policy enforcement, supply dynamics). However, it misses key specification metrics, incorrectly handles restocking for fractional rates, and aggregates some metrics in a non-aligned way. The most critical fixes are: implement voluntary vs mandatory adoption decomposition, track policy violations explicitly, correct the restock rate logic, time-average adoption by location type, and expand evaluate() to the requested metrics. Additional improvements include separating stockout vs affordability failures and aligning parameters and entities to the spec.",
+  "critical_issues": [
+    {
+      "issue": "Missing 'voluntary_vs_mandatory_share' and 'policy_violations_count' metrics",
+      "impact": "These are required outputs; without them, the simulation cannot be fully evaluated according to the plan. It also obscures the mechanism by which policy influences adoption.",
+      "solution": "During each step, compute expected adoption with and without the mandate component (penalty_benefit) to derive voluntary vs mandate-driven shares. Also track policy_violations_count as penalties_today_count + denied_access_today. Aggregate daily and cumulative values into results.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Restock-rate casting disables restocking when spec uses fractional rates",
+      "impact": "If retailer_restock_rate is 0.1 (common in the plan), int(0.1) becomes 0, leading to no restocking and unrealistic persistent shortages or under-supply.",
+      "solution": "Treat retailer_restock_rate as either (a) a fraction of population if 0 < rate <= 1.0 or (b) absolute daily units if > 1.0. Avoid premature int() in _extract_parameters and derive restock counts at initialize() using population size.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Adoption by location type is computed only for the final day",
+      "impact": "Spec requires average rate observed within each location type; final-day snapshot can be misleading and not representative.",
+      "solution": "Accumulate per-day adoption by location type and provide time-averaged values (and optionally the daily series).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "overall_adoption_rate is provided only as the time series",
+      "impact": "Spec expects both the per-timestep series and the average across the simulation, impairing downstream evaluation comparability.",
+      "solution": "Add overall_adoption_rate_mean = mean(daily_adoption) to observable and evaluate().",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "evaluate() does not implement the requested evaluation metrics",
+      "impact": "Automation relying on evaluate() cannot grade the run against the plan. Missing: time_to_target_adoption, adoption_by_location_type, voluntary_vs_mandatory_share, adoption_inequality_index, policy_violations_count, mask_access_shortages.",
+      "solution": "Extend evaluate() to compute these or read them from 'observable' with aligned naming.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Voluntary vs mandatory adoption decomposition",
+      "current_approach": "Mandate influence is included via penalty_benefit in latent utility, but no decomposition is computed.",
+      "suggested_approach": "For each agent on mandate-active days, compute two probabilities: p_with (current latent) and p_without (penalty_benefit=0, mask_requirement=False) to estimate expected voluntary adoption and mandate-driven delta. Aggregate daily and overall shares.",
+      "expected_benefit": "Quantifies mandate\u2019s causal effect and fulfills a key metric from the spec."
+    },
+    {
+      "aspect": "Supply and shortage metrics",
+      "current_approach": "Unsuccessful purchases increment shortages_today even when stock exists but the agent refrains due to price/affordability. No stockout duration metric.",
+      "suggested_approach": "Track separately: (1) unmet_demand_today (includes affordability) and (2) retailer_stockout_today (stock==0 at any attempt). Report both: stockout_days, stockout_stretches, and fraction unable to obtain when desired.",
+      "expected_benefit": "Improves fidelity to spec (\u2018frequency and duration of stockouts\u2019 and \u2018fraction unable to obtain masks\u2019)."
+    },
+    {
+      "aspect": "Adoption by location type averaging",
+      "current_approach": "Computed only for the final day.",
+      "suggested_approach": "Compute daily by-location adoption rates and average across the time horizon.",
+      "expected_benefit": "Aligns with the spec and provides more stable insights."
+    },
+    {
+      "aspect": "Parameter alignment (restock, availability, income)",
+      "current_approach": "retailer_restock_rate truncated; mask_availability ignored; income distribution hard-coded.",
+      "suggested_approach": "Use retailer_restock_rate as fraction-or-absolute per population; seed initial supply with mask_availability; use income_mean/std from parameters to draw incomes.",
+      "expected_benefit": "Better control via user parameters and consistency with the model plan."
+    },
+    {
+      "aspect": "Entity naming and schema alignment",
+      "current_approach": "MediaOutlet/SupplyChain deviate from MediaChannel/Retailer; Person lacks some spec attributes.",
+      "suggested_approach": "Add thin wrapper or alias classes for MediaChannel and Retailer or map names in results. Optionally extend Person with age, health_risk_level, group_identity if needed for stratified metrics.",
+      "expected_benefit": "Easier integration and validation against the spec schema."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Fix restock rate logic to handle fractional rates correctly and avoid int() truncation in _extract_parameters.",
+      "reason": "Prevents disabling restocking when the spec uses rates like 0.1.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Track policy violations and voluntary vs mandatory shares in step(); expose cumulative metrics in run().",
+      "reason": "Fulfills missing key metrics from the spec and disaggregates policy effects.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Time-average adoption by location type and add overall adoption mean.",
+      "reason": "Aligns with spec definitions and improves interpretability.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Extend evaluate() to return the plan\u2019s evaluation_metrics with correctly named keys.",
+      "reason": "Allows automated evaluation workflows to use the simulation outputs directly.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Split shortage accounting into unmet_demand (affordability+availability) and retailer stockouts; track stockout days.",
+      "reason": "Provides both components requested by the spec and avoids conflation.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "overall_adoption_rate",
+      "current_gap": "No average provided; daily series only. Initial adoption hard-coded rather than validated against a baseline.",
+      "suggestion": "Provide overall_adoption_rate_mean and initialize initial adoption from parameters or calibration data if available."
+    },
+    {
+      "metric": "adoption_by_location_type",
+      "current_gap": "Final-day snapshot only.",
+      "suggestion": "Provide time-averaged adoption by location and optionally a daily series; weight by visits if visit rates are available."
+    },
+    {
+      "metric": "voluntary_vs_mandatory_share",
+      "current_gap": "Not computed.",
+      "suggestion": "Use counterfactual without penalty_benefit to compute voluntary baseline and mandate-driven increment."
+    },
+    {
+      "metric": "mask_access_shortages",
+      "current_gap": "Counts all purchase failures as shortages; no stockout durations.",
+      "suggestion": "Separate unmet demand vs stockout flags and compute stockout days and average unmet demand fraction."
+    },
+    {
+      "metric": "adoption_inequality_index",
+      "current_gap": "Computed as a Gini over quintile mean adoptions; not necessarily aligned with income distribution parameters.",
+      "suggestion": "Draw incomes using income_mean and income_std parameters and optionally report inequality by both income and age/health-risk strata."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement voluntary_vs_mandatory_share decomposition and policy_violations_count tracking (step and run).",
+    "Fix retailer_restock_rate handling to support fractional rates relative to population.",
+    "Time-average adoption_by_location_type and add overall_adoption_rate_mean.",
+    "Extend evaluate() to support all evaluation_metrics listed in the plan.",
+    "Separate unmet_demand vs stockout metrics and track stockout days; use mask_availability to set initial stock.",
+    "Optionally align entity naming or output mapping to the spec schema and incorporate income_mean/std in initialization."
+  ],
+  "additional_comments": "The recent refactor substantially improved network correctness (undirected O(Nk) rewiring), added attitude influence to utility, mandated access control, and richer outputs (mask quality, denied access). The redundancy of 'pass' statements before real code is harmless but can be removed for clarity. Consider integrating visit_rates_per_location_type to weight location adoption metrics and integrating mandate_scope to selectively apply requirements only to indoor_public locations per spec.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "params.setdefault(\"restock_rate_per_day\", int(params.get(\"retailer_restock_rate\", 10000)))",
+      "after": "params.setdefault(\"restock_rate_per_day\", params.get(\"retailer_restock_rate\", 0.1))  # keep as float; interpret in initialize()",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "restock_per_day = int(pp.get(\"restock_rate_per_day\", pp.get(\"restock_rate_daily\", 10000)))",
+      "after": "rate = float(pp.get(\"restock_rate_per_day\", pp.get(\"restock_rate_daily\", 0.1)))\nif 0.0 < rate <= 1.0:\n    restock_per_day = int(round(rate * N))\nelse:\n    restock_per_day = int(rate)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "penalties_today_count = 0\nshortages_today = 0\ndenied_access_today = 0",
+      "after": "penalties_today_count = 0\nshortages_today = 0  # unmet demand (affordability or availability)\ndenied_access_today = 0\npolicy_violations_today = 0\nattempted_purchases_today = 0\nunmet_demand_today = 0\nretailer_stockout_today = False\nvol_wear_expected_with = 0.0\nvol_wear_expected_without = 0.0",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "p.decide_mask_use(self.rng, policy_active, peer_share, decision_params)",
+      "after": "# Compute expected adoption with and without penalty for voluntary vs mandatory share (do not alter state with these)\nlatent_params = dict(decision_params)\nlatent_with = latent_params.get(\"penalty_benefit\", 0.0)\n# Build latent utility components identically to decide_mask_use\n# Approximate using the latest person state without noise\n# p_wear_with and p_wear_without are expectations used for metric decomposition\np_wear_with = sigmoid(\n    (decision_params.get(\"policy_influence_weight\", 0.3) * (1.0 if policy_active else 0.0) * p.trust_in_authorities)\n    + (decision_params.get(\"personal_risk_weight\", 0.3) * p.risk_perception * decision_params.get(\"mask_effectiveness_weight\", 0.4))\n    + (decision_params.get(\"trust_weight\", 0.5) * p.trust_in_media * (p.exposure_to_pro_mask_messages - p.exposure_to_misinformation))\n    + (decision_params.get(\"peer_influence_weight\", 0.4) * (peer_share - 0.5))\n    + (decision_params.get(\"habit_formation_rate\", 0.05) * p.habit_strength)\n    + (decision_params.get(\"observed_norms_influence_weight\", 0.2) * (decision_params.get(\"observed_location_norm\", 0.0) - 0.5))\n    + (decision_params.get(\"attitude_weight\", 0.3) * (p.mask_attitude - 0.5))\n    - (decision_params.get(\"disutility_cost_scale\", 1.0) * p.perceived_mask_cost + p.fatigue_level)\n    + decision_params.get(\"penalty_benefit\", 0.0)\n)\np_wear_without = sigmoid(\n    (decision_params.get(\"policy_influence_weight\", 0.3) * 0.0 * p.trust_in_authorities)\n    + (decision_params.get(\"personal_risk_weight\", 0.3) * p.risk_perception * decision_params.get(\"mask_effectiveness_weight\", 0.4))\n    + (decision_params.get(\"trust_weight\", 0.5) * p.trust_in_media * (p.exposure_to_pro_mask_messages - p.exposure_to_misinformation))\n    + (decision_params.get(\"peer_influence_weight\", 0.4) * (peer_share - 0.5))\n    + (decision_params.get(\"habit_formation_rate\", 0.05) * p.habit_strength)\n    + (decision_params.get(\"observed_norms_influence_weight\", 0.2) * (decision_params.get(\"observed_location_norm\", 0.0) - 0.5))\n    + (decision_params.get(\"attitude_weight\", 0.3) * (p.mask_attitude - 0.5))\n    - (decision_params.get(\"disutility_cost_scale\", 1.0) * p.perceived_mask_cost + p.fatigue_level)\n)\nif policy_active:\n    vol_wear_expected_with += p_wear_with\n    vol_wear_expected_without += p_wear_without\n# Now perform the actual stochastic decision as before\np.decide_mask_use(self.rng, policy_active, peer_share, decision_params)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "if p.mask_adoption_state == \"wearing\" and p.mask_inventory <= 0 and self.supply:\n    # choose type ...\n    if self.supply.available_mask_stock > 0 and self.rng.random() < demand_prob:\n        self.supply.available_mask_stock -= 1\n        p.mask_inventory += 1\n    else:\n        shortages_today += 1\n        p.mask_adoption_state = \"none\"\n        p.mask_type = \"none\"",
+      "after": "if p.mask_adoption_state == \"wearing\" and p.mask_inventory <= 0 and self.supply:\n    attempted_purchases_today += 1\n    # choose type ... compute price, demand_prob (unchanged)\n    if self.supply.available_mask_stock <= 0:\n        retailer_stockout_today = True\n    if self.supply.available_mask_stock > 0 and self.rng.random() < demand_prob:\n        self.supply.available_mask_stock -= 1\n        p.mask_inventory += 1\n    else:\n        unmet_demand_today += 1  # includes affordability and availability\n        shortages_today += 1     # keep backward-compatible name for unmet demand\n        p.mask_adoption_state = \"none\"\n        p.mask_type = \"none\"",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "if location_requires_mask and p.mask_adoption_state != \"wearing\" and self.policy is not None:\n    gate_prob = min(1.0, self.policy.enforcement_strength * loc_enf)\n    if self.rng.random() < gate_prob:\n        if self.rng.random() < 0.5:\n            penalties_today_value += self.policy.penalty_amount\n            penalties_today_count += 1\n        else:\n            denied_access_today += 1",
+      "after": "if location_requires_mask and p.mask_adoption_state != \"wearing\" and self.policy is not None:\n    gate_prob = min(1.0, self.policy.enforcement_strength * loc_enf)\n    if self.rng.random() < gate_prob:\n        if self.rng.random() < 0.5:\n            penalties_today_value += self.policy.penalty_amount\n            penalties_today_count += 1\n        else:\n            denied_access_today += 1\n        policy_violations_today += 1",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.daily_penalties.append(penalties_today_value)\nself.daily_penalties_count.append(penalties_today_count)\nself.policy_active_daily.append(policy_active)\nself.daily_denied_access.append(denied_access_today)",
+      "after": "self.daily_penalties.append(penalties_today_value)\nself.daily_penalties_count.append(penalties_today_count)\nself.policy_active_daily.append(policy_active)\nself.daily_denied_access.append(denied_access_today)\n# New daily metrics\nif policy_active:\n    n = max(1, len(self.people))\n    self.daily_voluntary_rate.append(vol_wear_expected_without / n)\n    self.daily_mandate_rate.append(max(0.0, (vol_wear_expected_with - vol_wear_expected_without) / n))\nelse:\n    self.daily_voluntary_rate.append(adoption_rate)\n    self.daily_mandate_rate.append(0.0)\nself.daily_policy_violations.append(policy_violations_today)\nself.daily_unmet_demand.append(unmet_demand_today)\nself.daily_attempted_purchases.append(attempted_purchases_today)\nself.daily_stockout_flag.append(bool(retailer_stockout_today))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "by_loc: Dict[str, float] = {}\nloc_groups: Dict[str, List[int]] = {}\nfor idx, p in enumerate(self.people):\n    loc_groups.setdefault(p.location_type, []).append(idx)\nwearing_last = [1.0 if p.mask_adoption_state == \"wearing\" else 0.0 for p in self.people]\nfor lt, idxs in loc_groups.items():\n    if idxs:\n        by_loc[lt] = sum(wearing_last[i] for i in idxs) / len(idxs)\n    else:\n        by_loc[lt] = 0.0",
+      "after": "# Time-averaged adoption by location type\nby_loc_daily_series = getattr(self, \"by_loc_daily_series\", None)\nif by_loc_daily_series is None:\n    self.by_loc_daily_series = []\n# Append today's by-location rates\nloc_today = {}\nfor lt, idxs in loc_groups.items():\n    loc_today[lt] = (sum(wearing_last[i] for i in idxs) / len(idxs)) if idxs else 0.0\nself.by_loc_daily_series.append(loc_today)\n# Compute time-averaged adoption by location type\nby_loc = {}\nif self.by_loc_daily_series:\n    all_lts = set().union(*[d.keys() for d in self.by_loc_daily_series])\n    for lt in all_lts:\n        vals = [d.get(lt, 0.0) for d in self.by_loc_daily_series]\n        by_loc[lt] = sum(vals) / len(vals)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "observable = {\n    \"adoption_rate_daily\": overall,\n    \"adoption_rate_by_location_type\": by_loc,\n    ...\n}",
+      "after": "overall_mean = sum(overall) / len(overall) if overall else 0.0\n# Voluntary vs mandatory shares (overall)\nvoluntary_mean = sum(self.daily_voluntary_rate) / len(self.daily_voluntary_rate) if getattr(self, \"daily_voluntary_rate\", None) else None\nmandatory_mean = sum(self.daily_mandate_rate) / len(self.daily_mandate_rate) if getattr(self, \"daily_mandate_rate\", None) else None\nviolations_total = sum(getattr(self, \"daily_policy_violations\", []))\nstockout_days = sum(1 for f in getattr(self, \"daily_stockout_flag\", []) if f)\nunmet_attempts = sum(getattr(self, \"daily_unmet_demand\", []))\nattempts = sum(getattr(self, \"daily_attempted_purchases\", []))\nunmet_fraction = (unmet_attempts / attempts) if attempts > 0 else 0.0\nobservable = {\n    \"overall_adoption_rate\": overall,  # time series\n    \"overall_adoption_rate_mean\": overall_mean,\n    \"adoption_rate_by_location_type\": by_loc,  # time-averaged\n    \"adoption_rate_by_location_type_daily\": getattr(self, \"by_loc_daily_series\", []),\n    \"voluntary_vs_mandatory_share\": {\"voluntary_mean\": voluntary_mean, \"mandatory_mean\": mandatory_mean},\n    \"policy_violations_count\": violations_total,\n    \"mask_access_shortages\": {\"unmet_demand_fraction\": unmet_fraction, \"stockout_days\": stockout_days},\n    ...\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "for name in metric_names:\n    if name == \"overall_adoption_rate\":\n        results[name] = daily\n    elif name == \"time_to_50_percent_adoption\":\n        ...",
+      "after": "for name in metric_names:\n    if name == \"overall_adoption_rate\":\n        results[name] = {\"series\": self.daily_adoption, \"mean\": sum(self.daily_adoption)/len(self.daily_adoption)}\n    elif name == \"time_to_target_adoption\":\n        target = float(self.params.get(\"target_adoption_rate\", 0.8))\n        t = next((i for i, v in enumerate(self.daily_adoption) if v >= target), None)\n        results[name] = t\n    elif name == \"adoption_by_location_type\":\n        results[name] = getattr(self, \"by_loc_daily_series\", [])\n    elif name == \"voluntary_vs_mandatory_share\":\n        results[name] = {\n            \"voluntary_mean\": sum(self.daily_voluntary_rate)/len(self.daily_voluntary_rate) if self.daily_voluntary_rate else 0.0,\n            \"mandatory_mean\": sum(self.daily_mandate_rate)/len(self.daily_mandate_rate) if self.daily_mandate_rate else 0.0,\n        }\n    elif name == \"adoption_inequality_index\":\n        results[name] = self.run(0)[\"observable\"].get(\"adoption_inequality_by_income_gini\", 0.0)\n    elif name == \"policy_violations_count\":\n        results[name] = sum(getattr(self, \"daily_policy_violations\", []))\n    elif name == \"mask_access_shortages\":\n        attempts = sum(getattr(self, \"daily_attempted_purchases\", []))\n        unmet = sum(getattr(self, \"daily_unmet_demand\", []))\n        results[name] = {\n            \"unmet_demand_fraction\": (unmet/attempts) if attempts else 0.0,\n            \"stockout_days\": sum(1 for f in getattr(self, \"daily_stockout_flag\", []) if f)\n        }\n    ...",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes improved network generation (undirected O(Nk) rewiring), added attitude into utility, location-based access control, richer outputs (mask quality, denied access), and CSV/export handling. However, a restock-rate truncation bug was introduced and several spec metrics remain unimplemented or misaligned.",
+    "positive_impacts": [
+      "Small-world network fixed to undirected O(Nk), reducing complexity and avoiding double-processing edges",
+      "Attitude weight added to utility improves belief-behavior coherence",
+      "Policy access control and denied access metrics add realism",
+      "Additional outputs (mask quality, workplace adoption, CSV flag) increase observability"
+    ],
+    "negative_impacts": [
+      "retailer_restock_rate cast to int disables fractional restocking per spec",
+      "Adoption by location type remains a final-day snapshot",
+      "Missing required metrics (voluntary_vs_mandatory_share and policy_violations_count)"
+    ],
+    "suggestions": [
+      "Fix restock-rate handling to support fractional values per population size",
+      "Implement voluntary vs mandatory share via within-step counterfactual probabilities",
+      "Provide time-averaged adoption by location type and overall adoption mean",
+      "Extend evaluate() to return all evaluation_metrics in the plan"
+    ]
+  }
+}

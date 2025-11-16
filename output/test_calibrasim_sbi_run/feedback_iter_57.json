@@ -1,0 +1,216 @@
+{
+  "summary": "The simulation runs and implements a coherent ABM with media, policy, market access, enforcement, and optional disease dynamics. However, the harness is failing to parse the program output as JSON because the program prints human-readable lines to stdout. There are also several minor logic/performance issues (duplicate visitation computation, unused observed_norms), a subtle small-world rewiring bug for tiny networks, unrealistic income scaling affecting purchasing logic, and noisy 'pass' statements. Priorities: make stdout emit only JSON (or add a flag), cache daily visits, integrate observed norms into behavior, correct the rewiring guard, and calibrate income/price to real-world ranges.",
+  "critical_issues": [
+    {
+      "issue": "Program prints non-JSON logs to stdout, causing the harness to fail JSON parsing",
+      "impact": "The system expects a JSON object on stdout; text like 'Wrote results to ...' breaks parsing, resulting in failures like 'Expecting property name enclosed in double quotes'",
+      "solution": "Print only JSON to stdout (e.g., results payload), send logs to stderr, and/or add a --stdout-json flag to emit only JSON. Demonstrate using sys.stderr for logs and json.dumps for stdout.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "ring_small_world rewires edges even when the original edge j was never present (edge-case for small n)",
+      "impact": "Can increase node degree beyond intended k for small networks (e.g., n=1) or if earlier steps removed the edge, leading to incorrect topology",
+      "solution": "Skip rewiring if j not in adj[i] (i.e., only rewire existing edges); this prevents unintended edge additions",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Daily visits are computed twice (visits_and_enforcement and disease_step)",
+      "impact": "Redundant O(N) work each day and potential inconsistency between policy enforcement and epidemiological mixing",
+      "solution": "Compute visitation once per day in step(), store it, and reuse in both enforcement and disease modules",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Income distribution is unrealistically large (exp(gauss(10, 0.7))), making mask price negligible",
+      "impact": "Affordability penalty barely affects purchasing, reducing SES-linked access differences and realism",
+      "solution": "Generate more realistic annual income (e.g., clamp within [15k, 150k]) or scale mask prices relative to daily income; adjust afford_ratio accordingly",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Social norms effect",
+      "current_approach": "Location.observed_norms is computed but not used in adoption decisions",
+      "suggested_approach": "Integrate previous-day location norms into adoption utility (e.g., average observed norms of locations visited last day as an additive term)",
+      "expected_benefit": "Captures normative influence from public spaces, potentially improving realism and producing richer dynamics"
+    },
+    {
+      "aspect": "Visitation caching",
+      "current_approach": "Visits recomputed separately in visits_and_enforcement and disease_step",
+      "suggested_approach": "Compute and store a single visits snapshot per day and pass it to both components",
+      "expected_benefit": "Consistent behavior across modules and improved performance"
+    },
+    {
+      "aspect": "Network generation robustness",
+      "current_approach": "Rewiring attempts to add new edges even when the base edge is not present",
+      "suggested_approach": "Guard rewiring so it only happens when the base edge exists; skip otherwise",
+      "expected_benefit": "Ensures degree targets and network structure are preserved, especially in edge cases"
+    },
+    {
+      "aspect": "Market affordability calibration",
+      "current_approach": "Incomes are log-normal with huge expected values, making mask prices negligible",
+      "suggested_approach": "Use bounded income ranges or realistic log-normal parameters; alternatively adjust mask price or affordability function",
+      "expected_benefit": "SES and price effects on purchasing become meaningful, improving equity and access metrics"
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Emit only JSON to stdout and route informational messages to stderr; add a --stdout-json flag",
+      "reason": "Fixes harness JSON parsing errors and improves integration reliability",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Guard small-world rewiring with 'if j not in adj[i]: continue' before attempting rewiring",
+      "reason": "Prevents unintended degree inflation when the base edge isn't present",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Cache daily visits in step() and pass/use them in visits_and_enforcement and disease_step",
+      "reason": "Reduces redundant computation and ensures consistent visitation across modules",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Integrate observed_norms via previous-day norms into adoption utility (e.g., a w_norms term)",
+      "reason": "Uses computed norms to influence behavior; improves model realism",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use realistic income distribution and adjust affordability calculation",
+      "reason": "Affordability currently has negligible effect due to very high incomes; calibration improves SES/access dynamics",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Replace parser.parse_args() with parser.parse_known_args()[0] and/or an env override for embedded contexts",
+      "reason": "Avoids unexpected failures in environments that pass unknown CLI arguments while preserving the required main() call",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove redundant 'pass' statements where code exists",
+      "reason": "Improves code clarity and reduces noise without changing behavior",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Mask purchasing and inventory by SES",
+      "current_gap": "Purchasing is weakly sensitive to price because income scale is unrealistic",
+      "suggestion": "Calibrate income to realistic ranges and set mask prices or affordability penalties to produce plausible purchase rates across SES quintiles; validate with publicly available PPE purchase data where possible"
+    },
+    {
+      "metric": "Mandate effect on adoption",
+      "current_gap": "Fixed weights and thresholds may not reflect empirical changes in adoption during mandates",
+      "suggestion": "Fit weights (w_policy, w_social, w_media) using historical mandate periods vs. adoption observations (e.g., mobility/mask use surveys) to better align time series dynamics"
+    },
+    {
+      "metric": "Disease dynamics (optional)",
+      "current_gap": "Beta and mask effectiveness are placeholders",
+      "suggestion": "Use literature-derived parameters for beta, incubation/infectious periods, and mask effectiveness, and validate Rt profile against reference epidemic curves"
+    }
+  ],
+  "prioritized_actions": [
+    "Make stdout emit only JSON (or add --stdout-json) and route logs to stderr to fix parsing errors",
+    "Guard small-world rewiring to avoid unintended degree inflation",
+    "Cache and reuse daily visits across enforcement and disease modules",
+    "Integrate observed norms into adoption decisions (using previous-day norms)",
+    "Calibrate income/price to produce realistic affordability effects and SES access differences",
+    "Remove redundant pass statements for clarity",
+    "Optionally adjust CLI parsing to parse_known_args to improve embedded use"
+  ],
+  "additional_comments": "The simulation\u2019s structure is solid and modular. The revised outage counting and improved Rt are welcome. Addressing the stdout JSON parsing issue and leveraging observed norms will immediately improve robustness and behavioral fidelity.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "print(f\"Wrote results to {args.output}\")\nprint(f\"Wrote daily results CSV to {csv_path}\")",
+      "after": "import sys\n# ... after sim.run()\nif getattr(args, \"stdout_json\", False):\n    sys.stdout.write(json.dumps({\"results\": sim.results(), \"metadata\": metadata}))\n    sys.stdout.flush()\nelse:\n    print(f\"Wrote results to {args.output}\", file=sys.stderr)\n    print(f\"Wrote daily results CSV to {csv_path}\", file=sys.stderr)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "parser = argparse.ArgumentParser(description=\"Agent-based social adoption simulation\")\n...\nargs = parser.parse_args()",
+      "after": "parser = argparse.ArgumentParser(description=\"Agent-based social adoption simulation\")\nparser.add_argument(\"--stdout-json\", action=\"store_true\", help=\"Emit only JSON to stdout and send logs to stderr\")\n...\nargs = parser.parse_known_args()[0]",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "for i in range(n):\n    for d in range(1, half + 1):\n        j = (i + d) % n\n        if rng.random() < p:\n            if j in adj[i]:\n                adj[i].discard(j)\n                adj[j].discard(i)\n            # Guard: if fully connected, skip\n            if len(adj[i]) >= n - 1:\n                continue\n            # Bounded attempts to find a new neighbor\n            for _ in range(10):\n                u = rng.randrange(n)\n                if u != i and u not in adj[i]:\n                    adj[i].add(u)\n                    adj[u].add(i)\n                    break\n            else:\n                # fallback: restore original edge\n                adj[i].add(j)\n                adj[j].add(i)",
+      "after": "for i in range(n):\n    for d in range(1, half + 1):\n        j = (i + d) % n\n        if rng.random() < p:\n            # Only rewire if the base edge exists\n            if j not in adj[i]:\n                continue\n            adj[i].discard(j)\n            adj[j].discard(i)\n            if len(adj[i]) >= n - 1:\n                continue\n            for _ in range(10):\n                u = rng.randrange(n)\n                if u != i and u not in adj[i]:\n                    adj[i].add(u)\n                    adj[u].add(i)\n                    break\n            else:\n                adj[i].add(j)\n                adj[j].add(i)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def step(self, day: int) -> None:\n    media_signals = self.daily_media_signal(day)\n    self.retailer_restock()\n    self.purchase_step()\n    peer_shares = self.compute_peer_share()\n    self.adoption_step(day, media_signals, peer_shares)\n    self.visits_and_enforcement(day)\n    self.disease_step(day)",
+      "after": "def step(self, day: int) -> None:\n    media_signals = self.daily_media_signal(day)\n    self.retailer_restock()\n    self.purchase_step()\n    peer_shares = self.compute_peer_share()\n    self.adoption_step(day, media_signals, peer_shares)\n    # Cache visits once\n    visits_by_loc = self._compute_daily_visits()\n    self.visits_and_enforcement(day, visits_by_loc)\n    self.disease_step(day, visits_by_loc)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def visits_and_enforcement(self, day: int) -> None:\n    # Visitation: with some chance, each person visits one random public location\n    for p in self.people:\n        if self.rng.random() < 0.6:\n            loc = self.rng.choice(self.locations)\n            visitors_by_location[loc.name].append(p.pid)",
+      "after": "def _compute_daily_visits(self) -> Dict[str, List[int]]:\n    visitors_by_location = {loc.name: [] for loc in self.locations}\n    for p in self.people:\n        if self.rng.random() < 0.6:\n            loc = self.rng.choice(self.locations)\n            visitors_by_location[loc.name].append(p.pid)\n    return visitors_by_location\n\ndef visits_and_enforcement(self, day: int, visitors_by_location: Dict[str, List[int]]) -> None:\n    # use provided visitors_by_location; compute norms and enforcement as before",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def disease_step(self, day: int) -> None:\n    visitors_by_location: Dict[str, List[int]] = {loc.name: [] for loc in self.locations}\n    for p in self.people:\n        if self.rng.random() < 0.6:\n            loc = self.rng.choice(self.locations)\n            visitors_by_location[loc.name].append(p.pid)",
+      "after": "def disease_step(self, day: int, visitors_by_location: Dict[str, List[int]]) -> None:\n    # reuse visitors_by_location; rest of the logic unchanged",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "incomes = [math.exp(self.rng.gauss(10.0, 0.7)) for _ in range(self.population_size)]",
+      "after": "incomes = [self.rng.uniform(15000, 150000) for _ in range(self.population_size)]  # realistic annual income range",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "price_penalty = 0.15 * math.tanh(afford_ratio - 0.5)",
+      "after": "price_penalty = 0.25 * math.tanh(afford_ratio - 0.3)  # increase sensitivity now that income is realistic",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class SocialAdoptionSimulation:\n    ...\n    self.peer_share_cache: List[float] = []",
+      "after": "class SocialAdoptionSimulation:\n    ...\n    self.peer_share_cache: List[float] = []\n    self.prev_day_norms: float = 0.0  # average observed norms last day",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def adoption_step(self, day: int, media_signals: List[float], peer_shares: List[float]) -> None:\n    policy_intensity = self.gov.policy_intensity(day)\n    policy_effect_scalar = self.gov.policy_effect()\n    for i, p in enumerate(self.people):\n        prob = adoption_probability(...)\n        # adopt/backslide logic",
+      "after": "def adoption_step(self, day: int, media_signals: List[float], peer_shares: List[float]) -> None:\n    policy_intensity = self.gov.policy_intensity(day)\n    policy_effect_scalar = self.gov.policy_effect()\n    norms_effect = 0.3 * (self.prev_day_norms - 0.5)  # simple norms term\n    for i, p in enumerate(self.people):\n        prob = clamp(adoption_probability(\n            person=p,\n            peer_share=peer_shares[i],\n            policy_intensity=policy_intensity,\n            media_signal=media_signals[i],\n            policy_effect_scalar=policy_effect_scalar,\n        ) + norms_effect, 0.0, 1.0)\n        # adopt/backslide logic as before",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def visits_and_enforcement(self, day: int) -> None:\n    ...\n    for loc in self.locations:\n        visitors = visitors_by_location[loc.name]\n        if visitors:\n            frac_masked = safe_div(...)\n            loc.observed_norms = frac_masked",
+      "after": "def visits_and_enforcement(self, day: int, visitors_by_location: Dict[str, List[int]]) -> None:\n    ...\n    # compute norms\n    norms_sum = 0.0\n    norms_count = 0\n    for loc in self.locations:\n        visitors = visitors_by_location[loc.name]\n        if visitors:\n            frac_masked = safe_div(...)\n            loc.observed_norms = frac_masked\n            norms_sum += frac_masked\n            norms_count += 1\n    if norms_count:\n        self.prev_day_norms = norms_sum / norms_count",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration improves robustness (bounded rewiring attempts, Rt computation, market outage counting, purchase-before-adoption). However, a wave of redundant 'pass' statements adds noise, and a subtle rewiring bug was introduced for edge cases. The primary integration failure remains: stdout contains non-JSON logs.",
+    "positive_impacts": [
+      "Hardened small-world generator (bounded attempts, avoid dense graph pitfalls)",
+      "Improved Rt calculation using generation interval proxy",
+      "Outage counting fixed and consolidated at end-of-day",
+      "Purchase-before-adoption ordering improves responsiveness"
+    ],
+    "negative_impacts": [
+      "Rewiring may add edges when base edge is absent (edge-case bug)",
+      "Many stray 'pass' statements hamper readability",
+      "Duplicate daily visitation computation persists",
+      "Stdout still prints non-JSON logs, breaking harness parsing"
+    ],
+    "suggestions": [
+      "Add a --stdout-json flag and route logs to stderr; or always emit only JSON on stdout",
+      "Guard rewiring so it only applies to existing edges",
+      "Cache visits and reuse for enforcement and disease modules",
+      "Calibrate incomes/prices for realistic affordability effects",
+      "Remove redundant 'pass' statements"
+    ]
+  }
+}

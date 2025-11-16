@@ -1,0 +1,1036 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion of a pro-social behavior over a multilayer social network with policy and media interventions. Individuals adopt based on weighted social influence, personal traits, and external signals; daily contacts are sampled from household, workplace/school, and community layers.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "ses",
+        "openness",
+        "conformity",
+        "stubborn",
+        "adoption_state",
+        "adoption_time",
+        "threshold",
+        "memory_signal",
+        "home_id",
+        "work_id",
+        "degree_household",
+        "degree_workplace",
+        "degree_community"
+      ],
+      "behaviors": [
+        "interact_daily",
+        "compute_social_signal",
+        "decide_to_adopt_or_revert"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "age_group_proportions": {
+            "18_34": 0.35,
+            "35_64": 0.45,
+            "65p": 0.2
+          },
+          "ses_proportions": {
+            "low": 0.3,
+            "mid": 0.5,
+            "high": 0.2
+          },
+          "initial_adoption_rate": 0.1,
+          "openness_beta": [
+            2.0,
+            5.0
+          ],
+          "conformity_beta": [
+            3.0,
+            3.0
+          ],
+          "stubborn_fraction": 0.1,
+          "threshold_normal": {
+            "mean": 0.5,
+            "sd": 0.2
+          }
+        }
+      }
+    },
+    {
+      "name": "Household",
+      "attributes": [
+        "id",
+        "member_ids"
+      ],
+      "behaviors": [
+        "none (structural container)"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "size_lognormal_mu": 2.6,
+          "size_lognormal_sigma": 1.0
+        }
+      }
+    },
+    {
+      "name": "WorkplaceSchool",
+      "attributes": [
+        "id",
+        "member_ids",
+        "type"
+      ],
+      "behaviors": [
+        "none (structural container)"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "size_poisson_mean": 12,
+          "school_fraction": 0.18
+        }
+      }
+    },
+    {
+      "name": "PolicyAgent",
+      "attributes": [
+        "start_day",
+        "end_day",
+        "enforcement_strength",
+        "incentive_amount",
+        "media_boost",
+        "target_group"
+      ],
+      "behaviors": [
+        "generate_policy_signal",
+        "generate_media_signal"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "start_day": 14,
+          "end_day": 60,
+          "enforcement_strength": 0.5,
+          "incentive_amount": 20.0,
+          "media_boost": 0.3,
+          "target_group": "all"
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "DemographicsAndNetworkBuilder",
+      "description": "Initializes agent attributes and constructs a multilayer social network (household, workplace/school, community) with homophily and small-world community structure.",
+      "inputs": [
+        "global.population_size",
+        "global.random_seed"
+      ],
+      "outputs": [
+        "graph.layers.household",
+        "graph.layers.workplace",
+        "graph.layers.community",
+        "persons.attributes"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "steps",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "if step == 0:\n  set RNG(seed=random_seed)\n  N = network.population_size\n  assign age_group for each person i using demo.p_age_18_34, p_age_35_64, p_age_65p\n  assign ses for each person i using demo.p_ses_low, p_ses_mid, p_ses_high\n  draw openness_i ~ Beta(openness_alpha, openness_beta)\n  draw conformity_i ~ Beta(conformity_alpha, conformity_beta)\n  draw threshold_i ~ TruncatedNormal(mean=behavior.threshold_mean, sd=behavior.threshold_sd, bounds [0,1])\n  mark stubborn_i as Bernoulli(behavior.stubborn_fraction)\n  set adoption_state_i ~ Bernoulli(global.initial_adoption_rate)\n  Build households by sampling sizes from Lognormal(mu=network.household_size_mu, sigma=network.household_size_sigma), cap to N, connect clique edges per household\n  Build workplaces/schools: assign fraction network.school_fraction to schools; sample group sizes Poisson(mean=network.workplace_size_mu); connect clique edges per group\n  Build community layer using Watts-Strogatz with N nodes, k=network.community_ws_k, beta=network.community_ws_beta; apply homophily rewiring with strength network.homophily_age and network.homophily_ses; cap degrees at network.degree_cap\n  store degrees per layer for each i\n  output graphs and person attributes",
+        "notes": [
+          "Homophily rewiring: preferentially rewire edges to nodes sharing age_group or SES with probability proportional to homophily strengths.",
+          "Degree cap ensures computational tractability."
+        ]
+      },
+      "requirements": [
+        "graph_api",
+        "rng"
+      ],
+      "module_parameters": [
+        "network.population_size",
+        "demo.p_age_18_34",
+        "demo.p_age_35_64",
+        "demo.p_age_65p",
+        "demo.p_ses_low",
+        "demo.p_ses_mid",
+        "demo.p_ses_high",
+        "network.household_size_mu",
+        "network.household_size_sigma",
+        "network.workplace_size_mu",
+        "network.school_fraction",
+        "network.community_ws_k",
+        "network.community_ws_beta",
+        "network.homophily_age",
+        "network.homophily_ses",
+        "network.degree_cap"
+      ]
+    },
+    {
+      "name": "DailyContactSampler",
+      "description": "Samples the set of active contacts per day from each network layer and adds small random contact noise.",
+      "inputs": [
+        "graph.layers.household",
+        "graph.layers.workplace",
+        "graph.layers.community",
+        "time.day_index"
+      ],
+      "outputs": [
+        "contacts.active_edges"
+      ],
+      "dependencies": [
+        "DemographicsAndNetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each layer L in [household, workplace, community]:\n  pL = contacts.daily_active_fraction * layer_bias[L]\n  sample each edge e in graph.layers.L as active with probability clamp(pL, 0, 1)\nAdd noise contacts: for m in 1..round(N * contacts.noise_contact_rate):\n  pick two random distinct persons (i, j); add (i, j) to active set for today\nSet contacts.active_edges = union of active edges across layers plus noise",
+        "notes": [
+          "layer_bias = {household: contacts.household_bias, workplace: contacts.workplace_bias, community: contacts.community_bias}",
+          "Use Bernoulli sampling per edge for performance or reservoir sampling if very dense."
+        ]
+      },
+      "requirements": [
+        "graph_api",
+        "rng"
+      ],
+      "module_parameters": [
+        "contacts.daily_active_fraction",
+        "contacts.household_bias",
+        "contacts.workplace_bias",
+        "contacts.community_bias",
+        "contacts.noise_contact_rate"
+      ]
+    },
+    {
+      "name": "PolicyCampaign",
+      "description": "Generates time-varying policy and media signals affecting adoption probability.",
+      "inputs": [
+        "time.day_index"
+      ],
+      "outputs": [
+        "policy.signal_t",
+        "media.signal_t"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "t = time.day_index\nif t < policy.start_day or t > policy.end_day:\n  policy_signal = 0.0\n  media_signal = 0.0\nelse:\n  # Policy ramps up and down with a smooth window\n  progress = (t - policy.start_day) / max(1, (policy.end_day - policy.start_day))\n  ramp = 1 / (1 + exp(-10*(progress-0.5)))\n  policy_signal = policy.enforcement_strength * ramp + min(1.0, policy.incentive_amount / 100.0) * 0.3\n  media_signal = policy.media_boost * ramp\n# Target group filtering (if not 'all', restrict effects to matching agents)\noutput policy.signal_t = policy_signal\noutput media.signal_t = media_signal",
+        "notes": [
+          "In SocialInfluenceUpdater, if policy.target_group != 'all', apply signals only to agents in the target group filter."
+        ]
+      },
+      "requirements": [
+        "timekeeper"
+      ],
+      "module_parameters": [
+        "policy.start_day",
+        "policy.end_day",
+        "policy.enforcement_strength",
+        "policy.incentive_amount",
+        "policy.media_boost",
+        "policy.target_group"
+      ]
+    },
+    {
+      "name": "SocialInfluenceUpdater",
+      "description": "Updates each person's adoption state using a weighted-threshold logistic model with memory, social influence by layer, media, policy, and personal traits.",
+      "inputs": [
+        "contacts.active_edges",
+        "policy.signal_t",
+        "media.signal_t",
+        "persons.attributes",
+        "time.day_index"
+      ],
+      "outputs": [
+        "persons.state",
+        "events.new_adoptions",
+        "events.reversions"
+      ],
+      "dependencies": [
+        "DemographicsAndNetworkBuilder",
+        "DailyContactSampler",
+        "PolicyCampaign"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  # compute today's social signal as weighted fraction adopted among active neighbors\n  neighbors = active_neighbors_of(i) from contacts.active_edges\n  if neighbors is empty: social_today = 0 else social_today = mean(adoption_state_j for j in neighbors)\n  # blend with memory (EWMA)\n  mem = persons.memory_signal[i]\n  social_blended = (1 - behavior.memory_decay) * mem + behavior.memory_decay * social_today\n  persons.memory_signal[i] = social_blended\n  # layer-specific weighting approximated via biases already in contact sampling; add explicit weights\n  social_weighted = social_blended * behavior.social_weight\n  external = behavior.media_weight * media.signal_t + behavior.policy_weight * policy.signal_t_for_i\n  # personal bias terms\n  bias = behavior.bias_openness_weight * persons.openness[i] + behavior.bias_conformity_weight * persons.conformity[i]\n  # threshold (increase if stubborn)\n  th = persons.threshold[i] * (1.0 + 0.5 * persons.stubborn[i])\n  # adoption probability via logistic\n  z = behavior.baseline_intent + social_weighted + external + bias - th\n  p_adopt = 1 / (1 + exp(- z / max(1e-6, behavior.logit_temperature)))\n  if persons.adoption_state[i] == 0:\n    if Bernoulli(p_adopt) == 1:\n      persons.adoption_state[i] = 1\n      persons.adoption_time[i] = time.day_index\n      record events.new_adoptions += 1\n  else:\n    # potential reversion if support low\n    p_revert = behavior.reversion_rate * max(0.0, 1.0 - social_blended)\n    if Bernoulli(p_revert) == 1:\n      persons.adoption_state[i] = 0\n      record events.reversions += 1\n",
+        "notes": [
+          "policy.signal_t_for_i equals policy.signal_t if policy.target_group == 'all'; otherwise 0 unless i matches the target group filter.",
+          "Ensure numerical stability for logit_temperature."
+        ]
+      },
+      "requirements": [
+        "rng",
+        "math"
+      ],
+      "module_parameters": [
+        "behavior.baseline_intent",
+        "behavior.social_weight",
+        "behavior.media_weight",
+        "behavior.policy_weight",
+        "behavior.threshold_mean",
+        "behavior.threshold_sd",
+        "behavior.memory_decay",
+        "behavior.reversion_rate",
+        "behavior.logit_temperature",
+        "behavior.stubborn_fraction",
+        "behavior.bias_openness_weight",
+        "behavior.bias_conformity_weight"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates observable outputs such as overall adoption rate, new adoptions, and group-level adoption rates with optional smoothing.",
+      "inputs": [
+        "persons.state",
+        "persons.attributes",
+        "events.new_adoptions"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adoptions_daily",
+        "observable.adoption_rate_by_age_18_34",
+        "observable.adoption_rate_by_ses_low"
+      ],
+      "dependencies": [
+        "SocialInfluenceUpdater"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "N = count(persons)\nrate_total_raw = mean(adoption_state)\nrate_total = aggregator.smoothing_alpha * rate_total_raw + (1 - aggregator.smoothing_alpha) * prev(rate_total)\nnew_adopt_raw = events.new_adoptions\nnew_adopt = round(aggregator.smoothing_alpha * new_adopt_raw + (1 - aggregator.smoothing_alpha) * prev(new_adopt))\nsubset_age = {i: persons.age_group[i] == '18_34'}\nrate_age = mean(adoption_state over subset_age)\nsubset_ses = {i: persons.ses[i] == 'low'}\nrate_ses_low = mean(adoption_state over subset_ses)\noutput observable.adoption_rate_daily = rate_total\noutput observable.new_adoptions_daily = new_adopt\noutput observable.adoption_rate_by_age_18_34 = rate_age\noutput observable.adoption_rate_by_ses_low = rate_ses_low",
+        "notes": [
+          "Simple exponential smoothing to mitigate day-to-day sampling noise.",
+          "prev(x) denotes previous day's value; initialize with first raw value."
+        ]
+      },
+      "requirements": [
+        "accumulators"
+      ],
+      "module_parameters": [
+        "aggregator.smoothing_alpha"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "global.simulation_days",
+      "dtype": "int",
+      "default": 120,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of days to simulate.",
+      "frozen": "false"
+    },
+    {
+      "key": "global.random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG to ensure reproducibility.",
+      "frozen": "true"
+    },
+    {
+      "key": "global.initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of adopters at t=0.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 1000,
+        "high": 50000
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Number of Person agents in the simulation.",
+      "frozen": "false"
+    },
+    {
+      "key": "demo.p_age_18_34",
+      "dtype": "float",
+      "default": 0.35,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.6
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Proportion of population aged 18-34.",
+      "frozen": "false"
+    },
+    {
+      "key": "demo.p_age_35_64",
+      "dtype": "float",
+      "default": 0.45,
+      "bounds": {
+        "low": 0.2,
+        "high": 0.6
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Proportion of population aged 35-64.",
+      "frozen": "false"
+    },
+    {
+      "key": "demo.p_age_65p",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.05,
+        "high": 0.4
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Proportion of population aged 65+.",
+      "frozen": "false"
+    },
+    {
+      "key": "demo.p_ses_low",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.5
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Proportion of low socioeconomic status.",
+      "frozen": "false"
+    },
+    {
+      "key": "demo.p_ses_mid",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.3,
+        "high": 0.6
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Proportion of middle socioeconomic status.",
+      "frozen": "false"
+    },
+    {
+      "key": "demo.p_ses_high",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.05,
+        "high": 0.4
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Proportion of high socioeconomic status.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.household_size_mu",
+      "dtype": "float",
+      "default": 2.6,
+      "bounds": {
+        "low": 1.0,
+        "high": 5.0
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Lognormal mu for household size distribution (in count-space).",
+      "frozen": "false"
+    },
+    {
+      "key": "network.household_size_sigma",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 2.5
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Lognormal sigma for household size distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.workplace_size_mu",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 3.0,
+        "high": 30.0
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Mean of Poisson distribution for workplace/school group sizes.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.school_fraction",
+      "dtype": "float",
+      "default": 0.18,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.4
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Fraction of population assigned to school groups (vs workplaces).",
+      "frozen": "false"
+    },
+    {
+      "key": "network.community_ws_k",
+      "dtype": "int",
+      "default": 8,
+      "bounds": {
+        "low": 2,
+        "high": 20
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Watts-Strogatz average degree k for community layer.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.community_ws_beta",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Watts-Strogatz rewiring probability beta for community layer.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.homophily_age",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Strength of age-based homophily during community rewiring.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.homophily_ses",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Strength of SES-based homophily during community rewiring.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.degree_cap",
+      "dtype": "int",
+      "default": 40,
+      "bounds": {
+        "low": 10,
+        "high": 100
+      },
+      "owner_module": "DemographicsAndNetworkBuilder",
+      "description": "Maximum allowed degree per node per layer (post-processing).",
+      "frozen": "false"
+    },
+    {
+      "key": "contacts.daily_active_fraction",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "DailyContactSampler",
+      "description": "Fraction of edges active on a given day before layer bias.",
+      "frozen": "false"
+    },
+    {
+      "key": "contacts.household_bias",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 2.0
+      },
+      "owner_module": "DailyContactSampler",
+      "description": "Multiplier for household edge activation probability.",
+      "frozen": "false"
+    },
+    {
+      "key": "contacts.workplace_bias",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 2.0
+      },
+      "owner_module": "DailyContactSampler",
+      "description": "Multiplier for workplace edge activation probability.",
+      "frozen": "false"
+    },
+    {
+      "key": "contacts.community_bias",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 2.0
+      },
+      "owner_module": "DailyContactSampler",
+      "description": "Multiplier for community edge activation probability.",
+      "frozen": "false"
+    },
+    {
+      "key": "contacts.noise_contact_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "DailyContactSampler",
+      "description": "Rate of random contacts as a fraction of population per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.start_day",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 0,
+        "high": 90
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Day policy campaign starts.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.end_day",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 14,
+        "high": 120
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Day policy campaign ends.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.enforcement_strength",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Normalized enforcement strength of the policy.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.incentive_amount",
+      "dtype": "float",
+      "default": 20.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 200.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Monetary or equivalent incentive magnitude (arbitrary units).",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.media_boost",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Intensity of media signal associated with the policy.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.target_group",
+      "dtype": "categorical",
+      "default": "all",
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Target group for policy signal application (options: 'all', 'age_18_34', 'age_35_64', 'age_65p', 'ses_low', 'ses_mid', 'ses_high').",
+      "frozen": "true"
+    },
+    {
+      "key": "behavior.baseline_intent",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Baseline daily inclination to adopt absent other signals.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.social_weight",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Weight of social influence in adoption decision.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.media_weight",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Weight of media signal in adoption decision.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.policy_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Weight of policy signal in adoption decision.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.threshold_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.9
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Mean of initial adoption thresholds.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.threshold_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.5
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Standard deviation of initial adoption thresholds.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.memory_decay",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "EWMA decay parameter for social signal blending.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.reversion_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Daily probability coefficient to revert when social support is low.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.logit_temperature",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.05,
+        "high": 2.0
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Softness of the logistic decision rule; lower is sharper.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.stubborn_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Fraction of agents with elevated thresholds.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.bias_openness_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Weight placed on personal openness in adoption propensity.",
+      "frozen": "false"
+    },
+    {
+      "key": "behavior.bias_conformity_weight",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceUpdater",
+      "description": "Weight placed on personal conformity in adoption propensity.",
+      "frozen": "false"
+    },
+    {
+      "key": "aggregator.smoothing_alpha",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Exponential smoothing parameter for observables.",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adoption_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_total.csv:adoption_rate_total"
+    },
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "count(transitions 0->1)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_total.csv:new_adoptions"
+    },
+    {
+      "id": "observable.adoption_rate_by_age_18_34",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adoption_state | age_group==18_34)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_age.csv:adoption_rate_18_34"
+    },
+    {
+      "id": "observable.adoption_rate_by_ses_low",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adoption_state | ses==low)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_ses.csv:adoption_rate_low"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "TimeToPeakError_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeakError",
+        "config": {
+          "window": 120
+        }
+      }
+    },
+    {
+      "name": "R2_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "R2",
+        "config": {
+          "clip_negative": false
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "warm_start_days": 0
+  },
+  "algorithms": {
+    "WeightedThresholdLogistic": "Adoption decision uses a logistic function of social influence (EWMA), media, policy, personal traits, and threshold.",
+    "WattsStrogatzCommunity": "Generates small-world community layer with parameters k and beta, then applies homophily-biased rewiring.",
+    "DailyEdgeActivation": "Bernoulli activation of edges per layer with per-layer bias and additive random contacts.",
+    "ExponentialSmoothing": "Applies EWMA to observables to reduce noise.",
+    "HomophilyRewiring": "Rewires a fraction of edges to increase assortative mixing by age and SES."
+  },
+  "data_sources": [
+    {
+      "name": "train_total.csv",
+      "purpose": "Calibration and evaluation of overall adoption and daily new adoptions.",
+      "fields_used": [
+        "date",
+        "adoption_rate_total",
+        "new_adoptions"
+      ]
+    },
+    {
+      "name": "train_age.csv",
+      "purpose": "Group-level evaluation for age-based adoption rates.",
+      "fields_used": [
+        "date",
+        "adoption_rate_18_34"
+      ]
+    },
+    {
+      "name": "train_ses.csv",
+      "purpose": "Group-level evaluation for SES-based adoption rates.",
+      "fields_used": [
+        "date",
+        "adoption_rate_low"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: argument parsing, configuration loading, simulation loop, metric evaluation."
+      },
+      {
+        "name": "entities.py",
+        "description": "Definitions of Person and group structures; data classes for attributes and state."
+      },
+      {
+        "name": "network_builder.py",
+        "description": "Implements DemographicsAndNetworkBuilder module."
+      },
+      {
+        "name": "contacts.py",
+        "description": "Implements DailyContactSampler module."
+      },
+      {
+        "name": "policy.py",
+        "description": "Implements PolicyCampaign module."
+      },
+      {
+        "name": "dynamics.py",
+        "description": "Implements SocialInfluenceUpdater and decision algorithms."
+      },
+      {
+        "name": "aggregation.py",
+        "description": "Implements AdoptionAggregator and observables."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric computations (RMSE, MAE, TimeToPeakError, R2)."
+      },
+      {
+        "name": "io.py",
+        "description": "Data loading for targets, results writing, and configuration serialization."
+      },
+      {
+        "name": "config_schema.json",
+        "description": "JSON schema for parameters and validation."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "numba",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 70,
+    "end_day": 99
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "MAE_new_adoptions",
+    "TimeToPeakError_new_adoptions",
+    "R2_adoption_rate"
+  ]
+}

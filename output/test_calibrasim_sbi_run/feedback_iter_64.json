@@ -1,0 +1,218 @@
+{
+  "summary": "The simulation code has several structural and functional gaps that prevent execution and metric production. The most critical problems are an unterminated run() docstring that swallows the end-of-file (including the main() invocation), an unimplemented main() and run() method, and missing metric computation. Additionally, several task-spec parameters are not wired into the model (e.g., initial_infected_fraction, vaccination_coverage, contact_multipliers_by_location), and cost/price tracking is incomplete. Recent changes improved many components (information/misinformation, market restocking, enforcement, alias handling), but introduced the docstring bug and left the run pipeline incomplete. The next iteration should prioritize fixing the docstring/run/main flow, implementing compute_metrics/validate, parameter mapping, and disease/market alignment with the spec.",
+  "critical_issues": [
+    {
+      "issue": "Unterminated run() docstring swallows the end-of-file (including the main() call), leaving run() unimplemented and preventing execution.",
+      "impact": "The interpreter treats all trailing lines as a string literal. The bottom main() call does not execute, run() has no body, and no simulation occurs. Metrics cannot be produced and the verification harness cannot run the smoke test.",
+      "solution": "Close the run() docstring properly and implement the method body. Ensure the main() call appears outside any string literal at EOF (per the special requirement).",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "main() is a stub and not called due to the docstring issue; there is no CLI/smoke-test flow.",
+      "impact": "No way to execute the simulation from the harness. Even if the docstring were fixed, the simulation would not run end-to-end or emit outputs.",
+      "solution": "Implement main(): parse CLI args, build SocialAdoptionSimulation with config, call initialize_population(), loop step() over days, compute metrics, and print or save outputs. Add a --smoke-test flag for a short run.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing compute_metrics() and validate() implementations; evaluation metrics not produced.",
+      "impact": "Required outputs (adoption_rate, time_to_70_percent_adoption, cumulative_infections_averted, effective_Rt, equity_gap_adoption, etc.) are missing. Downstream evaluation cannot proceed.",
+      "solution": "Implement compute_metrics() to aggregate required metrics from tracked time series. Implement validate() to perform simple sanity checks and return a report.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Key task-spec parameters are not mapped/used (initial_infected_fraction, vaccination_coverage, contact_multipliers_by_location, mandate_start_day/mandate_end_day/mandate_strictness, retailer inventory per capita).",
+      "impact": "Scenario inputs do not affect the simulation as expected, reducing fidelity and making outputs misaligned with the task spec. Epidemiological results (effective_Rt, incidence) and policy dynamics may be unrealistic.",
+      "solution": "Add alias handling and wire these parameters into initialization (seeding infections, vaccination), disease_step (contact multipliers), policy schedule construction, and market setup (retailer inventory).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Consumer spending and subsidy accounting are not tracked, so npi_cost_total cannot be computed.",
+      "impact": "Cost-related metrics (average_mask_price is tracked, but total NPI costs are not) are incomplete.",
+      "solution": "Track consumer_spend_cumulative, subsidy payouts, and incorporate fines to compute npi_cost_total. Persist average price and stockout_frequency as specified.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Income distribution uses uniform random instead of the spec\u2019s lognormal distribution, and initial adoption fraction alias is not used.",
+      "impact": "Equity-related outcomes (equity_gap_adoption) may be biased, and initial conditions misaligned with spec.",
+      "solution": "Use a lognormal income distribution and map initial_mask_adoption_fraction -> initial_adoption_rate during population initialization.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Risk perception dynamics",
+      "current_approach": "Risk updated only by media/info sources and static traits.",
+      "suggested_approach": "Add incidence-based updates: risk += risk_perception_sensitivity_to_incidence * (new_infections_today / population)",
+      "expected_benefit": "Captures endogenous feedback between epidemic trajectory and adoption decisions, improving realism."
+    },
+    {
+      "aspect": "Epidemiological contact structure",
+      "current_approach": "Single beta and uniform mixing within locations; no contact multipliers.",
+      "suggested_approach": "Scale transmission risk by contact_multipliers_by_location[loc.ltype].",
+      "expected_benefit": "Better alignment with setting-specific transmission risk (e.g., higher in schools/workplaces)."
+    },
+    {
+      "aspect": "Vaccination and susceptibility",
+      "current_approach": "Vaccination not modeled.",
+      "suggested_approach": "Seed vaccinated agents with reduced susceptibility (e.g., scale their infection probability by (1 - VE)). Respect vaccination_coverage in initialization.",
+      "expected_benefit": "Reflects population immunity and its interaction with mask adoption on Rt and incidence."
+    },
+    {
+      "aspect": "Policy schedule and strictness",
+      "current_approach": "Generic policy schedule with states only; mandate strictness not used.",
+      "suggested_approach": "Construct policy_schedule from mandate_start_day and mandate_end_day; scale enforcement and policy_intensity by mandate_strictness.",
+      "expected_benefit": "Improves compliance dynamics and the effect size of mandates on behavior."
+    },
+    {
+      "aspect": "Market supply initialization",
+      "current_approach": "Fixed initial supplies not tied to population.",
+      "suggested_approach": "Initialize inventory per type based on retailer_initial_inventory_per_capita * population_size and mask_quality_distribution.",
+      "expected_benefit": "Stockout dynamics scale with population, improving stockout_frequency realism."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Fix the unterminated run() docstring and implement the run() body.",
+      "reason": "Enables actual simulation execution and final metric computation. Resolves the most critical runtime blocker.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement main() with CLI (args: --population-size, --days, --seed, --include-disease, --config, --output, --smoke-test) and call sim.run(). Ensure a direct main() call is at EOF as required.",
+      "reason": "Provides an entry point for harness execution and a fast smoke test path.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add compute_metrics() that derives all requested metrics and validate() for basic sanity checks. Persist outputs to DATA_DIR (if set) or stdout.",
+      "reason": "Produces required outputs per spec and makes results consumable by evaluation.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Map spec parameters to internal config: initial_mask_adoption_fraction -> initial_adoption_rate, initial_infected_fraction, vaccination_coverage, contact_multipliers_by_location into disease_step, mandate_* keys into PolicyAuthority schedule, etc.",
+      "reason": "Aligns behavior with the task specification and improves interpretability of results.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Track consumer_spend_cumulative and subsidy_spend_cumulative in purchase_masks_typed() and compute npi_cost_total = consumer_spend + subsidy_spend + total_fines_value.",
+      "reason": "Enables cost-related metrics and policy cost-benefit analysis.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use lognormal income distribution per spec and apply ses_quintile assignment accordingly.",
+      "reason": "Improves equity-related dynamics and equity_gap_adoption accuracy.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Reduce confusing leading 'pass' statements that precede real code; replace with comments where needed.",
+      "reason": "Improves readability and reduces maintenance risk; although benign, they confused verification.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "effective_Rt",
+      "current_gap": "Rt not scaled by location contact multipliers or vaccination status; ignores incidence-based risk feedback.",
+      "suggestion": "Scale infection probabilities by contact_multipliers_by_location and vaccination; add incidence-driven updates to risk."
+    },
+    {
+      "metric": "equity_gap_adoption",
+      "current_gap": "Uniform income distribution underestimates disparities.",
+      "suggestion": "Use lognormal incomes and tie cost_sensitivity inversely to income; ensure subsidies target low-income agents."
+    },
+    {
+      "metric": "stockout_frequency",
+      "current_gap": "Inventory not proportional to population; shortages not realistic.",
+      "suggestion": "Initialize retailer inventories based on retailer_initial_inventory_per_capita and restock_rate_per_day; adjust rationing accordingly."
+    },
+    {
+      "metric": "campaign_reach",
+      "current_gap": "Modeled only via stochastic info sources with arbitrary reach.",
+      "suggestion": "Use campaign_intensity to scale info source reach/credibility on campaign days and log exposure cohorts."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix the run() docstring and implement run(); ensure the main() call is outside strings at EOF (per special requirement).",
+    "Implement main() CLI with a --smoke-test mode and write minimal JSON outputs.",
+    "Implement compute_metrics() and validate() to produce all required metrics.",
+    "Map key spec parameters (initial_infected_fraction, vaccination_coverage, contact_multipliers_by_location, mandate_* aliases) and wire them into initialization and dynamics.",
+    "Track consumer_spend_cumulative and subsidy_spend_cumulative to calculate npi_cost_total.",
+    "Switch to lognormal income distribution; map initial_mask_adoption_fraction to initial_adoption_rate.",
+    "Integrate incidence-based risk updates and contact multipliers into disease_step.",
+    "Optionally remove leading 'pass' statements for clarity."
+  ],
+  "additional_comments": "The verification error referencing Docker likely originates from an external harness; nonetheless, a working --smoke-test path and proper CLI will help bypass such environment constraints. Keep the special requirement of directly calling main() at EOF. The recent additions (typed market, enforcement logic, alias handling, misinformation) are strong improvements\u2014completing the pipeline and wiring spec parameters will make the simulation usable and evaluable.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "    def run(self) -> None:\n        \"\"\"\n        Run the simulation\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n\"\"\"\n",
+      "after": "    def run(self) -> None:\n        \"\"\"\n        Run the simulation for the configured horizon, compute metrics, and store a validation report.\n        \"\"\"\n        self.initialize_population()\n        for day in range(self.days):\n            self.step(day)\n        self.compute_metrics()\n        self.validation_report = self.validate()\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass\n",
+      "after": "def main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument('--population-size', type=int, default=10000)\n    parser.add_argument('--days', type=int, default=180)\n    parser.add_argument('--seed', type=int, default=42)\n    parser.add_argument('--include-disease', action='store_true')\n    parser.add_argument('--config', type=str, default=None, help='Path to JSON config file')\n    parser.add_argument('--output', type=str, default=None, help='Directory to write outputs (defaults to DATA_DIR or stdout)')\n    parser.add_argument('--smoke-test', action='store_true')\n    args = parser.parse_args()\n\n    config = {}\n    if args.config and os.path.exists(args.config):\n        with open(args.config, 'r') as f:\n            config = json.load(f)\n\n    # Parameter alias wiring from task spec\n    if 'initial_mask_adoption_fraction' in config and 'initial_adoption_rate' not in config:\n        config['initial_adoption_rate'] = config['initial_mask_adoption_fraction']\n\n    sim = SocialAdoptionSimulation(\n        population_size=args.population_size if not args.smoke_test else 200,\n        time_horizon_days=args.days if not args.smoke_test else 3,\n        random_seed=args.seed,\n        include_disease_module=args.include_disease,\n        config_params=config,\n        network_mean_degree=config.get('average_degree', 12),\n        network_rewiring_prob=config.get('rewiring_probability', 0.05),\n    )\n\n    sim.run()\n\n    # Prepare outputs\n    metrics = sim.metrics\n    validation = sim.validation_report\n\n    out_dir = args.output or DATA_DIR\n    if out_dir:\n        os.makedirs(out_dir, exist_ok=True)\n        with open(os.path.join(out_dir, 'metrics.json'), 'w') as f:\n            json.dump({'metrics': metrics, 'validation': validation}, f)\n        # Optional: write time series CSVs\n        with open(os.path.join(out_dir, 'adoption_rate.csv'), 'w', newline='') as f:\n            writer = csv.writer(f)\n            writer.writerow(['day', 'adoption_rate'])\n            for d, val in enumerate(sim.adoption_rate_over_time):\n                writer.writerow([d, val])\n    else:\n        print(json.dumps({'metrics': metrics, 'validation': validation}))\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def _update_daily_metrics(self, day: int) -> None:\n        \"\"\"\n        Update daily metrics after all steps: outages, adoption, type distribution, exposure proxy.\n\n        Args:\n            day: Day index.\n\n        Returns:\n            None\n        \"\"\"\n        # NOTE: 'pass' retained per execution requirement\n        pass\n        # Count outages (types out of stock)\n        out_types = self.mask_market.end_of_day_outages()\n        self.daily_out_of_stock_types.append(out_types)\n        # Adoption rate aggregation\n        adopt_rate = safe_div(sum(1 for p in self.people if p.adopting), self.population_size, 0.0)\n        self.adoption_rate_over_time.append(adopt_rate)\n        ...\n",
+      "after": "    def _update_daily_metrics(self, day: int) -> None:\n        \"\"\"Update daily time series and proxies.\"\"\"\n        out_types = self.mask_market.end_of_day_outages()\n        self.daily_out_of_stock_types.append(out_types)\n        adopt_rate = safe_div(sum(1 for p in self.people if p.adopting), self.population_size, 0.0)\n        self.adoption_rate_over_time.append(adopt_rate)\n        adopters_set = {p.pid for p in self.people if p.adopting}\n        self.daily_adopters.append(adopters_set)\n        dist: Dict[str, float] = {}\n        adopters = [p for p in self.people if p.adopting]\n        for t in self.mask_market.types_available:\n            count_t = sum(1 for p in adopters if (p.mask_type == t and p.mask_inventory_by_type.get(t, 0) > 0))\n            dist[t] = safe_div(count_t, len(adopters), 0.0) if adopters else 0.0\n        self.mask_type_distribution_over_time.append(dist)\n        eff_by_type = self.params.get('mask_efficacy_by_type', {'cloth': 0.3, 'surgical': 0.5, 'N95': 0.8})\n        eff_sum = 0.0\n        for p in adopters:\n            t = p.mask_type\n            if t and p.mask_inventory_by_type.get(t, 0) > 0:\n                eff_sum += float(eff_by_type.get(t, 0.0))\n        self.exposure_reduction_proxy.append(safe_div(eff_sum, self.population_size, 0.0))\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def disease_step(self, day: int, visitors_by_location: Dict[str, List[int]]) -> None:\n        ...\n            risk = beta * safe_div(effective_pressure, max(1, len(visitors)), 0.0)\n            cf_risk = beta * safe_div(cf_pressure, max(1, len(visitors)), 0.0)\n        ...\n",
+      "after": "    def disease_step(self, day: int, visitors_by_location: Dict[str, List[int]]) -> None:\n        if not self.include_disease_module:\n            return\n        beta = 0.06\n        incubation_days = 3\n        infectious_days = 7\n        eff_by_type = dict(self.params.get('mask_efficacy_by_type', {'cloth': 0.3, 'surgical': 0.5, 'N95': 0.8}))\n        contact_mults = self.params.get('contact_multipliers_by_location', {\n            'home': 1.0, 'workplace': 1.2, 'school': 1.3, 'store': 0.6, 'transit': 0.8, 'public_space': 0.7\n        })\n        new_infections = 0\n        counterfactual_new_infections = 0\n        infectious_count = sum(1 for p in self.people if p.disease_state == 'I')\n        for loc in self.locations:\n            visitors = visitors_by_location.get(loc.name, [])\n            if not visitors:\n                continue\n            infectious_visitors = [pid for pid in visitors if self.people[pid].disease_state == 'I']\n            susceptible_visitors = [pid for pid in visitors if self.people[pid].disease_state == 'S']\n            if not infectious_visitors or not susceptible_visitors:\n                continue\n            def eff_for(pid: int) -> float:\n                person = self.people[pid]\n                t = person.mask_type\n                if t and person.mask_inventory_by_type.get(t, 0) > 0 and person.adopting:\n                    return float(eff_by_type.get(t, 0.0))\n                best = 0.0\n                if person.adopting:\n                    for tt, q in person.mask_inventory_by_type.items():\n                        if q > 0:\n                            best = max(best, float(eff_by_type.get(tt, 0.0)))\n                return best\n            mask_reduction_inf = 1.0 - safe_div(sum(eff_for(pid) for pid in infectious_visitors), len(infectious_visitors), 0.0)\n            mask_reduction_sus = 1.0 - safe_div(sum(eff_for(pid) for pid in susceptible_visitors), len(susceptible_visitors), 0.0)\n            loc_mult = float(contact_mults.get(loc.ltype, 1.0))\n            effective_pressure = len(infectious_visitors) * (mask_reduction_inf * mask_reduction_sus) * loc_mult\n            cf_pressure = len(infectious_visitors) * loc_mult\n            risk = beta * safe_div(effective_pressure, max(1, len(visitors)), 0.0)\n            cf_risk = beta * safe_div(cf_pressure, max(1, len(visitors)), 0.0)\n            for pid in susceptible_visitors:\n                p = self.people[pid]\n                if getattr(p, 'vaccination_status', False):\n                    risk_eff = risk * 0.5  # simple VE placeholder; wire to param if available\n                else:\n                    risk_eff = risk\n                if self.rng.random() < risk_eff:\n                    p.disease_state = 'E'\n                    p.days_in_state = 0\n                    new_infections += 1\n                if self.rng.random() < cf_risk:\n                    counterfactual_new_infections += 1\n        for p in self.people:\n            if p.disease_state == 'E':\n                p.days_in_state += 1\n                if p.days_in_state >= incubation_days:\n                    p.disease_state = 'I'\n                    p.days_in_state = 0\n            elif p.disease_state == 'I':\n                p.days_in_state += 1\n                if p.days_in_state >= infectious_days:\n                    p.disease_state = 'R'\n                    p.days_in_state = 0\n        self.new_infections_over_time.append(new_infections)\n        self.counterfactual_infections_over_time.append(counterfactual_new_infections)\n        Rt_same_day = safe_div(new_infections, infectious_count, 0.0)\n        serial = 5\n        Rt_gen = Rt_same_day if len(self.new_infections_over_time) <= serial else safe_div(new_infections, self.new_infections_over_time[-serial - 1], 0.0)\n        self.Rt_over_time.append(Rt_gen)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Person attributes\n        ages = [max(18, int(self.rng.gauss(40, 15))) for _ in range(self.population_size)]\n        incomes = [self.rng.uniform(15000.0, 150000.0) for _ in range(self.population_size)]\n        ...\n        init_frac = float(self.params.get(\"initial_adoption_rate\", 0.12))\n",
+      "after": "        # Person attributes\n        ages = [max(18, int(self.rng.gauss(40, 15))) for _ in range(self.population_size)]\n        # Lognormal income per spec if requested\n        if str(self.params.get('income_distribution', 'lognormal')).lower() == 'lognormal':\n            mu, sigma = 10.5, 0.8  # rough placeholders; tune as needed\n            incomes = [math.exp(self.rng.gauss(mu, sigma)) for _ in range(self.population_size)]\n        else:\n            incomes = [self.rng.uniform(15000.0, 150000.0) for _ in range(self.population_size)]\n        ...\n        # Initial adoption fraction alias\n        init_frac = float(self.params.get('initial_adoption_rate', self.params.get('initial_mask_adoption_fraction', 0.12)))\n        init_frac = clamp(init_frac, 0.0, 1.0)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def purchase_masks_typed(self, day: int) -> None:\n        ...\n        daily_sales = 0\n        units_requested = 0\n        units_sold = 0\n        total_price = 0.0\n        ...\n        self.masks_purchased_cumulative += daily_sales\n        self.masks_purchased_daily.append(daily_sales)\n        unmet_ratio = 1.0 - safe_div(units_sold, units_requested, 0.0) if units_requested > 0 else 0.0\n        self.unmet_demand_ratio_over_time.append(unmet_ratio)\n        avg_price = safe_div(total_price, units_sold, 0.0) if units_sold > 0 else 0.0\n        self.avg_price_over_time.append(avg_price)\n",
+      "after": "    def purchase_masks_typed(self, day: int) -> None:\n        ...\n        daily_sales = 0\n        units_requested = 0\n        units_sold = 0\n        total_price = 0.0\n        subsidy_spend = 0.0\n        ...\n                if sold > 0:\n                    ...\n                    unit_price = self.mask_market.consumer_price(best_t, subsidy)\n                    total_price += unit_price * sold\n                    subsidy_spend += max(0.0, subsidy) * sold\n        ...\n        self.masks_purchased_cumulative += daily_sales\n        self.masks_purchased_daily.append(daily_sales)\n        unmet_ratio = 1.0 - safe_div(units_sold, units_requested, 0.0) if units_requested > 0 else 0.0\n        self.unmet_demand_ratio_over_time.append(unmet_ratio)\n        avg_price = safe_div(total_price, units_sold, 0.0) if units_sold > 0 else 0.0\n        self.avg_price_over_time.append(avg_price)\n        # Track cumulative costs for metrics\n        self.consumer_spend_cumulative = getattr(self, 'consumer_spend_cumulative', 0.0) + total_price\n        self.subsidy_spend_cumulative = getattr(self, 'subsidy_spend_cumulative', 0.0) + subsidy_spend\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def compute_metrics(self) -> None:\n        \"\"\"\n        Compute required metrics, including equity and information campaign impact metrics.\n\n        Returns:\n            None\n        \"\"\"\n        pass\n        adoption_series = self.adoption_rate_over_time[:]\n        final_rate = adoption_series[-1] if adoption_series else 0.0\n\n        # FIXED: Target adoption threshold parameterized and correct metric\n",
+      "after": "    def compute_metrics(self) -> None:\n        \"\"\"Aggregate required metrics into self.metrics.\"\"\"\n        adoption_series = self.adoption_rate_over_time[:]\n        final_rate = adoption_series[-1] if adoption_series else 0.0\n        peak_adoption = max(adoption_series) if adoption_series else 0.0\n        target = float(self.params.get('target_adoption_rate', 0.7))\n        time_to_target = None\n        for day, val in enumerate(adoption_series):\n            if val >= target:\n                time_to_target = day\n                break\n        # Compliance rate on mandate days\n        mandate_days = [i for i, (m, t) in enumerate(self.daily_compliance) if t > 0]\n        comp_frac = None\n        if mandate_days:\n            masked = sum(self.daily_compliance[d][0] for d in mandate_days)\n            total = sum(self.daily_compliance[d][1] for d in mandate_days)\n            comp_frac = safe_div(masked, total, 0.0)\n        # Equity gap\n        by_ses = self._group_rates_by_ses()\n        equity_gap = (by_ses.get('5', 0.0) - by_ses.get('1', 0.0)) if by_ses else 0.0\n        # Stockout frequency: fraction of days any type was out of stock\n        stockout_days = sum(1 for x in self.daily_out_of_stock_types if x > 0)\n        stockout_freq = safe_div(stockout_days, len(self.daily_out_of_stock_types), 0.0)\n        # Average mask price\n        avg_mask_price = safe_div(sum(self.avg_price_over_time), len(self.avg_price_over_time), 0.0)\n        # Epidemiology\n        daily_incidence = self.new_infections_over_time[:]\n        eff_Rt = self.Rt_over_time[:]\n        cum_inf = sum(self.new_infections_over_time)\n        cum_cf = sum(self.counterfactual_infections_over_time)\n        infections_averted = max(0, cum_cf - cum_inf)\n        # Enforcement events\n        enforcement_events = self.enforcement_actions_count\n        # Campaign reach\n        campaign_reach = safe_div(len(self.ever_exposed), self.population_size, 0.0)\n        # Costs\n        npi_cost_total = getattr(self, 'consumer_spend_cumulative', 0.0) + getattr(self, 'subsidy_spend_cumulative', 0.0) + self.total_fines_value\n        self.metrics = {\n            'adoption_rate': adoption_series,\n            'peak_adoption': peak_adoption,\n            'time_to_70_percent_adoption': time_to_target,\n            'effective_Rt': eff_Rt,\n            'daily_incidence': daily_incidence,\n            'cumulative_infections_averted': infections_averted,\n            'compliance_rate': comp_frac,\n            'stockout_frequency': stockout_freq,\n            'average_mask_price': avg_mask_price,\n            'equity_gap_adoption': equity_gap,\n            'enforcement_events': enforcement_events,\n            'campaign_reach': campaign_reach,\n            'npi_cost_total': npi_cost_total\n        }\n\n    def validate(self) -> Dict[str, Any]:\n        \"\"\"Basic validation checks and summary.\"\"\"\n        issues = []\n        if not self.adoption_rate_over_time:\n            issues.append('No adoption data collected')\n        if self.include_disease_module and not self.new_infections_over_time:\n            issues.append('Disease module enabled but no incidence recorded')\n        return {'issues': issues, 'ok': len(issues) == 0}\n",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes significantly improved feature completeness (typed mask market, information/misinformation broadcasting, alias handling, enforcement detail, location modeling, and more). However, they left the execution pipeline incomplete and introduced a critical docstring bug that prevents execution.",
+    "positive_impacts": [
+      "Added typed mask market with rationing, restocking interval, and supply shock support.",
+      "Improved information broadcast with credibility, reach, and misinformation logging.",
+      "Enhanced enforcement dynamics (capacity/budget, entry refusal, situational masking).",
+      "Parameter alias handling and type mapping (respirator -> N95).",
+      "Contextual compliance tracking and norms smoothing."
+    ],
+    "negative_impacts": [
+      "run() docstring swallows EOF and main() call; run() left unimplemented.",
+      "compute_metrics() and validate() missing, so no outputs.",
+      "main() is a stub.",
+      "Some spec parameters still not mapped/used (initial_infected_fraction, vaccination, contact multipliers, mandate strictness).",
+      "Leading 'pass' statements add confusion and may mislead reviewers."
+    ],
+    "suggestions": [
+      "Fix the run() docstring and implement run(), compute_metrics(), validate().",
+      "Implement main() CLI with smoke-test path and outputs.",
+      "Wire spec parameters (infection seed, vaccination, location contact multipliers, policy strictness) into the model.",
+      "Track consumer and subsidy spending to compute npi_cost_total.",
+      "Optionally remove redundant 'pass' statements that precede actual code."
+    ]
+  }
+}

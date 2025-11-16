@@ -1,0 +1,230 @@
+{
+  "summary": "The simulation runs and incorporates several recent fixes that improve correctness (module ordering, enforcement at venues only, avoiding double-counting, stockout timing, and household formation). However, it diverges from the Task Specification in entity definitions, parameters, and required metrics/validation. The most critical gaps are missing spec-aligned metrics (steady_state_adoption, policy_effect_size, ses_disparity_index, stockout_frequency, average_mask_price), misaligned entities (Person attributes, PublicHealthAuthority/MediaSource/WorkplaceSchool/PublicSpace), and limited enforcement deterrence signal. Addressing these will materially improve fidelity, evaluability, and alignment with real-world data.",
+  "critical_issues": [
+    {
+      "issue": "Entities and attributes do not align with the Task Specification.",
+      "impact": "Prevents capturing key behavioral mechanisms (e.g., conformity_trait, stubbornness, trust_media, policy_awareness) and blocks accurate evaluation of SES disparity and venue-level enforcement effects.",
+      "solution": "Refactor or minimally adapt entities to the spec: add missing Person fields (sex, socioeconomic_status, mask_attitude, mask_use, conformity_trait, stubbornness, trust_public_health, trust_media, policy_awareness, perceived_cost_mask, access_to_masks, mobility_rate), add SES categorical assignment, and introduce distinct WorkplaceSchool and PublicSpace classes (or typed Location with matching fields). Map Government -> PublicHealthAuthority and Media -> MediaSource naming/fields.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Required metrics are missing or misnamed (steady_state_adoption, policy_effect_size, ses_disparity_index, stockout_frequency, average_mask_price, adoption_rate_over_time naming).",
+      "impact": "Evaluation cannot verify key outcomes; outputs are not directly comparable to the spec or empirical targets.",
+      "solution": "Extend observables and compute_summary_metrics: record average_mask_price_daily; compute steady_state_adoption (final 14 days avg), policy_effect_size (DiD around mandate), ses_disparity_index (SES groups), stockout_frequency (#days with stockout / total). Ensure naming matches the spec and include adoption_rate_over_time in results.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Validation criteria not implemented (convergence_of_adoption, inventory_feasibility, calibration_fit_optional).",
+      "impact": "Cannot automatically verify stability or feasibility; negative stock events could go undetected; calibration quality is not checked.",
+      "solution": "Add validation outputs in compute_summary_metrics: convergence over last 7 days < threshold; track and report any negative stock events; if GT present, report RMSE and pass/fail against threshold.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Enforcement deterrence applied only to individuals who are checked/caught.",
+      "impact": "Underestimates mandate effects on noncompliant individuals who are exposed to enforcement presence/venue policies, biasing adoption downward.",
+      "solution": "Broadcast a baseline deterrence signal to all noncompliant individuals present at enforced locations, scaled by base_prob and local strictness; continue to add a higher deterrence for those checked/fined.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Parameter naming deviates from spec (e.g., policy_mandate_day, messaging_frequency_per_week, mask_price_base).",
+      "impact": "Hinders external configurability and calibration against spec-conforming parameter files.",
+      "solution": "Add alias mapping in ParameterManager to translate spec keys to internal keys, and include missing spec parameters.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "SES disparity approximated via income threshold only; no socioeconomic_status field on Person.",
+      "impact": "SES_disparity_index may be misestimated; cannot evaluate across specified SES groups.",
+      "solution": "Add socioeconomic_status attribute (e.g., quintile or categorical) based on income distribution or an independent draw; compute disparity using SES categories.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Silent error handling obscures failures.",
+      "impact": "Diagnosing data/load/IO issues is difficult; calibration and evaluation failures may go unnoticed.",
+      "solution": "Gate concise logging on a debug/verbose flag; at minimum print single-line warnings in except blocks.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Social influence and compliance heterogeneity",
+      "current_approach": "Peer norms from small-world network with uniform weight scaled by individual peer_influence_weight; compliance influenced by trust and enforcement only if caught.",
+      "suggested_approach": "Incorporate conformity_trait and stubbornness to modulate susceptibility to peer norms and resistance to change; add baseline enforcement deterrence at enforced venues for all noncompliant present.",
+      "expected_benefit": "More realistic adoption dynamics, smoother response to mandates, better fit to observed heterogeneity."
+    },
+    {
+      "aspect": "SES disparity",
+      "current_approach": "Proxy via income and high_income_threshold.",
+      "suggested_approach": "Assign socioeconomic_status categories (e.g., quintiles); compute disparity between low and high SES groups; optionally tie access_to_masks and perceived_cost_mask to SES.",
+      "expected_benefit": "Improved face validity and ability to study equity impacts."
+    },
+    {
+      "aspect": "Information environment",
+      "current_approach": "Single Media broadcaster with fixed credibility/reach/bias; misinformation modeled as exposure probability and decay.",
+      "suggested_approach": "Introduce MediaSource entities with varying credibility/bias and per-person trust_media; vary messaging_frequency and content to match campaigns; add policy_awareness.",
+      "expected_benefit": "Richer information dynamics and better match to messaging interventions."
+    },
+    {
+      "aspect": "Market and affordability",
+      "current_approach": "Single price per retailer, subsidy applied uniformly; affordability weight reduces adoption propensity.",
+      "suggested_approach": "Record and output average_mask_price_daily; add rationing_max_units_per_purchase mapping; link perceived_cost_mask to price and SES; optionally include travel/access_to_masks constraints.",
+      "expected_benefit": "Enables evaluation of price dynamics and stock constraints impacts; supports policy levers like subsidies/rationing."
+    },
+    {
+      "aspect": "Policy effect measurement",
+      "current_approach": "No explicit policy_effect_size metric.",
+      "suggested_approach": "Compute DiD around mandate_start_day with pre/post windows (e.g., 14 days).",
+      "expected_benefit": "Quantifies policy impact consistent with spec and empirical analysis norms."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py (PolicyEnforcementModule.forward)",
+      "modification": "Add baseline deterrence to all noncompliant individuals present at enforced locations; keep higher deterrence for those checked/fined.",
+      "reason": "Aligns with spec\u2019s broader enforcement influence and improves adoption response.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (RetailMarketModule.forward and Simulation._commit/__init__/compute_summary_metrics)",
+      "modification": "Record and append average_mask_price_daily; compute average_mask_price (mean over time), stockout_frequency, steady_state_adoption; ensure spec naming.",
+      "reason": "Implements missing required metrics and time series.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py (Person dataclass and _init_entities)",
+      "modification": "Add socioeconomic_status attribute and assign based on income quantiles; use in ses_disparity_index.",
+      "reason": "Aligns SES measurement with spec and reduces reliance on arbitrary income threshold.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (ParameterManager.__init__/default_params)",
+      "modification": "Introduce spec alias mapping (e.g., mask_price_base -> mask_price; policy_mandate_day -> mandate_start_day). Add missing spec params.",
+      "reason": "Improves compatibility with spec-configured parameter files.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (Simulation.compute_summary_metrics)",
+      "modification": "Add validation outputs: convergence_of_adoption, inventory_feasibility flag, calibration_fit_optional (if GT provided).",
+      "reason": "Implements required validation criteria.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (RandomSearchCalibrator.fit)",
+      "modification": "Respect fast_mode/QUICK_TEST by downscaling population/time during calibration trials.",
+      "reason": "Reduces runtime cost while preserving final rollout size.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (ensure_dir, load/save functions)",
+      "modification": "Add optional debug logging to exceptions; expose a verbose flag via ParameterManager.",
+      "reason": "Improves debuggability without noisy logs by default.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "Series is provided but not labeled per spec; evaluation relies on internal naming.",
+      "suggestion": "Expose adoption_rate_over_time as an alias to adoption_rate_daily in outputs; ensure evaluation consumes this key."
+    },
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "Not computed.",
+      "suggestion": "Compute DiD using 14-day pre/post around policy_mandate_day; report effect size and confidence via bootstrapped SE if possible."
+    },
+    {
+      "metric": "ses_disparity_index",
+      "current_gap": "Computed as income gap only.",
+      "suggestion": "Define SES groups (e.g., bottom/top quintile) and compute absolute gap or Gini across SES categories; report as ses_disparity_index."
+    },
+    {
+      "metric": "average_mask_price",
+      "current_gap": "Not recorded.",
+      "suggestion": "Record average_mask_price_daily and aggregate to the mean over the period."
+    },
+    {
+      "metric": "stockout_frequency",
+      "current_gap": "Only stockouts_daily counts are recorded.",
+      "suggestion": "Compute share of days with stockouts > 0 as stockout_frequency."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement missing spec metrics and validation outputs (steady_state_adoption, policy_effect_size, ses_disparity_index using SES, stockout_frequency, average_mask_price, convergence_of_adoption, inventory_feasibility).",
+    "Add socioeconomic_status to Person and assign categories during initialization; use SES for disparity metric.",
+    "Add baseline enforcement deterrence for all noncompliant individuals in enforced venues.",
+    "Introduce parameter alias mapping to accept spec parameter names.",
+    "Add observables recording for average_mask_price_daily and adopt spec naming for adoption_rate_over_time.",
+    "Optionally extend entities (PublicHealthAuthority, MediaSource, WorkplaceSchool/PublicSpace) or adapt Location/Media/Government to conform to spec naming while preserving current logic.",
+    "Improve debug logging for IO/serialization and calibration runtime safeguards."
+  ],
+  "additional_comments": "Recent fixes improved correctness and eliminated double-counting. The next iteration should focus on aligning outputs to the spec so evaluation passes and results are interpretable against the required metrics. Consider a thin compatibility layer to map current internal classes to the spec\u2019s names to avoid a disruptive refactor, then gradually migrate internals.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "class PolicyEnforcementModule(ModuleBase):\n    def forward(...):\n        ...\n        deterrence: Dict[int, float] = {}\n        events = 0\n        for p in state[\"persons\"]:\n            loc = locs_by_id.get(p.location_id)\n            requires_mask = (loc is not None) and (gov_updates[\"mandate_active\"] or loc.mask_policy_required)\n            if requires_mask and p.adoption_state == 0:\n                strictness = loc.enforcement_strictness if loc else 0.5\n                prob_check = base_prob * strictness\n                if remaining_capacity > 0 and self.rng.random() < prob_check:\n                    remaining_capacity -= 1\n                    if self.rng.random() < (0.5 * strictness):\n                        p.daily_cost_accumulated += fine_amount\n                    events += 1\n                    deterrence[p.id] = deterrence_factor * strictness\n        signals[\"enforcement_deterrence\"] = deterrence\n        ...",
+      "after": "class PolicyEnforcementModule(ModuleBase):\n    def forward(...):\n        ...\n        deterrence: Dict[int, float] = {}\n        events = 0\n        for p in state[\"persons\"]:\n            loc = locs_by_id.get(p.location_id)\n            requires_mask = (loc is not None) and (gov_updates[\"mandate_active\"] or loc.mask_policy_required)\n            if not requires_mask:\n                continue\n            strictness = loc.enforcement_strictness if loc else 0.5\n            # Baseline deterrence for all noncompliant present\n            if p.adoption_state == 0:\n                baseline_det = deterrence_factor * strictness * base_prob\n                deterrence[p.id] = max(deterrence.get(p.id, 0.0), baseline_det)\n                # Probabilistic checks/fines add additional deterrence\n                if remaining_capacity > 0 and self.rng.random() < (base_prob * strictness):\n                    remaining_capacity -= 1\n                    if self.rng.random() < (0.5 * strictness):\n                        p.daily_cost_accumulated += fine_amount\n                    events += 1\n                    deterrence[p.id] = max(deterrence[p.id], deterrence_factor * strictness)\n        signals[\"enforcement_deterrence\"] = deterrence\n        ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class RetailMarketModule(ModuleBase):\n    def forward(...):\n        retailers: List[Retailer] = state[\"retailers\"]\n        stockouts_today = 0\n        base_price = float(params.get(\"mask_price\", 1.0))\n        ...\n        for r in retailers:\n            if restock_interval > 0 and (t % restock_interval == 0):\n                r.inventory_level += supply_capacity\n            inv_ratio = r.inventory_level / float(1 + supply_capacity)\n            r.price_per_mask = max(0.1, base_price * (1.0 + price_sens * (1.0 - inv_ratio)))\n        ...\n        if any_demand:\n            stockouts_today = sum(1 for r in retailers if r.inventory_level <= 0)\n        io = {\"stockouts_today\": stockouts_today}\n        return { ... ,\n            \"observables\": {\"stockouts_daily\": stockouts_today}, ... }",
+      "after": "class RetailMarketModule(ModuleBase):\n    def forward(...):\n        retailers: List[Retailer] = state[\"retailers\"]\n        stockouts_today = 0\n        base_price = float(params.get(\"mask_price\", 1.0))\n        ...\n        for r in retailers:\n            if restock_interval > 0 and (t % restock_interval == 0):\n                r.inventory_level += supply_capacity\n            inv_ratio = r.inventory_level / float(1 + supply_capacity)\n            r.price_per_mask = max(0.1, base_price * (1.0 + price_sens * (1.0 - inv_ratio)))\n        avg_price = (sum(r.price_per_mask for r in retailers) / len(retailers)) if retailers else base_price\n        ...\n        if any_demand:\n            stockouts_today = sum(1 for r in retailers if r.inventory_level <= 0)\n        io = {\"stockouts_today\": stockouts_today, \"avg_price\": avg_price}\n        return { ... ,\n            \"observables\": {\"stockouts_daily\": stockouts_today, \"average_mask_price_daily\": avg_price}, ... }",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    def __init__(...):\n        self.observables: Dict[str, List[Any]] = {\n            \"adoption_rate_daily\": [],\n            \"adoption_rate_high_income_daily\": [],\n            \"adoption_rate_low_income_daily\": [],\n            \"average_cost_per_person_cumulative\": [],\n            \"enforcement_events_daily\": [],\n            \"stockouts_daily\": [],\n        }",
+      "after": "class Simulation:\n    def __init__(...):\n        self.observables: Dict[str, List[Any]] = {\n            \"adoption_rate_daily\": [],\n            \"adoption_rate_over_time\": [],  # alias for spec\n            \"adoption_rate_high_income_daily\": [],\n            \"adoption_rate_low_income_daily\": [],\n            \"average_cost_per_person_cumulative\": [],\n            \"average_mask_price_daily\": [],\n            \"enforcement_events_daily\": [],\n            \"stockouts_daily\": [],\n        }",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _commit(...):\n    obs = module_output.get(\"observables\", {})\n    if obs:\n        if \"enforcement_events_daily\" in obs:\n            self.observables[\"enforcement_events_daily\"].append(obs[\"enforcement_events_daily\"])\n        if \"stockouts_daily\" in obs:\n            self.observables[\"stockouts_daily\"].append(obs[\"stockouts_daily\"])\n        if \"adoption_rate_daily\" in obs:\n            self.observables[\"adoption_rate_daily\"].append(obs[\"adoption_rate_daily\"])\n        if \"adoption_rate_high_income_daily\" in obs:\n            self.observables[\"adoption_rate_high_income_daily\"].append(obs[\"adoption_rate_high_income_daily\"])\n        if \"adoption_rate_low_income_daily\" in obs:\n            self.observables[\"adoption_rate_low_income_daily\"].append(obs[\"adoption_rate_low_income_daily\"])\n        if \"average_cost_per_person_cumulative\" in obs:\n            self.observables[\"average_cost_per_person_cumulative\"].append(obs[\"average_cost_per_person_cumulative\"])",
+      "after": "def _commit(...):\n    obs = module_output.get(\"observables\", {})\n    if obs:\n        for k in (\"enforcement_events_daily\", \"stockouts_daily\", \"adoption_rate_daily\",\n                  \"adoption_rate_high_income_daily\", \"adoption_rate_low_income_daily\",\n                  \"average_cost_per_person_cumulative\", \"average_mask_price_daily\"):\n            if k in obs:\n                self.observables.setdefault(k, []).append(obs[k])\n        # Maintain alias for spec\n        if \"adoption_rate_daily\" in obs:\n            self.observables[\"adoption_rate_over_time\"].append(obs[\"adoption_rate_daily\"])",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def compute_summary_metrics(self) -> Dict[str, Any]:\n    obs = self.observables\n    adoption_series = obs.get(\"adoption_rate_daily\", [])\n    ...\n    return {\n        \"overall_adoption_rate\": overall,\n        \"time_to_reach_70_adoption\": t70,\n        \"sustained_adoption_post_mandate\": sustained,\n        \"inequality_in_adoption\": inequality,\n        \"enforcement_events\": enforce_sum,\n        \"mask_shortage_days\": stockout_days,\n        \"average_cost_per_person\": avg_cost_final,\n        \"peak_adoption\": peak,\n        \"adoption_volatility\": vol,\n    }",
+      "after": "def compute_summary_metrics(self) -> Dict[str, Any]:\n    obs = self.observables\n    adoption_series = obs.get(\"adoption_rate_daily\", [])\n    price_series = obs.get(\"average_mask_price_daily\", [])\n    stockout_series = obs.get(\"stockouts_daily\", [])\n    high_series = obs.get(\"adoption_rate_high_income_daily\", [])\n    low_series = obs.get(\"adoption_rate_low_income_daily\", [])\n    n = len(adoption_series)\n    if n == 0:\n        return {...}\n    overall = sum(adoption_series) / n\n    # Spec: time_to_70_percent_adoption\n    t70 = next((i for i, v in enumerate(adoption_series) if v >= 0.7), None)\n    # Spec: steady_state_adoption (last 14 days)\n    tail = adoption_series[max(0, n - 14):]\n    steady = sum(tail) / len(tail) if tail else overall\n    # Spec: policy_effect_size (DiD)\n    mday = int(self.params.get(\"mandate_start_day\", self.params.get(\"policy_mandate_day\", 30)))\n    pre = adoption_series[max(0, mday - 14):mday]\n    post = adoption_series[mday:mday + 14]\n    pre_mean = sum(pre) / len(pre) if pre else None\n    post_mean = sum(post) / len(post) if post else None\n    did = (post_mean - pre_mean) if (pre_mean is not None and post_mean is not None) else None\n    # Spec: ses_disparity_index (use high vs low as proxy until SES added)\n    ses_disp = ((sum(high_series) / len(high_series)) - (sum(low_series) / len(low_series))) if (high_series and low_series) else 0.0\n    # Spec: stockout_frequency\n    stockout_days = sum(1 for x in stockout_series if x and x > 0)\n    stockout_freq = stockout_days / n\n    avg_price = (sum(price_series) / len(price_series)) if price_series else 0.0\n    # Validation: convergence_of_adoption\n    window7 = adoption_series[max(0, n - 7):]\n    conv = (max(window7) - min(window7)) if window7 else 0.0\n    validation = {\n        \"convergence_of_adoption\": conv,\n        \"inventory_feasibility\": True,  # set False if any negative stock tracked elsewhere\n    }\n    return {\n        \"adoption_rate_over_time\": adoption_series,\n        \"time_to_70_percent_adoption\": t70,\n        \"steady_state_adoption\": steady,\n        \"policy_effect_size\": did,\n        \"ses_disparity_index\": ses_disp,\n        \"stockout_frequency\": stockout_freq,\n        \"average_mask_price\": avg_price,\n        \"overall_adoption_rate\": overall,\n        \"validation\": validation,\n        # retain legacy fields for backward compatibility\n        \"enforcement_events\": sum(self.observables.get(\"enforcement_events_daily\", []) or [0]),\n        \"average_cost_per_person\": (self.observables.get(\"average_cost_per_person_cumulative\", [0.0])[-1] if self.observables.get(\"average_cost_per_person_cumulative\") else 0.0),\n    }",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "@dataclass\nclass Person:\n    id: int = 0\n    age: int = 0\n    income: float = 0.0\n    household_id: int = -1\n    ...",
+      "after": "@dataclass\nclass Person:\n    id: int = 0\n    age: int = 0\n    sex: str = \"U\"\n    socioeconomic_status: str = \"mid\"  # low/mid/high\n    income: float = 0.0\n    household_id: int = -1\n    ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _init_entities(self) -> None:\n    N = int(self.params.get(\"population_size\", 300))\n    ...\n    for hh, size in zip(households, sizes):\n        hh_income = math.exp(self.rng.gauss(income_log_mean, income_log_sigma))\n        hh.income = hh_income\n        for _ in range(size):\n            age = int(clamp(self.rng.gauss(40.0, 15.0), 15, 80))\n            income = max(0.0, hh_income / max(1, size) * self.rng.uniform(0.7, 1.3))\n            ...\n            person = Person(\n                id=pid,\n                age=age,\n                income=income,\n                household_id=hh.id,\n                ...)",
+      "after": "def _init_entities(self) -> None:\n    N = int(self.params.get(\"population_size\", 300))\n    ...\n    # Precompute income breakpoints for SES\n    tmp_incomes = [math.exp(self.rng.gauss(income_log_mean, income_log_sigma)) for _ in range(max(50, N//5))]\n    q_low = sorted(tmp_incomes)[int(0.33*len(tmp_incomes))]\n    q_high = sorted(tmp_incomes)[int(0.66*len(tmp_incomes))]\n    for hh, size in zip(households, sizes):\n        hh_income = math.exp(self.rng.gauss(income_log_mean, income_log_sigma))\n        hh.income = hh_income\n        for _ in range(size):\n            age = int(clamp(self.rng.gauss(40.0, 15.0), 15, 80))\n            income = max(0.0, hh_income / max(1, size) * self.rng.uniform(0.7, 1.3))\n            ses = \"low\" if income < q_low else (\"high\" if income > q_high else \"mid\")\n            sex = \"F\" if self.rng.random() < 0.5 else \"M\"\n            person = Person(\n                id=pid,\n                age=age,\n                sex=sex,\n                socioeconomic_status=ses,\n                income=income,\n                household_id=hh.id,\n                ...)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class ParameterManager:\n    def __init__(...):\n        self.default_params()\n        self.load_param_definitions()",
+      "after": "class ParameterManager:\n    def __init__(...):\n        self.default_params()\n        self.load_param_definitions()\n        # Map spec aliases to internal keys for compatibility\n        self._apply_spec_aliases()\n    def _apply_spec_aliases(self) -> None:\n        alias_map = {\n            \"policy_mandate_day\": \"mandate_start_day\",\n            \"mask_price_base\": \"mask_price\",\n            \"messaging_frequency_per_week\": \"media_message_frequency\",\n        }\n        for src, dst in alias_map.items():\n            if src in self.params and dst not in self.params:\n                self.params[dst] = self.params[src]",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent changes substantially improved execution correctness and observability handling, but did not address the main verification failures tied to spec alignment and required metrics.",
+    "positive_impacts": [
+      "Module order ensures same-day enforcement influences",
+      "Prevents enforcement at home/invalid locations",
+      "Removes double-counting of stockouts/enforcement in aggregation",
+      "Peer influence scaled by individual weight improves heterogeneity",
+      "Stockouts measured after purchases reflect realized constraints",
+      "Household initialization now sums exactly to N"
+    ],
+    "negative_impacts": [
+      "None critical introduced; however, enforcement deterrence remains narrow (only for checked individuals)",
+      "Spec metrics and validation remain unimplemented, preventing verification pass"
+    ],
+    "suggestions": [
+      "Add baseline enforcement deterrence as outlined",
+      "Implement spec metrics and validation",
+      "Introduce parameter alias mapping and SES attribute as minimal compatibility layer before larger entity refactor"
+    ]
+  }
+}

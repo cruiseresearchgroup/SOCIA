@@ -1,0 +1,1143 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based social behavior adoption model on a dynamic contact network with policy interventions, capturing interpersonal influence, media effects, and heterogeneous thresholds. Designed for calibration against daily adoption and contact data and for counterfactual policy evaluation.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "income_quintile",
+        "degree",
+        "neighbors",
+        "adopted",
+        "belief",
+        "threshold",
+        "risk_perception",
+        "stubbornness",
+        "household_id",
+        "workgroup_id",
+        "last_message_day"
+      ],
+      "behaviors": [
+        "form_contacts",
+        "exchange_messages",
+        "update_belief",
+        "decide_adoption",
+        "habit_formation",
+        "disadopt"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "age_group_shares": {
+            "0_17": 0.22,
+            "18_34": 0.26,
+            "35_54": 0.28,
+            "55_plus": 0.24
+          },
+          "income_quintile_shares": [
+            0.2,
+            0.2,
+            0.2,
+            0.2,
+            0.2
+          ],
+          "initial_adoption_rate": 0.05,
+          "initial_belief_mu": 0.2,
+          "threshold_distribution": {
+            "mu": 0.5,
+            "sigma": 0.15
+          }
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs and maintains the social contact network with household and workgroup structure and optional dynamic rewiring.",
+      "inputs": [],
+      "outputs": [
+        "signal.network.graph",
+        "signal.network.households",
+        "signal.network.workgroups"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  set RNG seed\n  create households by sampling household_size_mean and assign persons\n  create base graph according to network_type with approximately avg_degree\n  increase clustering via triadic closures with probability clustering_bias\n  adjust homophily by rewiring cross-income edges with probability proportional to homophily_strength\n  adjust degree assortativity toward degree_assortativity_target using edge swaps\nelse:\n  for each edge in graph:\n    with probability dynamic_rewiring_rate:\n      rewire edge preserving degree and household/workgroup tags\noutput graph, household and workgroup mappings",
+        "notes": [
+          "Supports Watts-Strogatz, Barabasi-Albert, and Erdos-Renyi topologies.",
+          "Household edges are tagged for higher contact rates and lower rewiring."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy.random"
+      ],
+      "module_parameters": [
+        "network_type",
+        "avg_degree",
+        "rewiring_prob",
+        "homophily_strength",
+        "household_size_mean",
+        "dynamic_rewiring_rate",
+        "clustering_bias",
+        "degree_assortativity_target"
+      ]
+    },
+    {
+      "name": "ContactScheduler",
+      "description": "Generates daily contact events between persons based on network edges, context (household, workgroup, random), and mobility modifiers.",
+      "inputs": [
+        "signal.network.graph",
+        "signal.network.households",
+        "signal.network.workgroups",
+        "signal.policy.mobility_modifier"
+      ],
+      "outputs": [
+        "signal.contacts_today"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "PolicyController"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "contacts_today = []\nfor each person i:\n  target_contacts ~ max(0, Normal(base_contact_rate_per_person, contact_variance))\n  adjust target_contacts *= (1 - mobility_reduction_policy) * signal.policy.mobility_modifier\n  allocate contacts across contexts with multipliers:\n    household_share \u221d household_contact_multiplier\n    workgroup_share \u221d workplace_school_contact_multiplier\n    random_share \u221d random_contact_fraction\n  sample neighbors accordingly (household prioritized for household_share)\n  for each selected neighbor j:\n    duration ~ Exponential(mean=meeting_duration_mean_minutes)\n    contacts_today.append((i, j, duration, context))\noutput contacts_today",
+        "notes": [
+          "Ensures no self-contacts and deduplicates symmetric pairs.",
+          "Random contacts are sampled via two-hop or random-node selection to emulate casual encounters."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "networkx"
+      ],
+      "module_parameters": [
+        "base_contact_rate_per_person",
+        "contact_variance",
+        "meeting_duration_mean_minutes",
+        "mobility_reduction_policy",
+        "household_contact_multiplier",
+        "workplace_school_contact_multiplier",
+        "random_contact_fraction"
+      ]
+    },
+    {
+      "name": "PolicyController",
+      "description": "Applies policy interventions over time including subsidies, media campaigns, enforcement, and mobility modifiers.",
+      "inputs": [
+        "signal.time.day",
+        "signal.population.attributes"
+      ],
+      "outputs": [
+        "signal.policy.state",
+        "signal.policy.subsidy_map",
+        "signal.policy.media_boost",
+        "signal.policy.enforcement_map",
+        "signal.policy.mobility_modifier"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "active = (policy_start_day <= t <= policy_end_day)\nif not active:\n  media_boost = 1.0\n  mobility_modifier = 1.0\n  subsidy_map = zeros(N)\n  enforcement_map = zeros(N)\nelse:\n  media_boost = 1.0 + media_campaign_intensity\n  mobility_modifier = 1.0 - enforcement_level\n  subsidy_map = zeros(N)\n  if subsidy_targeting_mode == 'low_income':\n    assign subsidy_amount to income_quintile==1\n  elif subsidy_targeting_mode == 'high_degree':\n    assign subsidy_amount to top 20% by degree\n  elif subsidy_targeting_mode == 'random':\n    assign subsidy_amount to random 20%\n  enforcement_map = enforcement_level * (1 - compliance_variance * Normal(0,1) per person)\noutput state={active}, subsidy_map, media_boost, enforcement_map, mobility_modifier",
+        "notes": [
+          "Mobility modifier multiplies contact rates.",
+          "Subsidy map feeds into perceived private cost in adoption decision."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "policy_start_day",
+        "policy_end_day",
+        "subsidy_amount",
+        "subsidy_targeting_mode",
+        "media_campaign_intensity",
+        "enforcement_level",
+        "information_boost_factor",
+        "compliance_variance"
+      ]
+    },
+    {
+      "name": "InfluenceAndCommunication",
+      "description": "Propagates interpersonal and media influence over contacts, updating beliefs with memory, decay, stubbornness, and fatigue.",
+      "inputs": [
+        "signal.contacts_today",
+        "signal.policy.media_boost",
+        "signal.policy.state",
+        "signal.population.beliefs",
+        "signal.population.adoption_state"
+      ],
+      "outputs": [
+        "signal.population.beliefs_updated",
+        "signal.messages_count"
+      ],
+      "dependencies": [
+        "ContactScheduler",
+        "PolicyController"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "messages_count = 0\nfor each contact (i, j, duration, context):\n  p_transmit = transmission_prob_base * (1 + duration/60) * information_boost_factor\n  if Person i adopted or belief_i > belief_j:\n    if Bernoulli(p_transmit):\n      msg_quality ~ Normal(content_quality_mu, content_quality_sigma)\n      delta_ij = influence_weight_social * (belief_i - belief_j + msg_quality)\n      belief_j += (1 - stubbornness_j * stubbornness_scaling) * delta_ij\n      messages_count += 1\n  symmetric update for j->i with roles swapped\n# Media effect (global)\nmedia_signal = influence_weight_media * (signal.policy.media_boost) * (1 - message_fatigue_rate * days_since_last_message)\nfor each person k:\n  belief_k = belief_k * (1 - influence_decay_per_day) + media_signal\n  cap beliefs to [0,1]\n  update last_message_day if received any message\noutput updated beliefs and messages_count",
+        "notes": [
+          "Beliefs are constrained to [0,1].",
+          "Message fatigue reduces media effectiveness when exposure is frequent."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "transmission_prob_base",
+        "influence_weight_social",
+        "influence_weight_media",
+        "influence_decay_per_day",
+        "content_quality_mu",
+        "content_quality_sigma",
+        "stubbornness_scaling",
+        "memory_window_days",
+        "message_fatigue_rate",
+        "information_boost_factor"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Computes utilities and updates adoption state via a heterogeneous threshold and utility-based rule with habit formation and disadoption.",
+      "inputs": [
+        "signal.population.beliefs_updated",
+        "signal.population.adoption_state",
+        "signal.policy.subsidy_map",
+        "signal.policy.enforcement_map"
+      ],
+      "outputs": [
+        "signal.population.adoption_state_updated"
+      ],
+      "dependencies": [
+        "InfluenceAndCommunication",
+        "PolicyController"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person k:\n  social_norm = average(adopted of neighbors)\n  private_benefit = private_benefit_mean + risk_perception_weight * belief_k\n  private_cost = max(0, private_cost_mean - subsidy_map[k])\n  enforcement_push = enforcement_map[k]\n  utility = social_weight * social_norm + private_benefit - private_cost + enforcement_push\n  threshold_k = clamp(Normal(adoption_threshold_mu, adoption_threshold_sigma) * heterogeneity_scale, 0, 1)\n  if not adopted_k and utility >= threshold_k:\n    adopted_k = True\n  elif adopted_k:\n    if Bernoulli(habit_formation_rate): threshold_k = max(0, threshold_k - 0.01)\n    if utility < threshold_k and Bernoulli(disadoption_rate):\n      adopted_k = False\noutput updated adoption states",
+        "notes": [
+          "Thresholds are person-specific draws with mild temporal plasticity via habit formation.",
+          "Income sensitivity may modulate private_cost via income quintiles."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "adoption_threshold_mu",
+        "adoption_threshold_sigma",
+        "private_benefit_mean",
+        "private_cost_mean",
+        "social_weight",
+        "risk_perception_weight",
+        "habit_formation_rate",
+        "disadoption_rate",
+        "heterogeneity_scale",
+        "income_sensitivity"
+      ]
+    },
+    {
+      "name": "AggregationObserver",
+      "description": "Aggregates observables daily, applies optional smoothing and reporting delay, and emits time series for evaluation.",
+      "inputs": [
+        "signal.population.adoption_state_updated",
+        "signal.contacts_today",
+        "signal.messages_count",
+        "signal.population.attributes"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.adoption_rate_by_income_daily",
+        "observable.contact_events_daily",
+        "observable.messages_count_daily"
+      ],
+      "dependencies": [
+        "AdoptionDecision",
+        "ContactScheduler",
+        "InfluenceAndCommunication"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate = mean(Person.adopted)\nadoption_by_income = groupby(income_quintile).mean(adopted)\ncontact_events = len(signal.contacts_today)\nmessages_daily = signal.messages_count\n# Apply reporting delay by buffering series\n# Apply smoothing via moving average of length smoothing_window_days\n# Add small observation noise if observation_noise_sd > 0\nemit observables",
+        "notes": [
+          "All observables are aligned to daily timestamps.",
+          "Noise and delays emulate real-world reporting artifacts."
+        ]
+      },
+      "requirements": [
+        "pandas",
+        "numpy"
+      ],
+      "module_parameters": [
+        "observation_noise_sd",
+        "reporting_delay_days",
+        "smoothing_window_days",
+        "group_fields"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of Person agents in the simulation.",
+      "frozen": false
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 1000000000
+      },
+      "owner_module": "global",
+      "description": "Seed for reproducible randomness.",
+      "frozen": true
+    },
+    {
+      "key": "sim_duration_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 10,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total simulation length in days.",
+      "frozen": true
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 7.0
+      },
+      "owner_module": "global",
+      "description": "Length of one tick in days.",
+      "frozen": true
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Fraction of population initially adopted.",
+      "frozen": false
+    },
+    {
+      "key": "initial_belief_mu",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean initial belief level in favor of adoption.",
+      "frozen": false
+    },
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "ws_small_world",
+      "bounds": null,
+      "owner_module": "NetworkBuilder",
+      "description": "Network topology: ws_small_world, ba_scale_free, er_random, empirical.",
+      "frozen": false
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 100.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Average degree for the base network.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Rewiring probability for small-world network generation.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_strength",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Probability bias to rewire edges to same income quintile.",
+      "frozen": false
+    },
+    {
+      "key": "household_size_mean",
+      "dtype": "float",
+      "default": 2.6,
+      "bounds": {
+        "low": 1.0,
+        "high": 6.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Mean household size for household clustering.",
+      "frozen": false
+    },
+    {
+      "key": "dynamic_rewiring_rate",
+      "dtype": "float",
+      "default": 0.002,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Daily probability an edge is rewired to simulate churn.",
+      "frozen": false
+    },
+    {
+      "key": "clustering_bias",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Bias for triadic closure to increase clustering.",
+      "frozen": false
+    },
+    {
+      "key": "degree_assortativity_target",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": -0.5,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target degree assortativity achieved with edge swaps.",
+      "frozen": false
+    },
+    {
+      "key": "base_contact_rate_per_person",
+      "dtype": "float",
+      "default": 14.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 50.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Average daily number of contacts per person in baseline.",
+      "frozen": false
+    },
+    {
+      "key": "contact_variance",
+      "dtype": "float",
+      "default": 5.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 50.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Variance for per-person contact count.",
+      "frozen": false
+    },
+    {
+      "key": "meeting_duration_mean_minutes",
+      "dtype": "float",
+      "default": 30.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 240.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Mean duration of meetings used in influence probability scaling.",
+      "frozen": false
+    },
+    {
+      "key": "mobility_reduction_policy",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Baseline exogenous mobility reduction (policy-independent).",
+      "frozen": false
+    },
+    {
+      "key": "household_contact_multiplier",
+      "dtype": "float",
+      "default": 2.5,
+      "bounds": {
+        "low": 1.0,
+        "high": 5.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Multiplier for household contact allocation.",
+      "frozen": false
+    },
+    {
+      "key": "workplace_school_contact_multiplier",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.5,
+        "high": 3.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Multiplier for work/school contact allocation.",
+      "frozen": false
+    },
+    {
+      "key": "random_contact_fraction",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Fraction of contacts that are random (outside network edges).",
+      "frozen": false
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyController",
+      "description": "Day index when policy interventions start.",
+      "frozen": false
+    },
+    {
+      "key": "policy_end_day",
+      "dtype": "int",
+      "default": 40,
+      "bounds": {
+        "low": 1,
+        "high": 365
+      },
+      "owner_module": "PolicyController",
+      "description": "Day index when policy interventions end.",
+      "frozen": false
+    },
+    {
+      "key": "subsidy_amount",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyController",
+      "description": "Per-person subsidy magnitude reducing private cost when targeted.",
+      "frozen": false
+    },
+    {
+      "key": "subsidy_targeting_mode",
+      "dtype": "categorical",
+      "default": "none",
+      "bounds": null,
+      "owner_module": "PolicyController",
+      "description": "Targeting scheme: none, low_income, high_degree, random.",
+      "frozen": false
+    },
+    {
+      "key": "media_campaign_intensity",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyController",
+      "description": "Additive media intensity (scaled) when policy is active.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_level",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyController",
+      "description": "Enforcement pressure that both nudges adoption and reduces mobility.",
+      "frozen": false
+    },
+    {
+      "key": "information_boost_factor",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 5.0
+      },
+      "owner_module": "PolicyController",
+      "description": "Multiplier for the effectiveness of information transmission.",
+      "frozen": false
+    },
+    {
+      "key": "compliance_variance",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyController",
+      "description": "Heterogeneity in response to enforcement.",
+      "frozen": false
+    },
+    {
+      "key": "transmission_prob_base",
+      "dtype": "float",
+      "default": 0.12,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceAndCommunication",
+      "description": "Base probability that a contact transmits influence.",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_social",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluenceAndCommunication",
+      "description": "Weight of social influence on beliefs.",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_media",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluenceAndCommunication",
+      "description": "Weight of media influence on beliefs.",
+      "frozen": false
+    },
+    {
+      "key": "influence_decay_per_day",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceAndCommunication",
+      "description": "Daily decay of belief level absent new influence.",
+      "frozen": false
+    },
+    {
+      "key": "content_quality_mu",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": -2.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluenceAndCommunication",
+      "description": "Mean quality of messages exchanged.",
+      "frozen": false
+    },
+    {
+      "key": "content_quality_sigma",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "InfluenceAndCommunication",
+      "description": "Std dev of message quality.",
+      "frozen": false
+    },
+    {
+      "key": "stubbornness_scaling",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluenceAndCommunication",
+      "description": "Scaling of resistance to belief updates.",
+      "frozen": false
+    },
+    {
+      "key": "memory_window_days",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 1,
+        "high": 60
+      },
+      "owner_module": "InfluenceAndCommunication",
+      "description": "Window over which accumulated influence impacts decisions.",
+      "frozen": false
+    },
+    {
+      "key": "message_fatigue_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "InfluenceAndCommunication",
+      "description": "Rate at which repeated exposure reduces media impact.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold_mu",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean threshold for adoption decision.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold_sigma",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std dev of adoption threshold for heterogeneity.",
+      "frozen": false
+    },
+    {
+      "key": "private_benefit_mean",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Baseline private benefit from adopting.",
+      "frozen": false
+    },
+    {
+      "key": "private_cost_mean",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Baseline private cost of adopting before subsidies.",
+      "frozen": false
+    },
+    {
+      "key": "social_weight",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on social norm (neighbor adoption) in utility.",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Sensitivity of utility to belief/risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "habit_formation_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Probability of threshold reduction for adopters each day.",
+      "frozen": false
+    },
+    {
+      "key": "disadoption_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Probability of abandoning adoption when utility below threshold.",
+      "frozen": false
+    },
+    {
+      "key": "heterogeneity_scale",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Scaling factor for threshold dispersion.",
+      "frozen": false
+    },
+    {
+      "key": "income_sensitivity",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Strength by which lower income increases perceived cost (pre-subsidy).",
+      "frozen": false
+    },
+    {
+      "key": "observation_noise_sd",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AggregationObserver",
+      "description": "Std dev of Gaussian noise added to observables.",
+      "frozen": false
+    },
+    {
+      "key": "reporting_delay_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 14
+      },
+      "owner_module": "AggregationObserver",
+      "description": "Days to delay reporting of observables.",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "AggregationObserver",
+      "description": "Moving average window length for smoothing outputs.",
+      "frozen": false
+    },
+    {
+      "key": "group_fields",
+      "dtype": "categorical",
+      "default": "income_quintile",
+      "bounds": null,
+      "owner_module": "AggregationObserver",
+      "description": "Primary grouping field for by-group observables.",
+      "frozen": true
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AggregationObserver",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.adoption_rate_by_income_daily",
+      "source_module": "AggregationObserver",
+      "formula_or_field": "by_group(Person.income_quintile, mean(Person.adopted))",
+      "frequency": "daily",
+      "aggregation": "by_group(income_quintile)",
+      "target_data_field": "train_data_by_income.csv:adoption_rate_by_quintile"
+    },
+    {
+      "id": "observable.contact_events_daily",
+      "source_module": "AggregationObserver",
+      "formula_or_field": "len(contacts_today)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "aux_data.csv:contact_events"
+    },
+    {
+      "id": "observable.messages_count_daily",
+      "source_module": "AggregationObserver",
+      "formula_or_field": "sum(messages_count)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "aux_data.csv:messages_count"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "RMSE_by_income",
+      "inputs": [
+        "observable.adoption_rate_by_income_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "grouped": true,
+          "group_weights": "uniform",
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAPE_contacts",
+      "inputs": [
+        "observable.contact_events_daily"
+      ],
+      "definition": {
+        "type": "MAPE",
+        "config": {
+          "epsilon": 1e-06
+        }
+      }
+    },
+    {
+      "name": "TimeTo50Error",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToThresholdError",
+        "config": {
+          "threshold": 0.5
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1.0,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "assign_attributes": {
+      "age_group": [
+        "0_17",
+        "18_34",
+        "35_54",
+        "55_plus"
+      ],
+      "income_quintile": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    },
+    "initial_adopters_fraction": 0.05,
+    "initial_belief_mu": 0.2
+  },
+  "algorithms": {
+    "network_generation": "Watts-Strogatz small-world, Barabasi-Albert scale-free, or Erdos-Renyi random with homophily and assortativity adjustments.",
+    "contact_sampling": "Gaussian-Poisson hybrid target contacts per person with context multipliers and random mixing component.",
+    "influence_propagation": "Independent cascade-like per-contact transmission with continuous belief updates and media augmentation.",
+    "adoption_decision": "Heterogeneous threshold utility model combining social norms, private benefits/costs, risk perception, and enforcement.",
+    "aggregation": "Daily aggregation with moving average smoothing and optional reporting delay."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Daily overall adoption rate for calibration and evaluation.",
+      "fields_used": [
+        "date",
+        "adoption_rate"
+      ]
+    },
+    {
+      "name": "train_data_by_income.csv",
+      "purpose": "Daily adoption rate by income quintile for stratified calibration.",
+      "fields_used": [
+        "date",
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+        "q5"
+      ]
+    },
+    {
+      "name": "aux_data.csv",
+      "purpose": "Auxiliary mobility/contact and messaging volumes to constrain contact scheduler and messaging intensity.",
+      "fields_used": [
+        "date",
+        "contact_events",
+        "messages_count"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point to run simulations, parse configs, and orchestrate modules."
+      },
+      {
+        "name": "entities.py",
+        "description": "Definitions for Person entity and attribute initialization utilities."
+      },
+      {
+        "name": "network_builder.py",
+        "description": "Implements NetworkBuilder module."
+      },
+      {
+        "name": "contact_scheduler.py",
+        "description": "Implements ContactScheduler module."
+      },
+      {
+        "name": "policy_controller.py",
+        "description": "Implements PolicyController module."
+      },
+      {
+        "name": "influence_comm.py",
+        "description": "Implements InfluenceAndCommunication module."
+      },
+      {
+        "name": "adoption_decision.py",
+        "description": "Implements AdoptionDecision module."
+      },
+      {
+        "name": "observer.py",
+        "description": "Implements AggregationObserver and metrics computation."
+      },
+      {
+        "name": "config.py",
+        "description": "Parameter schema, defaults, bounds, and validation."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Load target data, align to simulation time, and export observables."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric implementations (RMSE, MAPE, TimeToThresholdError)."
+      },
+      {
+        "name": "calibration.py",
+        "description": "Bayesian or gradient-free calibration routines supporting SBI."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "pydantic",
+      "matplotlib"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption",
+    "RMSE_by_income",
+    "MAPE_contacts",
+    "TimeTo50Error"
+  ]
+}

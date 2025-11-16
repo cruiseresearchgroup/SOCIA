@@ -1,0 +1,243 @@
+{
+  "summary": "Overall, the simulation is syntactically solid and functionally complete with a full orchestrator, calibration hooks, evaluation, and JSON-safe output. The recent changes significantly improved robustness (sanitization, FAST_MODE/IO guards, pluggable calibration). However, there are several critical issues: (1) network rewiring cannot be disabled due to a K>=1 bug; (2) get_calibrator may raise TypeError when a config is provided; (3) ParamsAdapter only prints keys for frozen warnings; (4) evaluation ignores the window start; (5) parameters_used.json may not reflect calibrated parameters; (6) trust updates monotonically increase trust, creating unrealistic drift; and (7) MAPE uses a large epsilon, muting error sensitivity. Addressing these will improve correctness, reproducibility, and fidelity.",
+  "critical_issues": [
+    {
+      "issue": "Network rewiring executes even when rewiring_rate=0.0",
+      "impact": "This prevents disabling rewiring, causing unintended network changes each day. It degrades experiment control, reproducibility, and validity of ablation studies.",
+      "solution": "Compute K strictly from fraction and allow zero (no rewiring) when rewiring_rate=0.0.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "get_calibrator passes kwargs to calibrator constructors that do not accept them",
+      "impact": "If a config file is provided, instantiation will raise TypeError, breaking calibration.",
+      "solution": "Do not pass kwargs unless constructors accept **kwargs, or update calibrators to accept **kwargs.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "ParamsAdapter.apply prints only keys from validate_frozen warnings",
+      "impact": "Warning messages are unclear, reducing diagnosability of parameter freezing violations.",
+      "solution": "Iterate items and print the full message.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "evaluate_params runs the sim from day 0 even when a later window start is specified",
+      "impact": "Metrics for a specified window are influenced by early dynamics, biasing calibration outcomes.",
+      "solution": "Start the run at the window's start_day.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Persisted parameters (parameters_used.json via ParameterManager.persist_used) may not reflect calibrated runtime parameters",
+      "impact": "Artifacts become inconsistent with actual runs, confusing downstream analysis and reproducibility.",
+      "solution": "Synchronize ParameterManager.values with simulation.get_params() before persisting.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Trust updates in PolicyBroadcast always increase (or never decrease) trust_policy",
+      "impact": "Creates unrealistic monotonic drift toward maximum trust regardless of agent experience, distorting adoption trajectories.",
+      "solution": "Update trust toward a bounded target driven by signal (e.g., exponential smoothing toward signal-derived target), allowing both increase and decrease.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "MAPE uses epsilon=1.0",
+      "impact": "Errors are muted when the ground truth is small, making MAPE less informative for early adoption phases.",
+      "solution": "Use a small epsilon (e.g., 1e-6) to maintain sensitivity while avoiding division by zero.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Trust and policy signal dynamics",
+      "current_approach": "signal = intensity * trust_policy * (1 - misinformation); trust_policy increases monotonically by trust_update_rate",
+      "suggested_approach": "Compute a bounded target trust from the signal (e.g., target = tanh(alpha*intensity*(1-misinformation))); update trust_policy toward target via exponential smoothing; allow decay toward neutral when no messages arrive.",
+      "expected_benefit": "Prevents unrealistic drift; makes trust responsive and reversible, improving realism and fit."
+    },
+    {
+      "aspect": "Network rewiring control",
+      "current_approach": "K = int(max(1, fraction * len(edges))) causing at least one edge rewired daily",
+      "suggested_approach": "K = max(0, int(round(fraction * len(edges)))) and skip when K == 0",
+      "expected_benefit": "Enables true zero-rewiring experiments and tighter control over dynamics."
+    },
+    {
+      "aspect": "Evaluation windowing",
+      "current_approach": "Always runs from day 0 and then slices metrics",
+      "suggested_approach": "Run simulation starting at window start_day to avoid path dependence from prior unseen days",
+      "expected_benefit": "Cleaner, more accurate metric attribution to the specified window, improving calibration quality."
+    },
+    {
+      "aspect": "Transition-level metrics",
+      "current_approach": "TransitionFit placeholders are None",
+      "suggested_approach": "Log daily transitions (P01, P10) in aggregator and report them to enable micro-fit metrics",
+      "expected_benefit": "Richer calibration targets and diagnostics to improve temporal fit."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "NetworkDynamics._homophily_rewire",
+      "modification": "Calculate K without the max(1, ...) guard; allow zero rewiring.",
+      "reason": "Fixes inability to disable rewiring, improving control and reproducibility.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "get_calibrator",
+      "modification": "Instantiate calibrators without kwargs unless they accept **kwargs.",
+      "reason": "Prevents TypeError when a config is provided.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "ParamsAdapter.apply",
+      "modification": "Print both key and message from validate_frozen warnings.",
+      "reason": "Improves clarity of warnings.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "evaluate_params",
+      "modification": "Start sim.run at the window start_day.",
+      "reason": "Avoids early dynamics bias when calibrating on sub-windows.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "orchestrate",
+      "modification": "Persist parameters_used based on simulation.get_params() post-calibration.",
+      "reason": "Keeps artifacts consistent with the actual run.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "PolicyBroadcast.forward",
+      "modification": "Update trust toward a bounded target from the signal (both increase/decrease possible) and add decay when not reached.",
+      "reason": "Avoids monotonic trust drift and improves behavioral realism.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "mape",
+      "modification": "Use epsilon=1e-6 (or a small value) by default.",
+      "reason": "Improves metric sensitivity when ground truth values are small.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "get_calibrator or calibrator classes",
+      "modification": "Option A: Do not pass kwargs; Option B: Add __init__(self, **kwargs): pass to calibrator classes.",
+      "reason": "Either approach prevents TypeError and preserves extension points.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "evaluate_params",
+      "modification": "Honor FAST_MODE but consider exposing a per-evaluation time budget parameter for calibrators.",
+      "reason": "Gives calibrators tighter control over runtime and fairness.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "orchestrate/FAST_MODE detection",
+      "modification": "Default FAST_MODE to environment '0' to avoid unintended downscaling, or make CLI --fast override take precedence over env defaults.",
+      "reason": "Prevents surprising behavior in non-sandbox runs.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Adoption trajectory RMSE/MAE",
+      "current_gap": "Ground truth default is a flat 0.1; calibration is effectively fitting noise.",
+      "suggestion": "Load a real series (or a synthetic sigmoidal baseline) and match smoothing/lag to the source reporting cadence."
+    },
+    {
+      "metric": "Time to peaks and thresholds",
+      "current_gap": "TimeToPeakError and thresholds depend on raw adoption series which may be noisy.",
+      "suggestion": "Calibrate using smoothed-lagged observables that reflect reporting pipelines; add penalties for misaligned threshold-crossing days."
+    },
+    {
+      "metric": "Transition probabilities (P01, P10)",
+      "current_gap": "No micro-transition logs; TransitionFit is None.",
+      "suggestion": "Instrument daily transitions during Simulation.run and report P01/P10 by day; use them in calibration loss."
+    },
+    {
+      "metric": "Network degree distribution",
+      "current_gap": "Poisson degrees ignore degree_dispersion and clustering bias parameters.",
+      "suggestion": "Use a Negative Binomial sampler to respect degree_dispersion and add local triadic closure to control clustering."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix rewiring K calculation to allow zero rewiring.",
+    "Stop passing kwargs in get_calibrator or make calibrators accept **kwargs.",
+    "Respect evaluation window start in evaluate_params.run().",
+    "Update trust dynamics to be bidirectional (toward a bounded target) and remove monotonic drift.",
+    "Persist parameters_used.json from simulation.get_params() post-calibration.",
+    "Lower MAPE epsilon to improve sensitivity.",
+    "Optionally default FAST_MODE to 0 to avoid unintended downscaling outside sandbox."
+  ],
+  "additional_comments": "The codebase shows careful attention to sandbox constraints (FAST_MODE, SKIP_IO) and JSON safety. The pluggable calibration design is a strong foundation. Addressing the listed issues will improve reproducibility, calibration quality, and realism without materially increasing runtime in FAST_MODE.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "K = int(max(1, fraction * len(edges)))",
+      "after": "K = max(0, int(round(fraction * len(edges))))\nif K == 0:\n    return",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "return CALIBRATOR_REGISTRY[name](**kwargs)  # type: ignore",
+      "after": "return CALIBRATOR_REGISTRY[name]()  # safer: do not pass kwargs unless constructors accept them",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "frozen_warnings = self.validate_frozen(params)\nfor w in frozen_warnings:\n    print(f\"[ParamsAdapter] Warning: {w}\", file=sys.stderr)",
+      "after": "frozen_warnings = self.validate_frozen(params)\nfor k, msg in (frozen_warnings or {}).items():\n    print(f\"[ParamsAdapter] Warning: {msg}\", file=sys.stderr)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "start, end = window\nsim.run(start_day=0, end_day=end, time_budget_sec=time_budget)",
+      "after": "start, end = window\nsim.run(start_day=start, end_day=end, time_budget_sec=time_budget)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "pm.persist_used(os.path.join(ARTIFACTS_DIR, \"results\", \"parameters_used.json\"))",
+      "after": "# Ensure persisted params reflect calibrated run\npm.set_values(**sim.get_params())\npm.persist_used(os.path.join(ARTIFACTS_DIR, \"results\", \"parameters_used.json\"))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "sign_intensity = 1.0 if intensity >= 0 else -1.0\npi.trust_policy = clamp(\n    pi.trust_policy + trust_update_rate * sign_intensity * misinformation_factor, -2.0, 2.0\n)",
+      "after": "# Update trust toward a bounded target derived from signal\n# target in [-1,1] via tanh, then map to [-2,2]\nraw_target = math.tanh(intensity * (1.0 - misinformation_fraction))\ntarget = 2.0 * raw_target  # [-2,2]\npi.trust_policy = clamp(\n    (1.0 - trust_update_rate) * pi.trust_policy + trust_update_rate * target,\n    -2.0,\n    2.0,\n)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def mape(y_true: List[float], y_pred: List[float], epsilon: float = 1.0) -> Optional[float]:",
+      "after": "def mape(y_true: List[float], y_pred: List[float], epsilon: float = 1e-6) -> Optional[float]:",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "FAST_MODE = (\n    os.environ.get(\"FAST_MODE\", \"1\") == \"1\"\n    or os.environ.get(\"SAND_TEST\", \"0\") == \"1\"\n)",
+      "after": "FAST_MODE = (\n    os.environ.get(\"FAST_MODE\", \"0\") == \"1\"\n    or os.environ.get(\"SAND_TEST\", \"0\") == \"1\"\n)",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent iteration replaced a stub with a full-featured simulation engine, added sanitization, FAST_MODE/IO guards, calibration registry, and a robust orchestrator that emits JSON. These are strong improvements. Minor issues were introduced or left unresolved: get_calibrator may pass kwargs to constructors, warnings printing lacks messages, evaluation windowing starts from 0, and trust dynamics drift remains.",
+    "positive_impacts": [
+      "Restored complete simulation pipeline (entities, modules, orchestration).",
+      "Added JSON sanitization to prevent NaN/Inf serialization errors.",
+      "Implemented FAST_MODE/SKIP_IO to avoid sandbox timeouts.",
+      "Introduced pluggable calibration architecture with adapters and registries.",
+      "Guarded metrics against invalid values and added extended metrics."
+    ],
+    "negative_impacts": [
+      "Potential TypeError in get_calibrator when passing kwargs to constructors without **kwargs.",
+      "Warning messages from ParamsAdapter are less informative (keys only).",
+      "Evaluation does not honor window start, biasing metrics.",
+      "Network rewiring cannot be fully disabled due to K>=1 guard (pre-existing but still present).",
+      "Trust dynamics can drift monotonically upward."
+    ],
+    "suggestions": [
+      "Fix rewiring K calculation to allow zero rewiring.",
+      "Change get_calibrator to instantiate without kwargs or make calibrators accept **kwargs.",
+      "Print full frozen warning messages (key and text).",
+      "Run evaluation from the specified window start_day.",
+      "Persist parameters_used after syncing from simulation.get_params().",
+      "Refine trust update to be bidirectional and bounded; lower MAPE epsilon for sensitivity.",
+      "Optionally default FAST_MODE to 0 to avoid unintended downscaling outside sandbox."
+    ]
+  }
+}

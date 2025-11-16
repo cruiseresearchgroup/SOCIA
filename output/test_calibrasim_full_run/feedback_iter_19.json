@@ -1,0 +1,212 @@
+{
+  "summary": "The simulation is functionally complete and robust in many areas (parameter registry, calibration pipeline, evaluation slicing, JSON sanitization). The main risks are performance and IO bloat due to saving large per-agent arrays, and a purity violation in ObservationAggregator.forward that mutates global state. There are also minor robustness gaps around calibrator config handling and opportunities to improve computational efficiency and model realism. Addressing these will improve correctness, scalability, and data alignment.",
+  "critical_issues": [
+    {
+      "issue": "Heavy per-agent arrays are saved in daily IO, leading to very large artifacts and slow IO.",
+      "impact": "For N=2000 and T=120, artifacts for module IO can be hundreds of MBs, slowing runs, exhausting storage, and potentially causing timeouts. This also hinders CI and repeated calibration trials.",
+      "solution": "Introduce parameters save_heavy_io (default False) and io_agent_sample_n (default 100). When save_heavy_io is False, drop keys with large lists (e.g., signals.external_influence_per_person, people.adopted.*) from IO; alternatively, store only aggregates and a sample slice of agents.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "ObservationAggregator.forward mutates state by appending to state['observables'], violating the 'pure forward' design.",
+      "impact": "Side effects from module forward can cause double-counting or inconsistent state if the module is re-run or if future refactors assume forwards are pure. It also goes against the stated scheduler design that commits updates centrally.",
+      "solution": "Make ObservationAggregator.forward emit raw values via buffers only (e.g., observable.raw_adoption_rate, observable.raw_new_adoptions) and do all appends in Simulation.run commit.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Calibrator config kwargs are passed through unvalidated to constructors.",
+      "impact": "A mis-specified JSON config may crash with a TypeError, breaking runs.",
+      "solution": "Validate and filter kwargs using inspect.signature; catch TypeError, fallback to default constructor, and log a warning.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Neighbor social fraction computation is O(N * window * degree), potentially expensive for large N/degree.",
+      "impact": "Scaling to larger populations or windows will result in slow simulations and timeouts.",
+      "solution": "Cache per-day neighbor adoption ratios, or use numpy vectorization when available. Optionally reduce window for large N automatically.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Potential ambiguity in time_since_adoption logic for relapsed agents in BehaviorDecayAndMemory.",
+      "impact": "Using <= 0 to detect 'never adopted' can also include newly relapsed (0), altering habit baseline unfairly and affecting relapse dynamics.",
+      "solution": "Track a separate ever_adopted flag or initialize time_since_adoption for never-adopted to a distinct sentinel (e.g., -10^6) and check that sentinel only.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "JSON parsing errors can still surface if external configs are malformed (e.g., parameter_definitions.json, calibrator configs).",
+      "impact": "Runs fail early with cryptic JSON parse errors.",
+      "solution": "Harden JSON loads with try/except, return defaults and print clear warnings (already done in some places; extend to calibrator config and parameters file).",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Social influence memory",
+      "current_approach": "Uniform average of neighbor adoption over a fixed window.",
+      "suggested_approach": "Use exponential decay (EMA) over neighbor adoption ratios to better emulate recency effects; optionally, weight by neighbor degree or influencer status.",
+      "expected_benefit": "More realistic adoption dynamics and better fit to real-world diffusion curves where recent behavior weighs more."
+    },
+    {
+      "aspect": "External media/policy signals",
+      "current_approach": "Periodic pulse with fixed interval/duration; degree and community targeting.",
+      "suggested_approach": "Allow time-varying schedules from file or spline, and separate media vs policy channels with independent reach and intensity; add random shocks.",
+      "expected_benefit": "Closer alignment to real campaigns and policy interventions; improves ability to match peaks and plateaus."
+    },
+    {
+      "aspect": "Relapse dynamics",
+      "current_approach": "Relapse probability scales with (1 - habit) and fatigue with simple linear updates.",
+      "suggested_approach": "Use a logistic function of habit, fatigue, and days since adoption; add hysteresis (e.g., minimum adoption duration before relapse can occur).",
+      "expected_benefit": "Smoother and more realistic persistence/relapse behavior, better temporal calibration."
+    },
+    {
+      "aspect": "Heterogeneity",
+      "current_approach": "Thresholds correlate with degree; influencers are top degree.",
+      "suggested_approach": "Introduce heterogeneity in susceptibility and media exposure, optionally correlated with degree/community; add household-level social norms affecting thresholds.",
+      "expected_benefit": "Captures observed variation across subgroups and communities; improves fit to stratified data."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "Simulation.run (daily IO handling)",
+      "modification": "Add save_heavy_io and io_agent_sample_n parameters; drop or sample heavy arrays from daily IO; include means/counts instead.",
+      "reason": "Reduces artifact size and speeds up runs/calibration; avoids timeouts.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "ObservationAggregator.forward",
+      "modification": "Make forward pure: do not append to state; emit raw values and let Simulation.run commit append.",
+      "reason": "Aligns with scheduler design; avoids side effects and potential double counting.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "get_calibrator()",
+      "modification": "Filter kwargs with inspect.signature to avoid TypeError; catch and warn on invalid configs.",
+      "reason": "Improves robustness with user-provided JSON configs.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "InfluencePropagation._neighbor_social_fraction",
+      "modification": "Cache neighbor counts and precompute per-day neighbor adoption ratios; optionally vectorize with numpy.",
+      "reason": "Improves performance for larger N and windows.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "BehaviorDecayAndMemory.forward",
+      "modification": "Use a separate ever_adopted flag or sentinel to disambiguate 'never adopted' from 'relapsed today' for baseline habit logic.",
+      "reason": "Eliminates unintended habit resets; stabilizes relapse behavior.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "load_parameter_definitions / parse_cli",
+      "modification": "Add definitions and CLI flags for save_heavy_io and io_agent_sample_n; clamp ranges.",
+      "reason": "Expose IO control to users and CI; default to safe values.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "Misc functions",
+      "modification": "Remove redundant 'pass' statements preceding executable code.",
+      "reason": "Improves clarity; no functional change.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Time-to-peak in new adoptions",
+      "current_gap": "Peaks may not align with ground-truth due to fixed pulse interval/duration.",
+      "suggestion": "Fit or read a time-varying media/policy schedule; add a weekend/seasonality multiplier; allow calibrator to search pulse timings."
+    },
+    {
+      "metric": "Adoption rate by community",
+      "current_gap": "Uniform community multipliers may not match real subgroup heterogeneity.",
+      "suggestion": "Estimate per-community baseline multipliers from data or allow calibrator to learn a small number of grouped multipliers."
+    },
+    {
+      "metric": "Relapse plateau",
+      "current_gap": "Simple linear fatigue and relapse probabilities may over/under-shoot plateaus.",
+      "suggestion": "Use logistic relapse model with hysteresis and different regimes for early vs late adopters; calibrate habit decay rate by cohorts."
+    },
+    {
+      "metric": "Reporting lag and smoothing",
+      "current_gap": "Single lag and SMA may not match reporting artifacts.",
+      "suggestion": "Allow separate smoothing kernels (EMA, median) and time-varying lag; calibrate lag separately for rate vs incident curves."
+    }
+  ],
+  "prioritized_actions": [
+    "Add save_heavy_io and io_agent_sample_n controls; default to not saving heavy arrays.",
+    "Make ObservationAggregator.forward pure; move state appends to Simulation.run commit.",
+    "Harden get_calibrator() to validate config kwargs against constructor signature.",
+    "Optimize _neighbor_social_fraction with caching/vectorization to improve scalability.",
+    "Disambiguate 'never adopted' vs 'relapsed' in habit baseline logic using an ever_adopted flag.",
+    "Add EMA-based social memory and optional influencer-weighting.",
+    "Expose time-varying media/policy schedules and allow calibrator to fit timing."
+  ],
+  "additional_comments": "The global call to main() at file end is correct for the sandbox. The JSON sanitization via safe_json_dump is solid and should prevent NaN-related write errors. Consider adding a dry-run mode to skip calibration for CI smoke tests.",
+  "code_snippets": [
+    {
+      "file": "Simulation.run (daily IO collection)",
+      "before": "io_out = dict(out)\nif not self.state.get(\"save_micro_io\", False):\n    io_out.pop(\"micro.transitions\", None)\ndaily_io[m.name] = io_out",
+      "after": "io_out = dict(out)\n# Drop micro transitions unless explicitly requested\nif not self.state.get(\"save_micro_io\", False):\n    io_out.pop(\"micro.transitions\", None)\n# Drop or sample heavy arrays unless explicitly requested\nif not bool(self.params.values.get(\"save_heavy_io\", False)):\n    for k in [\n        \"signals.external_influence_per_person\",\n        \"people.adopted.proposed\",\n        \"people.adopted.final\"\n    ]:\n        if k in io_out:\n            # keep only aggregates\n            v = io_out.pop(k)\n            if isinstance(v, list):\n                io_out[k + \".mean\"] = float(sum(v) / max(1, len(v)))\n                n = int(self.params.values.get(\"io_agent_sample_n\", 100))\n                io_out[k + \".sample\"] = v[:max(0, min(n, len(v)))]\ndaily_io[m.name] = io_out",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "ObservationAggregator.forward",
+      "before": "state[\"observables\"][\"raw_adoption_rate\"].append(raw_rate)\nstate[\"observables\"][\"raw_new_adoptions\"].append(new_adopt)\n# compute smoothed values\nsmoothed_rate_series = moving_average(state[\"observables\"][\"raw_adoption_rate\"], smoothing_window)\nsmoothed_new_series = moving_average(state[\"observables\"][\"raw_new_adoptions\"], smoothing_window)",
+      "after": "raw_rate = sum(adopted_today) / float(N) if N > 0 else 0.0\n# Emit raw values; Simulation.run will append and smooth centrally\nreturn {\n    \"observable.raw_adoption_rate\": float(raw_rate),\n    \"observable.raw_new_adoptions\": float(new_adopt),\n    # Optionally also emit by-community snapshot for the day\n    \"observable.adoption_rate_by_community\": by_comm_rate\n}",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "Simulation.run (commit observables)",
+      "before": "rate_emit = float(buffers.get(\"observable.adoption_rate_daily\", 0.0))\nnew_emit = float(buffers.get(\"observable.new_adoptions_daily\", 0.0))\nself.state[\"observables\"][\"adoption_rate_daily\"].append(rate_emit)\nself.state[\"observables\"][\"new_adoptions_daily\"].append(new_emit)",
+      "after": "# Append raw values for smoothing\nraw_rate = float(buffers.get(\"observable.raw_adoption_rate\", 0.0))\nraw_new = float(buffers.get(\"observable.raw_new_adoptions\", 0.0))\nself.state[\"observables\"][\"raw_adoption_rate\"].append(raw_rate)\nself.state[\"observables\"][\"raw_new_adoptions\"].append(raw_new)\n# Smooth and lag\nsw = int(self.params.values.get(\"smoothing_window_days\", 3))\nlag = int(self.params.values.get(\"report_lag_days\", 1))\nrate_series = moving_average(self.state[\"observables\"][\"raw_adoption_rate\"], sw)\nnew_series = moving_average(self.state[\"observables\"][\"raw_new_adoptions\"], sw)\nidx_emit = len(rate_series) - 1 - lag\nrate_emit = float(rate_series[idx_emit]) if idx_emit >= 0 else 0.0\nnew_emit = float(new_series[idx_emit]) if idx_emit >= 0 else 0.0\nself.state[\"observables\"][\"adoption_rate_daily\"].append(rate_emit)\nself.state[\"observables\"][\"new_adoptions_daily\"].append(new_emit)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "get_calibrator()",
+      "before": "kwargs: Dict[str, Any] = {}\nif config_path and os.path.exists(config_path):\n    try:\n        with open(config_path, \"r\", encoding=\"utf-8\") as f:\n            cfg = json.load(f)\n            if isinstance(cfg, dict):\n                kwargs = cfg\n    except Exception:\n        kwargs = {}\nreturn CALIBRATOR_REGISTRY[name](**kwargs)",
+      "after": "kwargs: Dict[str, Any] = {}\nif config_path and os.path.exists(config_path):\n    try:\n        with open(config_path, \"r\", encoding=\"utf-8\") as f:\n            cfg = json.load(f)\n            if isinstance(cfg, dict):\n                kwargs = cfg\n    except Exception:\n        kwargs = {}\nCtor = CALIBRATOR_REGISTRY[name]\ntry:\n    import inspect\n    sig = inspect.signature(Ctor.__init__)\n    valid = {k: v for k, v in kwargs.items() if k in sig.parameters}\n    return Ctor(**valid)\nexcept Exception:\n    # Fallback on invalid config\n    return Ctor()",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "load_parameter_definitions()",
+      "before": "return definitions",
+      "after": "if \"save_heavy_io\" not in definitions:\n    definitions[\"save_heavy_io\"] = ParameterDefinition(\n        key=\"save_heavy_io\", dtype=\"bool\", default=False, owner_module=\"global\",\n        description=\"If True, persist heavy per-agent arrays in IO; else store aggregates/samples.\")\nif \"io_agent_sample_n\" not in definitions:\n    definitions[\"io_agent_sample_n\"] = ParameterDefinition(\n        key=\"io_agent_sample_n\", dtype=\"int\", default=100, low=0, high=10000, owner_module=\"global\",\n        description=\"Number of agents to include in sampled IO arrays.\")\nreturn definitions",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "parse_cli()",
+      "before": "parser.add_argument(\"--micro-sample-frac\", type=float, default=None, help=\"Sampling fraction for micro transitions (0.0-1.0).\")",
+      "after": "parser.add_argument(\"--micro-sample-frac\", type=float, default=None, help=\"Sampling fraction for micro transitions (0.0-1.0).\")\nparser.add_argument(\"--save-heavy-io\", action=\"store_true\", help=\"Persist heavy per-agent arrays in IO (off by default).\")\nparser.add_argument(\"--io-agent-sample-n\", type=int, default=None, help=\"Number of agent entries to include when sampling heavy arrays in IO.\")",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "main() (applying IO flags)",
+      "before": "if micro_updates:\n    micro_warn = registry.set_params(**micro_updates)\n    if micro_warn:\n        print(\"Micro toggle warnings:\", micro_warn)",
+      "after": "if micro_updates:\n    micro_warn = registry.set_params(**micro_updates)\n    if micro_warn:\n        print(\"Micro toggle warnings:\", micro_warn)\n# Heavy IO flags\nio_updates: Dict[str, Any] = {}\nif args.save_heavy_io:\n    io_updates[\"save_heavy_io\"] = True\nif args.io_agent_sample_n is not None:\n    io_updates[\"io_agent_sample_n\"] = int(args.io_agent_sample_n)\nif io_updates:\n    io_warn = registry.set_params(**io_updates)\n    if io_warn:\n        print(\"IO toggle warnings:\", io_warn)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "BehaviorDecayAndMemory.forward (ever_adopted)",
+      "before": "if state[\"people\"][\"time_since_adoption\"][i] <= 0:\n    habit[i] = max(habit[i], min(1.0, habit_init * 0.5))",
+      "after": "ever = state[\"people\"].get(\"ever_adopted\")\nif ever is not None:\n    if not ever[i]:\n        habit[i] = max(habit[i], min(1.0, habit_init * 0.5))",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent iteration improves reproducibility, evaluation robustness, cumulative adoption computation, and adds micro-transition controls. It also sanitizes JSON and strengthens parameter handling. However, it still saves heavy IO arrays and ObservationAggregator.forward continues to mutate state.",
+    "positive_impacts": [
+      "Cumulative adoption computation moved to central commit; avoids double-counting.",
+      "Windowed evaluation slicing prevents length mismatch errors.",
+      "ParameterRegistry now clamps and casts types; improved safety.",
+      "Micro-transition capture is optional and sub-sampled; reduces data bloat."
+    ],
+    "negative_impacts": [
+      "Heavy per-agent arrays are still stored in IO by default, risking large artifacts.",
+      "ObservationAggregator.forward still appends to state, breaking purity and design consistency."
+    ],
+    "suggestions": [
+      "Add save_heavy_io and io_agent_sample_n controls and default to dropping heavy arrays from IO.",
+      "Purify ObservationAggregator.forward; move all state appends into Simulation.run.",
+      "Harden get_calibrator() against invalid kwargs using inspect.signature.",
+      "Consider caching or vectorizing neighbor social fraction for performance."
+    ]
+  }
+}

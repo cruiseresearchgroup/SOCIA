@@ -1,0 +1,1000 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion of innovation model on a social network with marketing adstock, opinion dynamics, and time-bound policy incentives, producing daily adoption observables for calibration and prediction.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "segment",
+        "income",
+        "neighbors",
+        "degree",
+        "opinion",
+        "threshold",
+        "adopted",
+        "days_since_adoption",
+        "marketing_memory",
+        "susceptibility",
+        "price_sensitivity"
+      ],
+      "behaviors": [
+        "perceive_marketing",
+        "interact_with_neighbors",
+        "update_opinion",
+        "decide_adoption",
+        "possible_disadoption"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "segment_distribution": {
+            "early": 0.16,
+            "majority": 0.5,
+            "laggard": 0.34
+          },
+          "initial_adoption_rate": 0.02,
+          "initial_opinion_mean": 0.3,
+          "initial_opinion_std": 0.15
+        }
+      }
+    },
+    {
+      "name": "MarketingCampaign",
+      "attributes": [
+        "daily_spend_total",
+        "daily_target_bias_early",
+        "adstock_decay",
+        "base_reach"
+      ],
+      "behaviors": [
+        "compute_exposure",
+        "update_adstock"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "source_file": "marketing.csv",
+          "fields": [
+            "day",
+            "spend_total",
+            "target_bias_early"
+          ]
+        }
+      }
+    },
+    {
+      "name": "PolicyEnvironment",
+      "attributes": [
+        "enabled",
+        "start_day",
+        "end_day",
+        "incentive_amount",
+        "target_segment_code"
+      ],
+      "behaviors": [
+        "emit_incentive_signal"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "source_file": "policy.csv",
+          "fields": [
+            "enabled",
+            "start_day",
+            "end_day",
+            "incentive_amount",
+            "target_segment_code"
+          ]
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "SocialNetworkBuilder",
+      "description": "Constructs the social network with configurable degree, rewiring, and homophily/assortativity across segments.",
+      "inputs": [
+        "population.Persons",
+        "initial_segments",
+        "global.random_seed"
+      ],
+      "outputs": [
+        "signals.network_graph",
+        "agent.neighbors",
+        "agent.degree"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "steps",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "on_initialize:\n  set_rng(global.random_seed)\n  N = len(population.Persons)\n  # derive per-node target degrees with heterogeneity\n  degrees = sample_lognormal_mean(network.avg_degree, network.degree_heterogeneity, N)\n  # create base small-world graph\n  G = watts_strogatz_like(N, round(mean(degrees)), network.rewiring_prob)\n  # increase/modify edges for homophily by segment\n  for each edge (i,j) in G:\n    if segment(i) != segment(j) and rand() < network.homophily_strength:\n      attempt_rewire_to_same_segment(i or j)\n  # apply segment assortativity constraint via MCMC edge swaps\n  while measured_assortativity(G, segment) < network.segment_assortativity and budget_not_exceeded:\n    perform_segment_preserving_edge_swap_increasing_assortativity(G)\n  # triadic closure\n  for each node i:\n    for each pair (u,v) among neighbors(i):\n      if not edge(u,v) and rand() < network.triadic_closure_prob:\n        add_edge(u,v)\n  assign_neighbors_and_degree(G -> agents)\n  emit signals.network_graph = G",
+        "notes": [
+          "Runs once at t=0",
+          "Measured assortativity uses Newman assortativity for categorical attributes",
+          "Use NetworkX for graph construction"
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy"
+      ],
+      "module_parameters": [
+        "network.avg_degree",
+        "network.rewiring_prob",
+        "network.homophily_strength",
+        "network.degree_heterogeneity",
+        "network.triadic_closure_prob",
+        "network.segment_assortativity"
+      ]
+    },
+    {
+      "name": "MarketingExposure",
+      "description": "Computes adstocked marketing exposure per agent, with segment-targeting bias and noise.",
+      "inputs": [
+        "day",
+        "MarketingCampaign.daily_spend_total",
+        "MarketingCampaign.daily_target_bias_early",
+        "agent.segment"
+      ],
+      "outputs": [
+        "agent.marketing_memory",
+        "signals.mean_exposure"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  seg_bias = 1.0\n  if agent.segment == 'early':\n    seg_bias = marketing.targeting_bias_to_early_adopters\n  exposure_raw = marketing.base_reach * marketing.spend_scale * MarketingCampaign.daily_spend_total[day] * seg_bias / population_size\n  noise = normal(0, marketing.noise_std)\n  exposure = max(0, exposure_raw + noise)\n  # adstock\n  agent.marketing_memory = (1 - marketing.decay_rate) * agent.marketing_memory + exposure\ncompute signals.mean_exposure = mean_i(agent.marketing_memory)",
+        "notes": [
+          "Adstock is a simple geometric decay",
+          "Exposure scaled per capita to stabilize across population sizes"
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "pandas"
+      ],
+      "module_parameters": [
+        "marketing.base_reach",
+        "marketing.spend_scale",
+        "marketing.targeting_bias_to_early_adopters",
+        "marketing.decay_rate",
+        "marketing.noise_std"
+      ]
+    },
+    {
+      "name": "OpinionDynamics",
+      "description": "Updates agents' opinions via social influence (Friedkin-Johnsen style), self-bias, confirmation bias, and noise.",
+      "inputs": [
+        "signals.network_graph",
+        "agent.opinion",
+        "agent.neighbors",
+        "agent.adopted",
+        "agent.marketing_memory"
+      ],
+      "outputs": [
+        "agent.opinion"
+      ],
+      "dependencies": [
+        "SocialNetworkBuilder",
+        "MarketingExposure"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  neigh = neighbors(i)\n  if |neigh| > 0:\n    weights = [1.0 + (opinion.post_adoption_influence_boost - 1.0) * adopted(j) for j in neigh]\n    o_neigh = sum_j(weights_j * opinion(j)) / sum_j(weights_j)\n  else:\n    o_neigh = opinion(i)\n  o_self = opinion(i)\n  # marketing interpreted as external signal mapped to [0,1]\n  o_mkt = clamp(agent.marketing_memory / (agent.marketing_memory + 1.0), 0.0, 1.0)\n  w_social = opinion.social_influence_weight\n  w_self = opinion.self_bias_weight\n  w_ext = max(0.0, 1.0 - w_social - w_self)\n  o_raw = w_social * o_neigh + w_self * o_self + w_ext * o_mkt\n  # confirmation bias: pull toward prior if change is large\n  delta = o_raw - o_self\n  adj = delta * (1.0 - opinion.confirmation_bias_strength * abs(delta))\n  noise = normal(0, opinion.noise_std)\n  opinion(i) = clamp(o_self + adj + noise, 0.0, 1.0)",
+        "notes": [
+          "Weights normalized to sum to 1 with external signal taking residual weight",
+          "Post-adoption influence increases neighbors' weight"
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "opinion.social_influence_weight",
+        "opinion.self_bias_weight",
+        "opinion.confirmation_bias_strength",
+        "opinion.noise_std",
+        "opinion.post_adoption_influence_boost"
+      ]
+    },
+    {
+      "name": "PolicyScheduler",
+      "description": "Emits time-varying incentive signals that effectively reduce price for target segments.",
+      "inputs": [
+        "day"
+      ],
+      "outputs": [
+        "signals.price_adjustment_per_segment"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if policy.enabled and policy.start_day <= day <= policy.end_day:\n  for seg in ['early','majority','laggard']:\n    if policy.target_segment_code == 0 or (policy.target_segment_code == 1 and seg=='early') or (policy.target_segment_code == 2 and seg=='majority') or (policy.target_segment_code == 3 and seg=='laggard'):\n      price_adjustment[seg] = policy.incentive_amount\n    else:\n      price_adjustment[seg] = 0.0\nelse:\n  price_adjustment[seg] = 0.0 for all seg\nemit signals.price_adjustment_per_segment = price_adjustment",
+        "notes": [
+          "Segment codes: 0=all, 1=early, 2=majority, 3=laggard",
+          "Price adjustment is absolute currency-like amount"
+        ]
+      },
+      "requirements": [
+        "pandas"
+      ],
+      "module_parameters": [
+        "policy.enabled",
+        "policy.incentive_amount",
+        "policy.start_day",
+        "policy.end_day",
+        "policy.target_segment_code"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Computes adoption and disadoption events using thresholds and utility from social, marketing, and price factors.",
+      "inputs": [
+        "agent.opinion",
+        "agent.threshold",
+        "agent.marketing_memory",
+        "signals.price_adjustment_per_segment",
+        "agent.segment",
+        "agent.price_sensitivity",
+        "agent.adopted"
+      ],
+      "outputs": [
+        "agent.adopted",
+        "agent.days_since_adoption",
+        "signals.adoption_events"
+      ],
+      "dependencies": [
+        "MarketingExposure",
+        "OpinionDynamics",
+        "PolicyScheduler"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_events = []\nfor each agent i:\n  # effective price after incentive\n  eff_price = max(0.0, adoption.price - signals.price_adjustment_per_segment[agent.segment])\n  # utilities normalized to [0,1]\n  u_social = agent.opinion\n  u_marketing = clamp(agent.marketing_memory / (agent.marketing_memory + 1.0), 0.0, 1.0)\n  u_price = clamp(1.0 - agent.price_sensitivity * eff_price / (eff_price + 50.0), 0.0, 1.0)\n  # combined propensity\n  propensity = adoption.utility_social_weight * u_social + adoption.utility_marketing_weight * u_marketing + (1.0 - adoption.utility_social_weight - adoption.utility_marketing_weight) * u_price\n  # decision\n  if not agent.adopted and propensity >= agent.threshold:\n    agent.adopted = true\n    agent.days_since_adoption = 0\n    adoption_events.append(i)\n  elif agent.adopted:\n    agent.days_since_adoption += 1\n    if rand() < adoption.disadoption_rate:\n      agent.adopted = false\n      agent.days_since_adoption = 0\nemit signals.adoption_events = adoption_events",
+        "notes": [
+          "Thresholds are heterogeneous across agents",
+          "Disadoption is rare but allows churn"
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "adoption.base_threshold",
+        "adoption.threshold_std",
+        "adoption.price_sensitivity",
+        "adoption.utility_marketing_weight",
+        "adoption.utility_social_weight",
+        "adoption.disadoption_rate",
+        "adoption.price"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily and cumulative adoption metrics and optional smoothing.",
+      "inputs": [
+        "signals.adoption_events",
+        "agent.adopted"
+      ],
+      "outputs": [
+        "observable.daily_new_adoptions_count",
+        "observable.cumulative_adoption_rate"
+      ],
+      "dependencies": [
+        "AdoptionDecision"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "daily_new = length(signals.adoption_events)\nif aggregator.smoothing_window > 1:\n  daily_new_smoothed = moving_average(daily_new, window=aggregator.smoothing_window)\nelse:\n  daily_new_smoothed = daily_new\ncum_rate = mean_i(agent.adopted == true)\nemit observable.daily_new_adoptions_count = daily_new_smoothed\nemit observable.cumulative_adoption_rate = cum_rate",
+        "notes": [
+          "Smoothing uses trailing window",
+          "Cumulative rate is fraction adopted"
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "aggregator.smoothing_window"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "global.random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Random seed for reproducibility.",
+      "frozen": false
+    },
+    {
+      "key": "global.population_size",
+      "dtype": "int",
+      "default": 10000,
+      "bounds": {
+        "low": 1000,
+        "high": 200000
+      },
+      "owner_module": "global",
+      "description": "Number of agents in the simulation.",
+      "frozen": false
+    },
+    {
+      "key": "global.time_horizon",
+      "dtype": "int",
+      "default": 90,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Number of simulated days.",
+      "frozen": false
+    },
+    {
+      "key": "global.time_step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 7.0
+      },
+      "owner_module": "global",
+      "description": "Time step length in days.",
+      "frozen": true
+    },
+    {
+      "key": "global.prediction_start_day",
+      "dtype": "int",
+      "default": 30,
+      "bounds": {
+        "low": 1,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Start day for prediction period.",
+      "frozen": false
+    },
+    {
+      "key": "global.prediction_end_day",
+      "dtype": "int",
+      "default": 39,
+      "bounds": {
+        "low": 2,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "End day for prediction period.",
+      "frozen": false
+    },
+    {
+      "key": "init.segment_prob_early",
+      "dtype": "float",
+      "default": 0.16,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Probability of an agent being in the early adopter segment.",
+      "frozen": false
+    },
+    {
+      "key": "init.segment_prob_majority",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Probability of an agent being in the majority segment.",
+      "frozen": false
+    },
+    {
+      "key": "init.segment_prob_laggard",
+      "dtype": "float",
+      "default": 0.34,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Probability of an agent being in the laggard segment.",
+      "frozen": false
+    },
+    {
+      "key": "init.initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of agents marked as adopted at t=0.",
+      "frozen": false
+    },
+    {
+      "key": "init.initial_opinion_mean",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial opinion distribution.",
+      "frozen": false
+    },
+    {
+      "key": "init.initial_opinion_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std dev of initial opinion distribution.",
+      "frozen": false
+    },
+    {
+      "key": "network.avg_degree",
+      "dtype": "float",
+      "default": 8.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 50.0
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Average degree of the social network.",
+      "frozen": false
+    },
+    {
+      "key": "network.rewiring_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Rewiring probability for small-world network.",
+      "frozen": false
+    },
+    {
+      "key": "network.homophily_strength",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Probability weight to rewire edges to same-segment nodes.",
+      "frozen": false
+    },
+    {
+      "key": "network.degree_heterogeneity",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 3.0
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Scale factor for degree variance (lognormal).",
+      "frozen": false
+    },
+    {
+      "key": "network.triadic_closure_prob",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Probability of adding edges between neighbors of a node.",
+      "frozen": false
+    },
+    {
+      "key": "network.segment_assortativity",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "SocialNetworkBuilder",
+      "description": "Target assortativity by segment enforced by edge swaps.",
+      "frozen": false
+    },
+    {
+      "key": "marketing.base_reach",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "MarketingExposure",
+      "description": "Baseline daily reach per unit spend (per capita).",
+      "frozen": false
+    },
+    {
+      "key": "marketing.spend_scale",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "MarketingExposure",
+      "description": "Scale factor on marketing spend input.",
+      "frozen": false
+    },
+    {
+      "key": "marketing.targeting_bias_to_early_adopters",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.5,
+        "high": 3.0
+      },
+      "owner_module": "MarketingExposure",
+      "description": "Multiplier of exposure for early adopters relative to others.",
+      "frozen": false
+    },
+    {
+      "key": "marketing.decay_rate",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MarketingExposure",
+      "description": "Adstock decay rate per day.",
+      "frozen": false
+    },
+    {
+      "key": "marketing.noise_std",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "MarketingExposure",
+      "description": "Std dev of Gaussian noise in exposure.",
+      "frozen": false
+    },
+    {
+      "key": "opinion.social_influence_weight",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Weight on neighbors' opinions.",
+      "frozen": false
+    },
+    {
+      "key": "opinion.self_bias_weight",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Weight on own prior opinion.",
+      "frozen": false
+    },
+    {
+      "key": "opinion.confirmation_bias_strength",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Nonlinear dampening of large opinion changes.",
+      "frozen": false
+    },
+    {
+      "key": "opinion.noise_std",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Std dev of opinion noise.",
+      "frozen": false
+    },
+    {
+      "key": "opinion.post_adoption_influence_boost",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": 1.0,
+        "high": 2.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Multiplier on neighbors' influence if they have adopted.",
+      "frozen": false
+    },
+    {
+      "key": "policy.enabled",
+      "dtype": "bool",
+      "default": true,
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "PolicyScheduler",
+      "description": "Enable/disable policy incentives.",
+      "frozen": false
+    },
+    {
+      "key": "policy.incentive_amount",
+      "dtype": "float",
+      "default": 10.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 100.0
+      },
+      "owner_module": "PolicyScheduler",
+      "description": "Absolute incentive amount reducing effective price.",
+      "frozen": false
+    },
+    {
+      "key": "policy.start_day",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 200
+      },
+      "owner_module": "PolicyScheduler",
+      "description": "Day when incentives start.",
+      "frozen": false
+    },
+    {
+      "key": "policy.end_day",
+      "dtype": "int",
+      "default": 25,
+      "bounds": {
+        "low": 1,
+        "high": 300
+      },
+      "owner_module": "PolicyScheduler",
+      "description": "Day when incentives end.",
+      "frozen": false
+    },
+    {
+      "key": "policy.target_segment_code",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 3
+      },
+      "owner_module": "PolicyScheduler",
+      "description": "0=all, 1=early, 2=majority, 3=laggard.",
+      "frozen": false
+    },
+    {
+      "key": "adoption.base_threshold",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.2,
+        "high": 0.9
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean adoption threshold for agents.",
+      "frozen": false
+    },
+    {
+      "key": "adoption.threshold_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std dev of heterogeneous thresholds.",
+      "frozen": false
+    },
+    {
+      "key": "adoption.price_sensitivity",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Strength of price in utility calculation.",
+      "frozen": false
+    },
+    {
+      "key": "adoption.utility_marketing_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on marketing utility; remainder goes to price.",
+      "frozen": false
+    },
+    {
+      "key": "adoption.utility_social_weight",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on social utility.",
+      "frozen": false
+    },
+    {
+      "key": "adoption.disadoption_rate",
+      "dtype": "float",
+      "default": 0.001,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Daily probability of churn among adopters.",
+      "frozen": false
+    },
+    {
+      "key": "adoption.price",
+      "dtype": "float",
+      "default": 50.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 200.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "List price before incentives.",
+      "frozen": false
+    },
+    {
+      "key": "aggregator.smoothing_window",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Trailing window for smoothing daily new adoptions.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.daily_new_adoptions_count",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "count(AdoptionDecision.adoption_events)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:daily_new_adoptions"
+    },
+    {
+      "id": "observable.cumulative_adoption_rate",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:cumulative_adoption_rate"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_daily_new",
+      "inputs": [
+        "observable.daily_new_adoptions_count"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "RMSE_cumulative",
+      "inputs": [
+        "observable.cumulative_adoption_rate"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "TimeTo30",
+      "inputs": [
+        "observable.cumulative_adoption_rate"
+      ],
+      "definition": {
+        "type": "TimeToThreshold",
+        "config": {
+          "threshold": 0.3,
+          "unit": "days"
+        }
+      }
+    },
+    {
+      "name": "PeakError",
+      "inputs": [
+        "observable.daily_new_adoptions_count"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "compare": "value_and_time"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 10000,
+    "random_seed": 42,
+    "procedure": [
+      "Sample segments for each agent using init.segment_prob_*",
+      "Initialize opinions ~ TruncatedNormal(mean=init.initial_opinion_mean, sd=init.initial_opinion_std, bounds=[0,1])",
+      "Assign thresholds ~ TruncatedNormal(mean=adoption.base_threshold, sd=adoption.threshold_std, bounds=[0,1])",
+      "Set marketing_memory = 0 for all agents",
+      "Assign price_sensitivity per agent ~ Lognormal with mean=adoption.price_sensitivity and sd=0.2",
+      "Randomly mark a fraction init.initial_adoption_rate of agents as adopted; set days_since_adoption=0",
+      "Run SocialNetworkBuilder at t=0 to assign neighbors"
+    ]
+  },
+  "algorithms": {
+    "network_generation": "Watts\u2013Strogatz small-world with assortativity MCMC edge swaps and triadic closure.",
+    "opinion_update": "Friedkin\u2013Johnsen style convex combination with confirmation bias nonlinearity and Gaussian noise.",
+    "marketing_adstock": "Geometric adstock with daily decay; exposure scaled per capita.",
+    "adoption_decision": "Threshold crossing of combined utility from social, marketing, and price with optional churn.",
+    "policy_schedule": "Time-bounded step function outputting per-segment price adjustments."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and evaluation of adoption trajectories.",
+      "fields_used": [
+        "day",
+        "daily_new_adoptions",
+        "cumulative_adoption_rate"
+      ]
+    },
+    {
+      "name": "marketing.csv",
+      "purpose": "Exogenous marketing spend and targeting inputs.",
+      "fields_used": [
+        "day",
+        "spend_total",
+        "target_bias_early"
+      ]
+    },
+    {
+      "name": "policy.csv",
+      "purpose": "Policy incentive schedule inputs.",
+      "fields_used": [
+        "enabled",
+        "start_day",
+        "end_day",
+        "incentive_amount",
+        "target_segment_code"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "model/entities.py",
+        "description": "Entity class definitions (Person, MarketingCampaign, PolicyEnvironment)."
+      },
+      {
+        "name": "model/modules/network_builder.py",
+        "description": "Implements SocialNetworkBuilder."
+      },
+      {
+        "name": "model/modules/marketing.py",
+        "description": "Implements MarketingExposure and parsers for marketing.csv."
+      },
+      {
+        "name": "model/modules/opinion.py",
+        "description": "Implements OpinionDynamics."
+      },
+      {
+        "name": "model/modules/policy.py",
+        "description": "Implements PolicyScheduler and policy.csv ingestion."
+      },
+      {
+        "name": "model/modules/adoption.py",
+        "description": "Implements AdoptionDecision and event logging."
+      },
+      {
+        "name": "model/modules/aggregation.py",
+        "description": "Implements AdoptionAggregator and observable export."
+      },
+      {
+        "name": "runner.py",
+        "description": "Simulation loop orchestration, seeding, initialization, and I/O."
+      },
+      {
+        "name": "calibration/sbi.py",
+        "description": "Simulation-based inference utilities, priors from parameter bounds, and metric computation."
+      },
+      {
+        "name": "io/data_loader.py",
+        "description": "Load train_data.csv, marketing.csv, policy.csv."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_daily_new",
+    "RMSE_cumulative",
+    "TimeTo30",
+    "PeakError"
+  ]
+}

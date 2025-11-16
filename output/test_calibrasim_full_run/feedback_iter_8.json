@@ -1,0 +1,155 @@
+{
+  "summary": "The current iteration regressed catastrophically: the full simulation code was replaced by a trivial main() and a stray top-level text line 'Error: Request timed out.' that causes a SyntaxError. Additionally, previous iterations likely produced non-JSON-clean stdout due to logging to stdout, which explains the JSON parsing error seen by the orchestrator. Calibration defaults are heavy and can cause timeouts in sandboxed environments. This feedback details critical fixes (restore functional code, remove stray text, route logs to stderr, add a no-calibration mode, cap budgets), model improvements, and targeted code changes.",
+  "critical_issues": [
+    {
+      "issue": "Catastrophic regression: core simulation replaced with stub main() and stray text literal in file",
+      "impact": "Immediate SyntaxError prevents execution; entire simulation functionality lost",
+      "solution": "Restore the full simulation implementation from the previous working iteration; delete the literal 'Error: Request timed out.' line; keep the required direct main() call at the end",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Logs mixed into stdout corrupt JSON output consumed by the orchestrator",
+      "impact": "JSON parsing error ('Expecting ',' delimiter') when the orchestrator reads stdout that includes log lines before/after the printed JSON",
+      "solution": "Send logs to stderr instead of stdout (logging.basicConfig(stream=sys.stderr)); ensure the only stdout emission is the final json.dumps(summary) call",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Default calibration workflow (random_search with budget=20 + full-horizon runs) risks timeouts in sandbox",
+      "impact": "Execution hangs or times out during calibration; artifacts writing adds more IO overhead",
+      "solution": "Add a --no-calibration flag (default to no calibration in sandbox), reduce default budget to a small number (e.g., 3\u20135), and/or switch default to a fast heuristic (logit_head) when in quick-test; optionally skip heavy IO in sandbox by gating with a flag",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Artifacts and IO volume may be excessive in restricted environments",
+      "impact": "Slows execution, increases chance of hitting IO quotas/timeouts",
+      "solution": "Gate artifact writing with a flag (e.g., --emit-artifacts), or route to a temp dir; on default runs only write essential results and summary",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Potential non-deterministic stdout ordering between logs and summary",
+      "impact": "Even with stderr logging, interleaved output could still occur if misconfigured; risks parser failures",
+      "solution": "Explicitly flush logs to stderr before printing summary; ensure no print calls besides the final summary",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Calibration speed and stability",
+      "current_approach": "Random search over several parameters with budget=20, full IO artifact writing",
+      "suggested_approach": "Default to heuristic logit_head calibrator or reduce random_search budget (e.g., 3\u20135), and skip artifact writes unless explicitly requested",
+      "expected_benefit": "Avoids timeouts and reduces execution time while still delivering reasonable parameter values"
+    },
+    {
+      "aspect": "Policy and logging interplay with JSON output",
+      "current_approach": "logging.basicConfig(stream=sys.stdout) mixes logs into stdout",
+      "suggested_approach": "Route logging to stderr and ensure the final printed summary is the only stdout emission",
+      "expected_benefit": "Prevents JSON parsing failures upstream"
+    },
+    {
+      "aspect": "Sandbox compatibility",
+      "current_approach": "Always calibrates and writes many artifacts",
+      "suggested_approach": "Introduce runtime flags to disable calibration and heavy IO; ensure quick-test defaults",
+      "expected_benefit": "Improves reliability in sandboxed CI and execution environments"
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation_code_iter_7.py",
+      "modification": "Remove stray top-level text and restore the full simulation implementation from the previous iteration",
+      "reason": "Top-level literal text causes SyntaxError; current stub main() is non-functional",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_7.py",
+      "modification": "Change logging.basicConfig(stream=sys.stderr) so logs do not corrupt stdout JSON",
+      "reason": "Eliminates JSON parsing errors in orchestrator consuming stdout",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_7.py",
+      "modification": "Add --no-calibration flag and use it to skip calibration; lower default random_search budget to 3 in sandbox/quick-test",
+      "reason": "Prevents timeouts; reduces runtime and IO pressure",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_7.py",
+      "modification": "Gate artifact writing behind a flag (e.g., --emit-artifacts) and default to minimal writes",
+      "reason": "Improves performance and compatibility with restricted environments",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_7.py",
+      "modification": "Ensure the final stdout contains only json.dumps(summary) and flush stderr before printing; avoid any print() elsewhere",
+      "reason": "Guarantees parser-friendly output",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Effective reproduction number (Rt)",
+      "current_gap": "Rt estimate relies on naive incidence ratio at serial interval without smoothing over noise and without location-specific transmission calibration",
+      "suggestion": "Calibrate base_transmission_probability_per_contact per location type to match target Rt trajectories; use a smoothed incidence baseline (7-day moving average) for Rt calculation"
+    },
+    {
+      "metric": "Adoption disparity across political identity",
+      "current_gap": "Static political alignment weights; not informed by external survey data",
+      "suggestion": "Parameterize info alignment and compliance propensity distributions by identity, and calibrate to observed survey adoption rates over time"
+    },
+    {
+      "metric": "Retail stockouts and prices",
+      "current_gap": "Simplified price elasticity and restock model",
+      "suggestion": "Fit price_elasticity and restock_rate_per_type using available retail sales/inventory proxies; add occasional supply shocks to match observed stockout frequencies"
+    }
+  ],
+  "prioritized_actions": [
+    "Remove stray 'Error: Request timed out.' line and restore the full simulation code",
+    "Route logging to stderr and ensure only JSON is printed to stdout",
+    "Add --no-calibration flag and default to no calibration in sandbox/quick-test; reduce calibration budgets",
+    "Gate artifact writes behind a flag and minimize IO by default",
+    "Re-run syntax and smoke tests (quick-test) to verify stable execution and valid JSON output"
+  ],
+  "additional_comments": "The previous iteration contained a rich and reasonably modular simulation engine that was workable with minor adjustments. The current iteration wiped that out. Focus first on restoring functionality, then on making the execution mode explicitly sandbox-friendly. Once execution is stable, we can iterate on model fidelity and calibration strategies.",
+  "code_snippets": [
+    {
+      "file": "simulation_code_iter_7.py",
+      "before": "def main():\n    pass\n\nError: Request timed out.\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n",
+      "after": "# Logging configuration: send logs to stderr, not stdout\nlogging.basicConfig(\n    level=logging.INFO,\n    format=\"%(asctime)s | %(levelname)s | %(message)s\",\n    stream=sys.stderr,\n)\nlogger = logging.getLogger(\"mask_sim\")\n\n# ... [restore full simulation implementation here] ...\n\ndef main() -> None:\n    args = parse_cli()\n    params = load_params(args.param_file)\n    param_defs = load_param_definitions(os.path.join(PROJECT_ROOT, \"parameter_definitions.json\"), params)\n    if args.quick_test:\n        params[\"num_agents\"] = 200\n        params[\"time_horizon_days\"] = 5\n        params[\"disease_module_enabled\"] = True\n        args.budget = min(args.budget, 3)\n        logger.info(\"Quick test mode: num_agents=200, time_horizon_days=5\")\n    params = apply_overrides(params, param_defs, args.overrides)\n    sim = Simulation(params, param_defs)\n    total_days = int(params.get(\"time_horizon_days\", 60))\n\n    # Optional calibration\n    if not getattr(args, \"no_calibration\", False):\n        calib = get_calibrator(args.calibrator, args.calibrator_config)\n        train_days, _ = temporal_holdout_split(total_days)\n        train_window = (train_days[0], train_days[-1] + 1)\n        fitted = calib.fit(bundle=None, simulator=sim, evaluator=evaluate_params,\n                           train_window=train_window,\n                           seed=int(params.get(\"seed_random_state\", 42)),\n                           budget=args.budget,\n                           artifacts_dir=args.artifacts_dir,\n                           params_adapter=ParamsAdapter(os.path.join(PROJECT_ROOT, \"parameter_definitions.json\")))\n        ParamsAdapter(os.path.join(PROJECT_ROOT, \"parameter_definitions.json\")).apply(sim, fitted)\n        sim.reset()\n\n    sim.run(0, total_days)\n    metrics = sim.evaluate()\n\n    summary = {\n        \"steady_state_adoption\": metrics.get(\"steady_state_adoption\"),\n        \"time_to_target_adoption\": metrics.get(\"time_to_target_adoption\"),\n        \"time_to_threshold_adoption\": metrics.get(\"time_to_threshold_adoption\"),\n        \"Rt_last\": metrics.get(\"Rt_last\"),\n        \"infection_rate_reduction_mean\": metrics.get(\"infection_rate_reduction_mean\"),\n        \"mask_access_gini_mean\": metrics.get(\"mask_access_gini_mean\"),\n        \"policy_impact_effect_size\": metrics.get(\"policy_impact_effect_size\"),\n        \"enforcement_actions_count\": metrics.get(\"enforcement_actions_count\"),\n        \"costs_total\": metrics.get(\"costs_total\"),\n        \"adoption_disparity_index\": metrics.get(\"adoption_disparity_index\"),\n    }\n    sys.stderr.flush()  # ensure logs are flushed first\n    print(json.dumps(summary))\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_7.py",
+      "before": "logging.basicConfig(\n    level=logging.INFO,\n    format=\"%(asctime)s | %(levelname)s | %(message)s\",\n    stream=sys.stdout,\n)\n",
+      "after": "logging.basicConfig(\n    level=logging.INFO,\n    format=\"%(asctime)s | %(levelname)s | %(message)s\",\n    stream=sys.stderr,\n)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_7.py",
+      "before": "def parse_cli(argv: Optional[List[str]] = None) -> argparse.Namespace:\n    parser = argparse.ArgumentParser(description=\"Mask Adoption Dynamics Simulation with Calibration\")\n    parser.add_argument(\"--param-file\", type=str, default=os.path.join(PROJECT_ROOT, \"parameters.json\"), help=\"Path to parameters JSON file\")\n    parser.add_argument(\"--set\", dest=\"overrides\", action=\"append\", default=[], help=\"Parameter override key=value (repeatable)\")\n    parser.add_argument(\"--calibrator\", type=str, default=\"random_search\", choices=list(CALIBRATOR_REGISTRY.keys()))\n    parser.add_argument(\"--budget\", type=int, default=20, help=\"Calibration budget (trials)\")\n    parser.add_argument(\"--calib-window\", type=str, default=None, help=\"Calibration window 'start:end' (default: first 80%)\")\n    parser.add_argument(\"--quick-test\", action=\"store_true\", help=\"Run a small quick test (200 agents, 5 days)\")\n    parser.add_argument(\"--artifacts-dir\", type=str, default=os.path.join(PROJECT_ROOT, \"artifacts\"), help=\"Artifacts output root directory\")\n    parser.add_argument(\"--viz-out\", type=str, default=None, help=\"Optional path to save visualization PNG\")\n    parser.add_argument(\"--calibrator-config\", type=str, default=None, help=\"Optional calibrator config JSON\")\n    return parser.parse_args(argv)\n",
+      "after": "def parse_cli(argv: Optional[List[str]] = None) -> argparse.Namespace:\n    parser = argparse.ArgumentParser(description=\"Mask Adoption Dynamics Simulation with Calibration\")\n    parser.add_argument(\"--param-file\", type=str, default=os.path.join(PROJECT_ROOT, \"parameters.json\"), help=\"Path to parameters JSON file\")\n    parser.add_argument(\"--set\", dest=\"overrides\", action=\"append\", default=[], help=\"Parameter override key=value (repeatable)\")\n    parser.add_argument(\"--calibrator\", type=str, default=\"logit_head\", choices=list(CALIBRATOR_REGISTRY.keys()))\n    parser.add_argument(\"--budget\", type=int, default=3, help=\"Calibration budget (trials)\")\n    parser.add_argument(\"--calib-window\", type=str, default=None, help=\"Calibration window 'start:end' (default: first 80%)\")\n    parser.add_argument(\"--quick-test\", action=\"store_true\", help=\"Run a small quick test (200 agents, 5 days)\")\n    parser.add_argument(\"--artifacts-dir\", type=str, default=os.path.join(PROJECT_ROOT, \"artifacts\"), help=\"Artifacts output root directory\")\n    parser.add_argument(\"--viz-out\", type=str, default=None, help=\"Optional path to save visualization PNG\")\n    parser.add_argument(\"--calibrator-config\", type=str, default=None, help=\"Optional calibrator config JSON\")\n    parser.add_argument(\"--no-calibration\", action=\"store_true\", help=\"Skip calibration step for speed/sandbox\")\n    parser.add_argument(\"--emit-artifacts\", action=\"store_true\", help=\"Write calibration artifacts and module IO (off by default)\")\n    return parser.parse_args(argv)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_7.py",
+      "before": "calib = get_calibrator(args.calibrator, args.calibrator_config)\nartifacts_dir = os.path.join(args.artifacts_dir, \"calibration\")\nos.makedirs(artifacts_dir, exist_ok=True)\ntrain_window = (train_days[0], train_days[-1] + 1)\nfitted = calib.fit(bundle=None, simulator=sim, evaluator=evaluate_params, train_window=train_window,\n                   seed=int(params.get(\"seed_random_state\", 42)), budget=args.budget,\n                   artifacts_dir=artifacts_dir, params_adapter=ParamsAdapter(os.path.join(PROJECT_ROOT, \"parameter_definitions.json\")))\n",
+      "after": "if not args.no_calibration:\n    calib = get_calibrator(args.calibrator, args.calibrator_config)\n    artifacts_dir = os.path.join(args.artifacts_dir, \"calibration\") if args.emit_artifacts else None\n    if artifacts_dir:\n        os.makedirs(artifacts_dir, exist_ok=True)\n    train_window = (train_days[0], train_days[-1] + 1)\n    fitted = calib.fit(bundle=None, simulator=sim, evaluator=evaluate_params, train_window=train_window,\n                       seed=int(params.get(\"seed_random_state\", 42)), budget=args.budget,\n                       artifacts_dir=artifacts_dir, params_adapter=ParamsAdapter(os.path.join(PROJECT_ROOT, \"parameter_definitions.json\")))\n    ParamsAdapter(os.path.join(PROJECT_ROOT, \"parameter_definitions.json\")).apply(sim, fitted)\n    sim.reset()\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent changes replaced a comprehensive simulation codebase with a trivial stub and introduced a stray literal line 'Error: Request timed out.' that causes a SyntaxError. This broke all functionality and blocked execution. Prior code had minor issues (stdout logging) causing JSON parse errors; calibration defaults were heavy and contributed to timeouts.",
+    "positive_impacts": [
+      "None; the current changes removed functionality"
+    ],
+    "negative_impacts": [
+      "SyntaxError due to stray literal text in source file",
+      "Loss of all simulation functionality",
+      "Increased risk of timeouts if calibration and IO are not controlled"
+    ],
+    "suggestions": [
+      "Revert to the previously working full simulation implementation",
+      "Move logging to stderr and ensure stdout prints only JSON summary",
+      "Add flags to disable calibration and artifacts by default for sandbox reliability",
+      "Keep the direct main() call at the end as required by the sandbox"
+    ]
+  }
+}

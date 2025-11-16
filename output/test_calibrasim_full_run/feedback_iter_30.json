@@ -1,0 +1,165 @@
+{
+  "summary": "The main blocker is a syntax error caused by duplicated, mis-indented persistence lines outside the orchestrate() function, which prevents the code from running and producing JSON. Secondary risks include potential timeouts due to non-trivial calibration budgets in non-fast runs, and some unimplemented or unused parameters. The recent changes generally improve robustness (window handling, zero-rewiring, trust dynamics, transitions reporting, MAPE sensitivity), but introduced the indentation bug. The next iteration should first fix the indentation and remove duplicate lines, add a no-op calibrator option for fast/sandbox runs, and optionally add a time budget guard inside calibrators. Model-wise, align unused parameters (max_memory_days, clustering_bias, degree_dispersion, assortativity_target) with actual behavior, and incorporate awareness explicitly into the adoption decision.",
+  "critical_issues": [
+    {
+      "issue": "IndentationError in orchestrate(): duplicate pm.set_values/pm.persist_used lines placed outside the function body",
+      "impact": "Breaks syntax parsing and halts execution entirely, preventing JSON output and any further verification.",
+      "solution": "Move both persistence lines into orchestrate(), delete the stray duplicate, and remove the duplicate stray comments. See code snippet 1.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Duplicate persistence lines and stray comments around parameter persistence",
+      "impact": "Beyond the syntax error, the duplication is confusing and risks future merge/maintenance issues; can also lead to double writes if not fixed.",
+      "solution": "Keep a single, clearly-indented block to persist parameters inside orchestrate() just before returning summary. See code snippet 1.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Calibration may be too heavy in constrained environments when FAST_MODE is false and user does not pass --fast",
+      "impact": "Potential timeouts or long runtimes during verification or usage, especially with random search budget and full simulation days.",
+      "solution": "Add a 'none' calibrator that simply captures current params (no fitting), and allow selection with --calibrator none. Optionally add a simple time budget guard in calibrators. See code snippets 2 and 3.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "ParamsAdapter.apply persists parameters_used.json unconditionally",
+      "impact": "In strict sandbox environments, even best-effort I/O can be undesirable. While SKIP_IO is set by default here, guarding persistence in apply() improves robustness.",
+      "solution": "Check SKIP_IO before persisting parameters inside ParamsAdapter.apply. See code snippet 4.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Awareness in adoption decision",
+      "current_approach": "Awareness is updated in PolicyBroadcast but not used in InfluenceAndAdoption when forming adoption probability.",
+      "suggested_approach": "Modulate policy_term and/or total adoption probability by awareness, e.g., policy_term *= (0.5 + 0.5 * awareness) or p_adopt *= (0.5 + 0.5 * awareness).",
+      "expected_benefit": "More realistic effect of messaging: agents with higher awareness respond more to policy signals, improving data alignment of policy impacts."
+    },
+    {
+      "aspect": "Memory of messages (max_memory_days)",
+      "current_approach": "max_memory_days parameter is defined but unused.",
+      "suggested_approach": "Track a short rolling memory of received signals or awareness bumps over max_memory_days and use this to influence adoption (e.g., decayed sum).",
+      "expected_benefit": "Captures persistence of campaign effects and improves match to lagged behavioral changes in real data."
+    },
+    {
+      "aspect": "Network structure realism",
+      "current_approach": "Initial graph uses random stub matching with a small homophily pass; clustering_bias and degree_dispersion parameters are unused.",
+      "suggested_approach": "Introduce triadic closure proportional to clustering_bias and sample degrees with controllable dispersion (e.g., Negative Binomial or configurable Poisson-Gamma).",
+      "expected_benefit": "Better clustering and degree heterogeneity, leading to more realistic diffusion dynamics and potentially improved fit."
+    },
+    {
+      "aspect": "Assortativity target",
+      "current_approach": "assortativity_target parameter is defined but unused.",
+      "suggested_approach": "Use an acceptance criterion during rewiring that nudges observed assortativity toward the target (e.g., accept swaps increasing similarity till approximate target).",
+      "expected_benefit": "More controlled mixing patterns, improving the model\u2019s ability to match subgroup adoption differences."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Fix indentation and duplication in orchestrate(); move pm.set_values and pm.persist_used into the function and remove stray duplicate lines outside.",
+      "reason": "Eliminates the IndentationError and ensures parameters persisted reflect the calibrated run without duplicate code.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add a NoOpCalibrator and allow --calibrator none; extend CALIBRATOR_REGISTRY and get_calibrator to support this.",
+      "reason": "Prevents long runtimes/timeouts in constrained runs; helpful for sandbox or quick tests.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add a lightweight time budget guard to RandomSearchCalibrator.fit and LogitHeadCalibrator.fit loops.",
+      "reason": "Prevents lengthy calibration when compute is limited even if FAST_MODE was not set.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Guard file persistence in ParamsAdapter.apply with SKIP_IO.",
+      "reason": "Avoids I/O attempts during sandbox runs, improving robustness; aligns with SKIP_IO intent elsewhere.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "In InfluenceAndAdoption.forward, integrate awareness into policy or total adoption probability.",
+      "reason": "Better reflects behavioral response to policy messaging and increases fidelity.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Trajectory shape (rise, peak timing, plateau)",
+      "current_gap": "Policy influence may be under-expressed since awareness does not modulate adoption directly.",
+      "suggestion": "Incorporate awareness into policy_term and fatigue dynamics, and calibrate message_intensity and trust_update_rate jointly."
+    },
+    {
+      "metric": "Subgroup dynamics (e.g., SES or age differences)",
+      "current_gap": "Homophily present but assortativity/clustering controls unused, limiting subgroup spread differences.",
+      "suggestion": "Use assortativity_target and clustering_bias in rewiring process to induce realistic subgroup mixing; check subgroup adoption rates against data if available."
+    },
+    {
+      "metric": "Transition fit (P01/P10)",
+      "current_gap": "Transitions are now computed, but calibration doesn\u2019t target them explicitly.",
+      "suggestion": "Weight RMSE with penalties for deviation in mean P01/P10 during training to constrain micro-dynamics."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix the IndentationError by moving pm.set_values and pm.persist_used inside orchestrate() and remove duplicates.",
+    "Add 'none' calibrator and accept --calibrator none to avoid timeouts in constrained runs.",
+    "Add a time budget guard to calibrator fit loops (break on exceeded wall time).",
+    "Integrate awareness into adoption probability to reflect messaging effects.",
+    "Implement at least a simple version of clustering_bias and max_memory_days to use currently-unused parameters.",
+    "Optionally guard parameter persistence in ParamsAdapter.apply with SKIP_IO."
+  ],
+  "additional_comments": "The recent improvements to trust dynamics, honoring evaluation window starts, zero rewiring allowance, and explicit transition outputs are solid. Keep the direct main() call per the project\u2019s special requirement, even though some harnesses suggest __main__ guards. Ensure all stdout is JSON-only; current stderr warnings are fine.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "# FIXED: Ensure persisted parameters reflect calibrated run\npm.set_values(**sim.get_params())\n# FIXED: Applied feedback snippet from simulation.py\n# Ensure persisted params reflect calibrated run\npm.set_values(**sim.get_params())\npm.persist_used(os.path.join(ARTIFACTS_DIR, \"results\", \"parameters_used.json\"))",
+      "after": "    # Ensure persisted parameters reflect calibrated run\n    pm.set_values(**sim.get_params())\n    pm.persist_used(os.path.join(ARTIFACTS_DIR, \"results\", \"parameters_used.json\"))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "CALIBRATOR_REGISTRY: Dict[str, Any] = {\n    \"logit_head\": LogitHeadCalibrator,\n    \"random_search\": RandomSearchCalibrator,\n    \"snpe\": SNPECalibrator,\n}\n\n\ndef get_calibrator(name: str, config_path: Optional[str] = None) -> Calibrator:\n    \"\"\"Factory to instantiate a calibrator by name; config not used in this simple implementation.\"\"\"\n    pass\n    if name not in CALIBRATOR_REGISTRY:\n        raise ValueError(f\"Unknown calibrator: {name}\")\n    # Load optional config into kwargs (not used; kept for interface completeness)\n    kwargs: Dict[str, Any] = {}\n    if config_path and os.path.exists(config_path):\n        try:\n            with open(config_path, \"r\", encoding=\"utf-8\") as f:\n                cfg = json.load(f)\n            if isinstance(cfg, dict):\n                kwargs.update(cfg)\n        except Exception:\n            pass\n    # FIXED: Do not pass kwargs to calibrator constructors to avoid TypeError\n    return CALIBRATOR_REGISTRY[name]()  # type: ignore",
+      "after": "class NoOpCalibrator(Calibrator):\n    def fit(self, bundle, simulator, evaluator, train_window, seed, budget=0, artifacts_dir=None, params_adapter=None) -> FittedParams:\n        adapter = params_adapter or ParamsAdapter(os.path.join(ARTIFACTS_DIR, \"results\", \"parameter_definitions.json\"))\n        return adapter.capture(simulator)\n\nCALIBRATOR_REGISTRY: Dict[str, Any] = {\n    \"none\": NoOpCalibrator,\n    \"logit_head\": LogitHeadCalibrator,\n    \"random_search\": RandomSearchCalibrator,\n    \"snpe\": SNPECalibrator,\n}\n\n\ndef get_calibrator(name: str, config_path: Optional[str] = None) -> Calibrator:\n    \"\"\"Factory to instantiate a calibrator by name; config not used in this simple implementation.\"\"\"\n    pass\n    if name not in CALIBRATOR_REGISTRY:\n        raise ValueError(f\"Unknown calibrator: {name}\")\n    # Optional config ignored\n    return CALIBRATOR_REGISTRY[name]()  # type: ignore",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class RandomSearchCalibrator(Calibrator):\n    ...\n    def fit(...):\n        ...\n        for i in range(n_trials):\n            ...\n            if score < best_score:\n                best_score = score\n                best_params = trial_params\n        ...\n        return best_params",
+      "after": "class RandomSearchCalibrator(Calibrator):\n    ...\n    def fit(...):\n        ...\n        start_time = time.time()\n        time_cap = 2.0 if FAST_MODE else None\n        for i in range(n_trials):\n            if time_cap is not None and (time.time() - start_time) > time_cap:\n                break\n            ...\n            if score < best_score:\n                best_score = score\n                best_params = trial_params\n        ...\n        return best_params",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def apply(self, simulation: Simulation, params: FittedParams) -> None:\n    ...\n    # Persist parameters_used.json\n    try:\n        path = os.path.join(ARTIFACTS_DIR, \"results\", \"parameters_used.json\")\n        ensure_dir(os.path.dirname(path))\n        with open(path, \"w\", encoding=\"utf-8\") as f:\n            json.dump(sanitize_for_json(simulation.get_params()), f, indent=2)\n    except Exception:\n        pass",
+      "after": "def apply(self, simulation: Simulation, params: FittedParams) -> None:\n    ...\n    # Persist parameters_used.json (skip if SKIP_IO)\n    if not SKIP_IO:\n        try:\n            path = os.path.join(ARTIFACTS_DIR, \"results\", \"parameters_used.json\")\n            ensure_dir(os.path.dirname(path))\n            with open(path, \"w\", encoding=\"utf-8\") as f:\n                json.dump(sanitize_for_json(simulation.get_params()), f, indent=2)\n        except Exception:\n            pass",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "policy_term = w_policy * float(policy_signal[i]) if i < len(policy_signal) else 0.0\nnoise = rng.gauss(0.0, noise_scale)\nlogit_p = base_logit + social_term + trait_term + policy_term - pi.fatigue + noise",
+      "after": "awareness_factor = 0.5 + 0.5 * float(pi.awareness)\npolicy_term = (w_policy * float(policy_signal[i]) if i < len(policy_signal) else 0.0) * awareness_factor\nnoise = rng.gauss(0.0, noise_scale)\nlogit_p = base_logit + social_term + trait_term + policy_term - pi.fatigue + noise",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes improved evaluation-window handling, rewiring flexibility, trust dynamics, and diagnostics. However, a mis-merge introduced a fatal indentation error with duplicated parameter-persistence lines outside orchestrate().",
+    "positive_impacts": [
+      "Honors evaluation window start in evaluate_params, improving calibration fidelity.",
+      "Allows zero rewiring, preventing unintended edge changes on small graphs.",
+      "Improved trust dynamics with bounded smoothing and decay, reducing drift.",
+      "Added transition diagnostics (P01/P10) and improved MAPE sensitivity."
+    ],
+    "negative_impacts": [
+      "IndentationError due to misplaced persistence lines outside orchestrate().",
+      "Duplicate persistence and comments create confusion.",
+      "Calibration still potentially heavy without explicit 'none' option or time guard."
+    ],
+    "suggestions": [
+      "Fix the indentation and duplication in orchestrate() immediately.",
+      "Add a no-op calibrator and time budget guards to calibration loops.",
+      "Guard persistence in ParamsAdapter.apply with SKIP_IO.",
+      "Leverage currently unused parameters (max_memory_days, clustering_bias, assortativity_target) to enhance realism."
+    ]
+  }
+}

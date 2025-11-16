@@ -1,0 +1,899 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion model for behavior/adoption dynamics over a social network with peer influence and exogenous media/policy signals. The model simulates daily interactions, belief updates, and adoption decisions, producing observable adoption rates and incidence (new adopters) suitable for calibration and prediction.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "group_id",
+        "neighbors",
+        "edge_weights",
+        "degree",
+        "belief",
+        "adoption_state",
+        "time_since_adoption",
+        "stubbornness",
+        "adoption_threshold",
+        "trust_media"
+      ],
+      "behaviors": [
+        "interact_with_neighbors",
+        "process_media_signal",
+        "update_belief",
+        "decide_adoption",
+        "share_with_neighbors_if_adopted"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "initial_adoption_rate": 0.05,
+          "initial_belief_mean": 0.2,
+          "initial_belief_std": 0.1,
+          "stubbornness_mean": 0.4,
+          "stubbornness_std": 0.1,
+          "adoption_threshold_mean": 0.5,
+          "adoption_threshold_std": 0.15,
+          "trust_media_mean": 0.5,
+          "trust_media_std": 0.15
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the static social network and assigns group/community structure and edge weights.",
+      "inputs": [],
+      "outputs": [
+        "graph.network",
+        "graph.groups"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "steps",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  N = population_size\n  if network_type == 0:\n    build Erdos-Renyi with p = avg_degree / (N-1)\n  elif network_type == 1:\n    build Barabasi-Albert with m = preferential_attachment_m\n  elif network_type == 2:\n    build Watts-Strogatz with k = round(avg_degree), beta = rewiring_prob\n  assign community_count groups using modularity-based or planted partition with assortativity_by_group and clustering_bias targets\n  set edge_weights ~ Uniform(0.8,1.2)\n  output graph.network and graph.groups",
+        "notes": [
+          "network_type mapping: 0=ER, 1=Scale-free (BA), 2=Small-world (WS)",
+          "Assortativity achieved by biasing intra-group edge formation",
+          "Clustering bias tweaks triadic closure during generation"
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "networkx"
+      ],
+      "module_parameters": [
+        "population_size",
+        "network_type",
+        "avg_degree",
+        "rewiring_prob",
+        "preferential_attachment_m",
+        "assortativity_by_group",
+        "clustering_bias",
+        "community_count"
+      ]
+    },
+    {
+      "name": "AttributeInitializer",
+      "description": "Initializes agent-level attributes (beliefs, thresholds, stubbornness, trust, adoption state) using specified distributions and network-informed features.",
+      "inputs": [
+        "graph.network",
+        "graph.groups"
+      ],
+      "outputs": [
+        "agents.state"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "steps",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  for each node i in graph:\n    group_id[i] = assigned group\n    stubbornness[i] ~ truncate(N(stubbornness_mean, stubbornness_std), 0, 1)\n    threshold[i] ~ truncate(N(adoption_threshold_mean, adoption_threshold_std), 0, 1)\n    trust_media[i] ~ truncate(N(trust_media_mean, trust_media_std), 0, 1)\n    belief[i] ~ truncate(N(initial_belief_mean, initial_belief_std), 0, 1)\n    adoption_state[i] ~ Bernoulli(initial_adoption_rate)\n    time_since_adoption[i] = 0 if adoption_state[i]==1 else -1\n  output agents.state",
+        "notes": [
+          "Truncated normal sampling ensures [0,1] bounds",
+          "Initial adopters seeded at random according to initial_adoption_rate"
+        ]
+      },
+      "requirements": [
+        "scipy",
+        "numpy"
+      ],
+      "module_parameters": [
+        "initial_adoption_rate",
+        "initial_belief_mean",
+        "initial_belief_std",
+        "stubbornness_mean",
+        "stubbornness_std",
+        "adoption_threshold_mean",
+        "adoption_threshold_std",
+        "trust_media_mean",
+        "trust_media_std"
+      ]
+    },
+    {
+      "name": "MediaPolicyEngine",
+      "description": "Generates a daily exogenous media/policy signal that influences agents, including campaigns, counter-misinformation, and policy nudges.",
+      "inputs": [
+        "time.day"
+      ],
+      "outputs": [
+        "media.signal_t",
+        "policy.nudge_targets"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each day t:\n  if campaign_gaussian:\n    mu = (campaign_start_day + campaign_end_day) / 2\n    sigma = shape_sigma_days\n    campaign = campaign_peak_intensity * exp(-0.5 * ((t - mu)/sigma)^2) if campaign_start_day <= t <= campaign_end_day else 0\n  else:\n    if t < campaign_start_day or t > campaign_end_day: campaign = 0\n    else:\n      len = campaign_end_day - campaign_start_day + 1\n      mid = campaign_start_day + floor(len/2)\n      if t <= mid:\n        campaign = campaign_peak_intensity * (t - campaign_start_day) / max(1, mid - campaign_start_day)\n      else:\n        campaign = campaign_peak_intensity * (campaign_end_day - t) / max(1, campaign_end_day - mid)\n  signal = clamp(baseline_media_signal + campaign - counter_misinformation_intensity, 0, max_media_reach_fraction)\n  # policy nudges select a Bernoulli subset of non-adopters\n  nudge_targets = sample_non_adopters_with_prob(policy_nudging_probability)\n  output media.signal_t = signal and policy.nudge_targets = nudge_targets",
+        "notes": [
+          "Signal is capped by max_media_reach_fraction to reflect limited reach",
+          "policy.nudge_targets is an index set of agents receiving nudges"
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "baseline_media_signal",
+        "campaign_start_day",
+        "campaign_end_day",
+        "campaign_peak_intensity",
+        "shape_sigma_days",
+        "campaign_gaussian",
+        "counter_misinformation_intensity",
+        "policy_nudging_probability",
+        "max_media_reach_fraction"
+      ]
+    },
+    {
+      "name": "InfluenceDynamics",
+      "description": "Simulates daily peer-to-peer interactions, media processing, belief updates, and adoption decisions.",
+      "inputs": [
+        "graph.network",
+        "agents.state",
+        "media.signal_t",
+        "policy.nudge_targets",
+        "time.day"
+      ],
+      "outputs": [
+        "agents.state_updated",
+        "flow.daily_new_adopters"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "AttributeInitializer",
+        "MediaPolicyEngine"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each day t:\n  daily_new = 0\n  for each agent i:\n    # neighbor interaction sampling\n    neighbors = graph.neighbors(i)\n    k = ceil(base_contact_rate * len(neighbors))\n    S = sample_without_replacement(neighbors, k)\n    peer_signal = 0\n    denom = 0\n    for j in S:\n      s_j = 1 if adoption_state[j]==1 and Bernoulli(share_probability)==1 else 0\n      w_ij = edge_weight(i,j)\n      peer_signal += w_ij * s_j\n      denom += w_ij\n    peer_signal = peer_signal / max(1e-9, denom)\n    # media processing\n    media_input = media_influence_weight * (trust_media[i] * media.signal_t)\n    # belief update (DeGroot-like with stubbornness and memory decay)\n    decay = exp(-ln(2) / decay_memory_halflife_days)\n    social_input = peer_influence_weight * peer_signal\n    new_belief = (1 - stubbornness[i]) * (decay * belief[i] + (1 - decay) * (social_input + media_input)) + stubbornness[i] * belief[i]\n    # noise\n    new_belief = clamp(new_belief + Normal(0, adoption_noise_scale), 0, 1)\n    belief[i] = new_belief\n  # policy nudges: temporarily lower threshold or boost belief\n  for i in policy.nudge_targets:\n    belief[i] = clamp(belief[i] + 0.1, 0, 1)\n  # adoption decision\n  for each agent i not yet adopted:\n    hazard = sigmoid((belief[i] - adoption_threshold[i]) / 0.1)\n    hazard = clamp(hazard * max(0.01, media_influence_weight + peer_influence_weight), 0, 1)\n    if Bernoulli(hazard)==1:\n      adoption_state[i] = 1\n      time_since_adoption[i] = 0\n      daily_new += 1\n  # aging adopters\n  for each agent i with adoption_state[i]==1:\n    time_since_adoption[i] += 1\n  output agents.state_updated and flow.daily_new_adopters = daily_new",
+        "notes": [
+          "sigmoid(x) = 1/(1+exp(-x))",
+          "Belief update balances stubbornness, memory decay, peer and media influences",
+          "share_probability models willingness of adopters to broadcast to neighbors"
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "base_contact_rate",
+        "peer_influence_weight",
+        "media_influence_weight",
+        "adoption_noise_scale",
+        "share_probability",
+        "decay_memory_halflife_days",
+        "max_influence_per_day",
+        "adoption_threshold_mean",
+        "adoption_threshold_std",
+        "personal_stubbornness_mean",
+        "personal_stubbornness_std"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily observables (adoption rate, incidence) with optional reporting delay and measurement noise.",
+      "inputs": [
+        "agents.state_updated",
+        "flow.daily_new_adopters",
+        "time.day"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adopters_daily",
+        "observable.cumulative_adopters"
+      ],
+      "dependencies": [
+        "InfluenceDynamics"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each day t:\n  N = population_size\n  adoption_rate = mean_i(adoption_state[i])\n  new_adopters = flow.daily_new_adopters\n  cumulative = cumulative_previous + new_adopters\n  # reporting delay: store in buffer and emit delayed values\n  buffer.push((t, adoption_rate, new_adopters, cumulative))\n  if buffer.size > reporting_delay_days:\n    emit_day, ar, na, cum = buffer.pop_oldest()\n    noisy_ar = clamp(ar + Normal(0, measurement_noise_std), 0, 1)\n    noisy_na = max(0, round(na + Normal(0, measurement_noise_std * N)))\n    noisy_cum = max(0, round(cum + Normal(0, measurement_noise_std * N)))\n    output observable.adoption_rate_daily = (emit_day, noisy_ar)\n    output observable.new_adopters_daily = (emit_day, noisy_na)\n    output observable.cumulative_adopters = (emit_day, noisy_cum)",
+        "notes": [
+          "Measurement noise scaled differently for rates vs counts",
+          "Reporting delay simulates lag in observed data"
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "reporting_delay_days",
+        "measurement_noise_std",
+        "group_reporting_bias"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 1000.0,
+        "high": 100000.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of agents in the simulation",
+      "frozen": "false"
+    },
+    {
+      "key": "network_type",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Network generator selector: 0=Erdos-Renyi, 1=Barabasi-Albert, 2=Watts-Strogatz",
+      "frozen": "true"
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "float",
+      "default": 8.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 50.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target average degree for initial graph",
+      "frozen": "false"
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Rewiring probability for small-world generation",
+      "frozen": "false"
+    },
+    {
+      "key": "preferential_attachment_m",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1.0,
+        "high": 10.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Edges added per new node in BA model",
+      "frozen": "false"
+    },
+    {
+      "key": "assortativity_by_group",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Bias toward within-group connections",
+      "frozen": "false"
+    },
+    {
+      "key": "clustering_bias",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Bias to close triangles during graph construction",
+      "frozen": "false"
+    },
+    {
+      "key": "community_count",
+      "dtype": "int",
+      "default": 8,
+      "bounds": {
+        "low": 1.0,
+        "high": 50.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of groups/communities for assortative mixing",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AttributeInitializer",
+      "description": "Initial fraction of adopters at t=0",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_belief_mean",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttributeInitializer",
+      "description": "Mean of initial belief distribution",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_belief_std",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AttributeInitializer",
+      "description": "Std dev of initial belief distribution",
+      "frozen": "false"
+    },
+    {
+      "key": "stubbornness_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttributeInitializer",
+      "description": "Mean of stubbornness distribution",
+      "frozen": "false"
+    },
+    {
+      "key": "stubbornness_std",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AttributeInitializer",
+      "description": "Std dev of stubbornness distribution",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_threshold_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttributeInitializer",
+      "description": "Mean of adoption threshold distribution",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_threshold_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AttributeInitializer",
+      "description": "Std dev of adoption threshold distribution",
+      "frozen": "false"
+    },
+    {
+      "key": "trust_media_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AttributeInitializer",
+      "description": "Mean of trust-in-media distribution",
+      "frozen": "false"
+    },
+    {
+      "key": "trust_media_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AttributeInitializer",
+      "description": "Std dev of trust-in-media distribution",
+      "frozen": "false"
+    },
+    {
+      "key": "baseline_media_signal",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaPolicyEngine",
+      "description": "Baseline daily media influence level",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign_start_day",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0.0,
+        "high": 365.0
+      },
+      "owner_module": "MediaPolicyEngine",
+      "description": "Start day for media campaign",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign_end_day",
+      "dtype": "int",
+      "default": 40,
+      "bounds": {
+        "low": 0.0,
+        "high": 365.0
+      },
+      "owner_module": "MediaPolicyEngine",
+      "description": "End day for media campaign (inclusive)",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign_peak_intensity",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaPolicyEngine",
+      "description": "Peak intensity of the campaign signal",
+      "frozen": "false"
+    },
+    {
+      "key": "shape_sigma_days",
+      "dtype": "float",
+      "default": 7.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 60.0
+      },
+      "owner_module": "MediaPolicyEngine",
+      "description": "Width parameter (sigma) if Gaussian campaign is used",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign_gaussian",
+      "dtype": "bool",
+      "default": true,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaPolicyEngine",
+      "description": "If true, use Gaussian-shaped campaign; else triangular",
+      "frozen": "true"
+    },
+    {
+      "key": "counter_misinformation_intensity",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaPolicyEngine",
+      "description": "Average intensity of opposing information",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_nudging_probability",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "MediaPolicyEngine",
+      "description": "Daily probability of nudging each non-adopter",
+      "frozen": "false"
+    },
+    {
+      "key": "max_media_reach_fraction",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaPolicyEngine",
+      "description": "Cap on media exposure proportion",
+      "frozen": "false"
+    },
+    {
+      "key": "base_contact_rate",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceDynamics",
+      "description": "Fraction of neighbors contacted per day",
+      "frozen": "false"
+    },
+    {
+      "key": "peer_influence_weight",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceDynamics",
+      "description": "Weight of peer signal in belief update",
+      "frozen": "false"
+    },
+    {
+      "key": "media_influence_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceDynamics",
+      "description": "Weight of media signal in belief update",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_noise_scale",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "InfluenceDynamics",
+      "description": "Std dev of Gaussian noise added to belief",
+      "frozen": "false"
+    },
+    {
+      "key": "share_probability",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceDynamics",
+      "description": "Probability an adopter actively shares with a contacted neighbor",
+      "frozen": "false"
+    },
+    {
+      "key": "decay_memory_halflife_days",
+      "dtype": "float",
+      "default": 14.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 90.0
+      },
+      "owner_module": "InfluenceDynamics",
+      "description": "Belief memory half-life for decay toward new inputs",
+      "frozen": "false"
+    },
+    {
+      "key": "max_influence_per_day",
+      "dtype": "int",
+      "default": 20,
+      "bounds": {
+        "low": 1.0,
+        "high": 100.0
+      },
+      "owner_module": "InfluenceDynamics",
+      "description": "Safety cap on number of neighbor influences processed per agent per day",
+      "frozen": "true"
+    },
+    {
+      "key": "personal_stubbornness_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceDynamics",
+      "description": "Mean stubbornness used for consistency in dynamics",
+      "frozen": "true"
+    },
+    {
+      "key": "personal_stubbornness_std",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "InfluenceDynamics",
+      "description": "Std stubbornness used for consistency in dynamics",
+      "frozen": "true"
+    },
+    {
+      "key": "reporting_delay_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 0.0,
+        "high": 7.0
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Days of delay before observables are reported",
+      "frozen": "true"
+    },
+    {
+      "key": "measurement_noise_std",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Std dev of measurement noise",
+      "frozen": "false"
+    },
+    {
+      "key": "group_reporting_bias",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": -0.2,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Optional bias applied to specific group reporting (unused by default)",
+      "frozen": "true"
+    },
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 10.0,
+        "high": 365.0
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days",
+      "frozen": "false"
+    },
+    {
+      "key": "dt_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Time step in days",
+      "frozen": "true"
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0.0,
+        "high": 1000000000.0
+      },
+      "owner_module": "global",
+      "description": "Random seed for reproducibility",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adoption_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adopters_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "count_transitions(0->1)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:new_adopters"
+    },
+    {
+      "id": "observable.cumulative_adopters",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "cumsum(new_adopters_daily)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:cumulative_adopters"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "RMSE_new_adopters",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "PeakError_new_adopters",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "reference_field": "train_data.csv:new_adopters"
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_new_adopters",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeak",
+        "config": {
+          "reference_field": "train_data.csv:new_adopters"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1.0,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "warm_start_days": 0,
+    "start_day": 0
+  },
+  "algorithms": {
+    "network_generation": "Erdos-Renyi / Barabasi-Albert / Watts-Strogatz graph construction with assortativity and clustering bias",
+    "belief_update": "DeGroot-style averaging with memory decay and stubbornness, plus Gaussian noise",
+    "adoption_decision": "Thresholded logistic hazard based on belief relative to personal threshold",
+    "media_signal": "Gaussian or triangular campaign profile added to baseline and reduced by counter-misinformation",
+    "aggregation": "Delayed noisy reporting of daily adoption rate and incidence"
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and metric evaluation on training window",
+      "fields_used": [
+        "day",
+        "adoption_rate",
+        "new_adopters",
+        "cumulative_adopters"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: argument parsing, simulation run loop, loading data, evaluation"
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder with graph construction utilities"
+      },
+      {
+        "name": "modules/attribute_initializer.py",
+        "description": "Implements AttributeInitializer and sampling helpers"
+      },
+      {
+        "name": "modules/media_policy.py",
+        "description": "Implements MediaPolicyEngine and campaign profiles"
+      },
+      {
+        "name": "modules/influence_dynamics.py",
+        "description": "Implements daily agent interactions, belief updates, adoption logic"
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "Implements AdoptionAggregator and observable emission"
+      },
+      {
+        "name": "evaluation/metrics.py",
+        "description": "RMSE, PeakError, TimeToPeak implementations using observables and target data"
+      },
+      {
+        "name": "utils/random.py",
+        "description": "Random seeding and truncated normal sampling utilities"
+      },
+      {
+        "name": "config/parameters.py",
+        "description": "Parameter registry, validation, bounds checks, and SBI hooks"
+      }
+    ],
+    "dependencies": [
+      "numpy>=1.24",
+      "scipy>=1.10",
+      "networkx>=3.0",
+      "pandas>=2.0"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "RMSE_new_adopters",
+    "PeakError_new_adopters",
+    "TimeToPeak_new_adopters"
+  ]
+}

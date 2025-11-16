@@ -1,0 +1,1235 @@
+{
+  "model_type": "agent_based",
+  "description": "Network-based agent simulation of behavioral adoption diffusion with information spread, policy interventions, and adaptive social ties. Daily time steps over a contact network; adoption is driven by peer influence, information exposure, personal thresholds, and policy signals.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "income_group",
+        "adopted",
+        "day_of_first_adoption",
+        "stubbornness",
+        "threshold",
+        "awareness",
+        "exposure_memory",
+        "neighbors",
+        "neighbor_edge_weights"
+      ],
+      "behaviors": [
+        "receive_information",
+        "update_adoption_state",
+        "comply_with_policy",
+        "rewire_ties",
+        "relapse"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "age_group_shares": {
+            "young": 0.4,
+            "middle": 0.4,
+            "senior": 0.2
+          },
+          "income_group_shares": {
+            "low": 0.3,
+            "mid": 0.5,
+            "high": 0.2
+          },
+          "initial_adopter_fraction": 0.05,
+          "initial_awareness_mean": 0.2
+        }
+      }
+    },
+    {
+      "name": "InfoSource",
+      "attributes": [
+        "id",
+        "credibility",
+        "polarity",
+        "message_rate_daily",
+        "is_misinformation"
+      ],
+      "behaviors": [
+        "broadcast_messages"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "num_info_sources": 3,
+          "credibility_mean": 0.7,
+          "polarity_distribution": "symmetric",
+          "misinfo_fraction": 0.2
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs and (optionally) dynamically updates the contact network and edge weights.",
+      "inputs": [],
+      "outputs": [
+        "signal.network",
+        "signal.edge_weights"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  if network_type == 'Empirical' or use_empirical_network:\n    load network from data_sources.network_edges\n  else if network_type == 'WS':\n    generate Watts-Strogatz with N=population_size, K=avg_degree, p=ws_rewiring_prob_initial\n  else if network_type == 'ER':\n    generate Erdos-Renyi with N=population_size, p=avg_degree/(N-1)\n  else if network_type == 'BA':\n    generate Barabasi-Albert with N=population_size, m=avg_degree/2\n  assign edge weights ~ Normal(edge_weight_mean, edge_weight_sd), clipped to [0.05, 10]\n  adjust clustering using clustering_bias via triadic-closure rewiring during initialization\n  output signal.network, signal.edge_weights\nelse:\n  with probability dynamic_rewiring_rate_daily per node:\n    perform degree-preserving rewiring favoring assortativity_homophily on age, income (Jaccard similarity)\n  output updated signal.network, signal.edge_weights",
+        "notes": [
+          "Degree-preserving rewiring avoids large degree variance changes.",
+          "When using empirical network, dynamic rewiring still applies unless dynamic_rewiring_rate_daily=0."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "random_number_generator"
+      ],
+      "module_parameters": [
+        "population_size",
+        "network_type",
+        "avg_degree",
+        "ws_rewiring_prob_initial",
+        "dynamic_rewiring_rate_daily",
+        "assortativity_homophily",
+        "edge_weight_mean",
+        "edge_weight_sd",
+        "clustering_bias",
+        "use_empirical_network"
+      ]
+    },
+    {
+      "name": "PolicyModule",
+      "description": "Generates policy signals for incentives, mandates, enforcement, and messaging over time, with optional equity targeting.",
+      "inputs": [
+        "calendar.day"
+      ],
+      "outputs": [
+        "signal.policy_incentive",
+        "signal.policy_mandate",
+        "signal.policy_message_boost",
+        "signal.enforcement_probability"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "policy_incentive = 0\nif day >= incentive_start_day:\n  policy_incentive = incentive_strength\npolicy_mandate = 0\nif day >= mandate_start_day:\n  policy_mandate = penalty_strength\npolicy_message_boost = 0\nif day >= messaging_campaign_start_day:\n  policy_message_boost = messaging_intensity\nemit signal.policy_incentive, signal.policy_mandate, signal.policy_message_boost, enforcement_probability",
+        "notes": [
+          "Equity targeting affects downstream modules (BehaviorDecision, InformationDiffusion) by group-specific scaling, not the raw signals here.",
+          "enforcement_probability is treated as constant unless changed externally."
+        ]
+      },
+      "requirements": [
+        "calendar_time"
+      ],
+      "module_parameters": [
+        "incentive_start_day",
+        "incentive_strength",
+        "mandate_start_day",
+        "penalty_strength",
+        "enforcement_probability",
+        "messaging_campaign_start_day",
+        "messaging_intensity",
+        "equity_targeting_enabled",
+        "targeting_priority_low_income_weight"
+      ]
+    },
+    {
+      "name": "InformationDiffusion",
+      "description": "Simulates exogenous information broadcasts and interpersonal transmission to produce per-agent exposure scores with decay.",
+      "inputs": [
+        "signal.network",
+        "signal.edge_weights",
+        "signal.policy_message_boost"
+      ],
+      "outputs": [
+        "signal.exposure_scores"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "PolicyModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  exposure_i *= exp(-ln(2)/exposure_decay_half_life_days)\nfor each info source s (1..num_info_sources):\n  if Bernoulli(exogenous_message_rate_daily * (1 + signal.policy_message_boost)):\n    choose broadcast targets proportional to degree\n    delivered_cred = source_credibility_mean * (1 - misinfo_fraction if s is corrective else 1)\n    for each target j:\n      if Bernoulli(transmission_prob_edge * f(selectivity=info_selectivity_shape, polarization=content_polarization, match=agent_j_polarity)):\n        exposure_j += delivered_cred\nfor each edge (i,j):\n  if Bernoulli(transmission_prob_edge * edge_weight(i,j)):\n    exposure_j += min(awareness_i, 1.0) * 0.5\n    exposure_i += min(awareness_j, 1.0) * 0.5\napply correction_effectiveness to reduce misinformation contribution in exposure scores\nemit signal.exposure_scores",
+        "notes": [
+          "Awareness acts as a proxy for talking about the behavior.",
+          "Decay factor uses half-life, ensuring finite memory without hard cutoff."
+        ]
+      },
+      "requirements": [
+        "random_number_generator",
+        "vectorized_operations"
+      ],
+      "module_parameters": [
+        "num_info_sources",
+        "exogenous_message_rate_daily",
+        "source_credibility_mean",
+        "transmission_prob_edge",
+        "exposure_decay_half_life_days",
+        "content_polarization",
+        "misinfo_fraction",
+        "correction_effectiveness",
+        "info_selectivity_shape"
+      ]
+    },
+    {
+      "name": "BehaviorDecision",
+      "description": "Updates individual adoption decisions using a noisy logistic rule combining peer adoption, exposure, thresholds, stubbornness, and policy signals; also models relapse.",
+      "inputs": [
+        "signal.network",
+        "signal.edge_weights",
+        "signal.exposure_scores",
+        "signal.policy_incentive",
+        "signal.policy_mandate",
+        "signal.enforcement_probability"
+      ],
+      "outputs": [
+        "signal.adoption_state",
+        "signal.new_adoptions",
+        "signal.relapses"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "InformationDiffusion",
+        "PolicyModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  initialize adoption for fraction initial_adopter_fraction at random, biased toward high awareness\n  initialize awareness_i ~ Normal(initial_awareness_mean, 0.1), clipped [0,1]\n  draw threshold_i ~ Normal(personal_threshold_mean, personal_threshold_sd), clipped [0,1]\n  draw stubbornness_i ~ Beta(2, (2/stubbornness_mean)-2), clipped [0,1]\nfor each agent i:\n  neighbor_influence = weighted_mean(adopted_neighbors, weights=edge_weight)  # in [0,1]\n  effective_threshold = threshold_i / max(1e-6, heterogeneity_scaling)\n  peer_term = peer_influence_weight * max(0, neighbor_influence - effective_threshold)\n  exposure_term = exposure_weight * exposure_scores[i]\n  policy_term = policy_incentive_weight * (signal.policy_incentive + signal.policy_mandate * signal.enforcement_probability)\n  bias_term = base_adoption_bias - cost_of_adoption - stubbornness_i\n  logit_p = bias_term + peer_term + exposure_term + policy_term + Normal(0, noise_scale_logit)\n  p = sigmoid(logit_p)\n  if not adopted_i and Bernoulli(p):\n    adopted_i = True; day_of_first_adoption = t; new_adoptions += 1\n  else if adopted_i and Bernoulli(relapse_probability_daily * (1 - signal.policy_mandate)):\n    adopted_i = False; relapses += 1\nupdate awareness_i = min(1, awareness_i + 0.1*adopted_i + 0.01*neighbor_influence)\nemit signal.adoption_state, signal.new_adoptions, signal.relapses",
+        "notes": [
+          "Logistic decision allows smooth probability rather than hard threshold.",
+          "Equity targeting is applied as: if equity_targeting_enabled and income_group == 'low', multiply policy_term by targeting_priority_low_income_weight."
+        ]
+      },
+      "requirements": [
+        "random_number_generator",
+        "numerical_stability_clipping"
+      ],
+      "module_parameters": [
+        "base_adoption_bias",
+        "peer_influence_weight",
+        "personal_threshold_mean",
+        "personal_threshold_sd",
+        "stubbornness_mean",
+        "noise_scale_logit",
+        "exposure_weight",
+        "policy_incentive_weight",
+        "cost_of_adoption",
+        "relapse_probability_daily",
+        "memory_window_days",
+        "heterogeneity_scaling",
+        "initial_adopter_fraction",
+        "initial_awareness_mean"
+      ]
+    },
+    {
+      "name": "TieRewiring",
+      "description": "Adoption-status-driven social rewiring with homophily and triadic closure, subject to degree caps.",
+      "inputs": [
+        "signal.network",
+        "signal.adoption_state"
+      ],
+      "outputs": [
+        "signal.network"
+      ],
+      "dependencies": [
+        "BehaviorDecision"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each node i with probability rewiring_rate_daily:\n  select neighbor j where adopted_i != adopted_j with probability proportional to (1 - homophily_on_adoption)\n  if such j exists:\n    remove edge (i,j)\n    with probability triadic_closure_prob:\n      pick k from neighbors of i's neighbors that is not connected to i and adopted_k == adopted_i (if possible)\n    else:\n      pick k uniformly from nodes not connected to i with adopted_k == adopted_i (if possible)\n    if degree(i) < max_degree_cap and k exists:\n      add edge (i,k) with weight drawn from Normal(edge_weight_mean, edge_weight_sd)\nemit updated signal.network",
+        "notes": [
+          "This module focuses on adoption-status homophily; demographic assortativity handled in NetworkBuilder.",
+          "Edge weights for new ties use NetworkBuilder's parameters."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "random_number_generator"
+      ],
+      "module_parameters": [
+        "homophily_on_adoption",
+        "rewiring_rate_daily",
+        "triadic_closure_prob",
+        "max_degree_cap"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates adoption and network statistics into observables for calibration and evaluation.",
+      "inputs": [
+        "signal.adoption_state",
+        "signal.new_adoptions",
+        "signal.network"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adoptions_daily",
+        "observable.cumulative_adoption_daily",
+        "observable.adoption_gap_income_daily",
+        "observable.network_clustering_daily"
+      ],
+      "dependencies": [
+        "BehaviorDecision",
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate = mean(adopted)\nnew_adoptions_daily = sum(new_adoptions)\ncumulative_adoption = cumulative sum of new_adoptions over time divided by N\nadoption_rate_low = mean(adopted for income_group == 'low')\nadoption_rate_high = mean(adopted for income_group == 'high')\nadoption_gap_income = adoption_rate_high - adoption_rate_low\nnetwork_clustering = average_clustering(signal.network)\napply moving average with window smoothing_window_days to adoption_rate and new_adoptions if report_frequency_days == 1\nemit all observables",
+        "notes": [
+          "Smoothing can be disabled by setting smoothing_window_days=1.",
+          "Clustering from networkx.average_clustering."
+        ]
+      },
+      "requirements": [
+        "pandas",
+        "networkx"
+      ],
+      "module_parameters": [
+        "smoothing_window_days",
+        "group_by",
+        "report_frequency_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of Person agents in the simulation.",
+      "frozen": false
+    },
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "WS",
+      "bounds": null,
+      "owner_module": "NetworkBuilder",
+      "description": "Type of network generator: 'WS', 'ER', 'BA', or 'Empirical'.",
+      "frozen": false
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "int",
+      "default": 8,
+      "bounds": {
+        "low": 2,
+        "high": 100
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target average degree for generated networks.",
+      "frozen": false
+    },
+    {
+      "key": "ws_rewiring_prob_initial",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Initial rewiring probability for Watts-Strogatz generation.",
+      "frozen": false
+    },
+    {
+      "key": "dynamic_rewiring_rate_daily",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Per-node probability of a rewiring attempt each day (assortativity on demographics).",
+      "frozen": false
+    },
+    {
+      "key": "assortativity_homophily",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Strength of demographic assortativity in rewiring (0 none, 1 strong).",
+      "frozen": false
+    },
+    {
+      "key": "edge_weight_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 5.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Mean of edge interaction weights.",
+      "frozen": false
+    },
+    {
+      "key": "edge_weight_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Standard deviation of edge interaction weights.",
+      "frozen": false
+    },
+    {
+      "key": "clustering_bias",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Bias toward triadic closure during initial network setup.",
+      "frozen": false
+    },
+    {
+      "key": "use_empirical_network",
+      "dtype": "bool",
+      "default": false,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "If true, load network from data source instead of generating.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_start_day",
+      "dtype": "int",
+      "default": 15,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyModule",
+      "description": "Day when incentive policy begins.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_strength",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Magnitude of incentive effect on adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "mandate_start_day",
+      "dtype": "int",
+      "default": 25,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyModule",
+      "description": "Day when mandate/penalty begins.",
+      "frozen": false
+    },
+    {
+      "key": "penalty_strength",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Strength of mandate penalty in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_probability",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Probability that the mandate is enforced for a given agent/day.",
+      "frozen": false
+    },
+    {
+      "key": "messaging_campaign_start_day",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyModule",
+      "description": "Day when public messaging campaign starts.",
+      "frozen": false
+    },
+    {
+      "key": "messaging_intensity",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Boost to exogenous message rate due to campaigns.",
+      "frozen": false
+    },
+    {
+      "key": "equity_targeting_enabled",
+      "dtype": "bool",
+      "default": true,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Enable additional policy weight for low-income group.",
+      "frozen": false
+    },
+    {
+      "key": "targeting_priority_low_income_weight",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": 0.5,
+        "high": 2.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Multiplier for policy effect on low-income agents when equity targeting is enabled.",
+      "frozen": false
+    },
+    {
+      "key": "num_info_sources",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 20
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Number of exogenous information sources.",
+      "frozen": false
+    },
+    {
+      "key": "exogenous_message_rate_daily",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Daily probability each source broadcasts.",
+      "frozen": false
+    },
+    {
+      "key": "source_credibility_mean",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Mean credibility of information sources.",
+      "frozen": false
+    },
+    {
+      "key": "transmission_prob_edge",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Base probability of information transmission per edge per day.",
+      "frozen": false
+    },
+    {
+      "key": "exposure_decay_half_life_days",
+      "dtype": "float",
+      "default": 7.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 30.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Half-life for exposure memory decay in days.",
+      "frozen": false
+    },
+    {
+      "key": "content_polarization",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Selectivity of content consumption by alignment.",
+      "frozen": false
+    },
+    {
+      "key": "misinfo_fraction",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Fraction of sources/messages that are misinformation.",
+      "frozen": false
+    },
+    {
+      "key": "correction_effectiveness",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Effectiveness of corrective information to reduce misinformation exposure impact.",
+      "frozen": false
+    },
+    {
+      "key": "info_selectivity_shape",
+      "dtype": "float",
+      "default": 2.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 5.0
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Shape parameter for selectivity function mapping alignment to transmission probability.",
+      "frozen": false
+    },
+    {
+      "key": "base_adoption_bias",
+      "dtype": "float",
+      "default": -2.0,
+      "bounds": {
+        "low": -5.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Intercept of adoption utility logit.",
+      "frozen": false
+    },
+    {
+      "key": "peer_influence_weight",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Weight on neighbor adoption above threshold.",
+      "frozen": false
+    },
+    {
+      "key": "personal_threshold_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Mean threshold for peer adoption before influence activates.",
+      "frozen": false
+    },
+    {
+      "key": "personal_threshold_sd",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Std dev of personal thresholds.",
+      "frozen": false
+    },
+    {
+      "key": "stubbornness_mean",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Mean stubbornness penalty in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "noise_scale_logit",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Std dev of decision noise added to utility logit.",
+      "frozen": false
+    },
+    {
+      "key": "exposure_weight",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Weight on exposure score in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "policy_incentive_weight",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Weight on policy signals in adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "cost_of_adoption",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Direct or perceived cost of adopting.",
+      "frozen": false
+    },
+    {
+      "key": "relapse_probability_daily",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Daily probability to drop adoption if no mandate.",
+      "frozen": false
+    },
+    {
+      "key": "memory_window_days",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 1,
+        "high": 60
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Window used in moving calculations; complements half-life decay.",
+      "frozen": false
+    },
+    {
+      "key": "heterogeneity_scaling",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 3.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Scales the impact of personal thresholds on peer influence term.",
+      "frozen": false
+    },
+    {
+      "key": "initial_adopter_fraction",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Fraction of agents initialized as adopters at t=0.",
+      "frozen": false
+    },
+    {
+      "key": "initial_awareness_mean",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorDecision",
+      "description": "Mean initial awareness assigned to agents at t=0.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_on_adoption",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "TieRewiring",
+      "description": "Preference to connect with same adoption status during rewiring.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_rate_daily",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "TieRewiring",
+      "description": "Per-node probability to attempt adoption-based rewiring each day.",
+      "frozen": false
+    },
+    {
+      "key": "triadic_closure_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "TieRewiring",
+      "description": "Probability that rewiring connects via friend-of-friend.",
+      "frozen": false
+    },
+    {
+      "key": "max_degree_cap",
+      "dtype": "int",
+      "default": 50,
+      "bounds": {
+        "low": 5,
+        "high": 200
+      },
+      "owner_module": "TieRewiring",
+      "description": "Upper bound on degree when adding new ties.",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 1,
+        "high": 30
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Window for moving averages in observables.",
+      "frozen": false
+    },
+    {
+      "key": "group_by",
+      "dtype": "categorical",
+      "default": "global",
+      "bounds": null,
+      "owner_module": "AdoptionAggregator",
+      "description": "Aggregation grouping: 'global', 'age', or 'income'.",
+      "frozen": false
+    },
+    {
+      "key": "report_frequency_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 7
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Cadence for emitting observables.",
+      "frozen": true
+    },
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 7,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulation days.",
+      "frozen": false
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 1000000000
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG.",
+      "frozen": false
+    },
+    {
+      "key": "tick_duration_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Duration of one simulation tick in days.",
+      "frozen": true
+    },
+    {
+      "key": "age_share_young",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Share of population in young age group.",
+      "frozen": false
+    },
+    {
+      "key": "age_share_middle",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Share of population in middle age group.",
+      "frozen": false
+    },
+    {
+      "key": "age_share_senior",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Share of population in senior age group.",
+      "frozen": false
+    },
+    {
+      "key": "income_share_low",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Share of population in low income group.",
+      "frozen": false
+    },
+    {
+      "key": "income_share_mid",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Share of population in middle income group.",
+      "frozen": false
+    },
+    {
+      "key": "income_share_high",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Share of population in high income group.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_behavior.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "sum(new_adoptions)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_behavior.csv:new_adoptions"
+    },
+    {
+      "id": "observable.cumulative_adoption_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "cumsum(new_adoptions)/population_size",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_behavior.csv:cumulative_adoption"
+    },
+    {
+      "id": "observable.adoption_gap_income_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(adopted|income=high) - mean(adopted|income=low)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_behavior.csv:adoption_gap_income"
+    },
+    {
+      "id": "observable.network_clustering_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "networkx.average_clustering(network)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "network_stats.csv:avg_clustering"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_AdoptionRate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_NewAdoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_NewAdoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeakError",
+        "config": {
+          "unit": "days"
+        }
+      }
+    },
+    {
+      "name": "PeakMagnitudeError_NewAdoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_IncomeGap",
+      "inputs": [
+        "observable.adoption_gap_income_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "network_setup": "Use NetworkBuilder parameters to generate or load network at t=0. Assign demographics using age_share_* and income_share_*; draw thresholds, stubbornness, and awareness; set initial adopters according to initial_adopter_fraction."
+  },
+  "algorithms": {
+    "WeightedThresholdLogit": "Noisy logistic adoption probability combining peer adoption above personal threshold, exposure, policy incentives/mandates, and individual traits.",
+    "IndependentCascadeWithDecay": "Information diffusion with per-edge transmission probability and exponential decay of exposure memory.",
+    "AssortativeRewiring": "Degree-preserving rewiring favoring homophily on adoption status and demographics, with optional triadic closure.",
+    "MovingAggregation": "Rolling-window smoothing and cumulative sums to produce daily observables."
+  },
+  "data_sources": [
+    {
+      "name": "train_behavior.csv",
+      "purpose": "Calibration and evaluation of adoption-related observables.",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "new_adoptions",
+        "cumulative_adoption",
+        "adoption_gap_income"
+      ]
+    },
+    {
+      "name": "network_stats.csv",
+      "purpose": "Calibration of structural network observable (average clustering).",
+      "fields_used": [
+        "date",
+        "avg_clustering"
+      ]
+    },
+    {
+      "name": "network_edges.csv",
+      "purpose": "Optional empirical network specification when use_empirical_network=true.",
+      "fields_used": [
+        "source_id",
+        "target_id",
+        "weight"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: loads config, initializes modules, runs simulation loop, triggers evaluation."
+      },
+      {
+        "name": "agents.py",
+        "description": "Definitions for Person and InfoSource entities and their attributes."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder module."
+      },
+      {
+        "name": "modules/policy.py",
+        "description": "Implements PolicyModule."
+      },
+      {
+        "name": "modules/information.py",
+        "description": "Implements InformationDiffusion."
+      },
+      {
+        "name": "modules/behavior.py",
+        "description": "Implements BehaviorDecision."
+      },
+      {
+        "name": "modules/rewiring.py",
+        "description": "Implements TieRewiring."
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "Implements AdoptionAggregator and observable emission."
+      },
+      {
+        "name": "scheduler.py",
+        "description": "Tick scheduler ensuring module dependency order."
+      },
+      {
+        "name": "params.py",
+        "description": "Parameter schema validation and defaults."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric computations using observables."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Data loading, writing, and binding to observables."
+      },
+      {
+        "name": "calibration.py",
+        "description": "Inference/calibration routines (e.g., SBI) using parameter bounds."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "scikit-learn",
+      "pydantic",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_AdoptionRate",
+    "MAE_NewAdoptions",
+    "TimeToPeak_NewAdoptions",
+    "PeakMagnitudeError_NewAdoptions",
+    "MAE_IncomeGap"
+  ]
+}

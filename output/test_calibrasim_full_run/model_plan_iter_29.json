@@ -1,0 +1,987 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based social adoption model on a dynamic contact network with policy broadcasts and social influence. The model simulates daily adoption dynamics driven by peer effects, personal traits, and policy messaging, with network rewiring via homophily.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "ses",
+        "openness",
+        "conformity",
+        "trust_policy",
+        "fatigue",
+        "threshold",
+        "adopted",
+        "awareness",
+        "last_adopt_day",
+        "degree"
+      ],
+      "behaviors": [
+        "receive_policy_signal",
+        "interact_with_contacts",
+        "update_adoption_state",
+        "forgetting_and_fatigue",
+        "rewire_contacts"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "age_group_shares": {
+            "young": 0.25,
+            "adult": 0.6,
+            "senior": 0.15
+          },
+          "ses_shares": {
+            "low": 0.3,
+            "mid": 0.5,
+            "high": 0.2
+          },
+          "openness_mean": 0.0,
+          "openness_std": 0.5,
+          "trust_policy_mean": 0.0,
+          "trust_policy_std": 0.5,
+          "threshold_mean": 0.4,
+          "threshold_std": 0.15,
+          "initial_adoption_rate": 0.05
+        }
+      }
+    },
+    {
+      "name": "PolicyChannel",
+      "attributes": [
+        "message_frequency_days",
+        "message_intensity",
+        "targeting_strength",
+        "reach",
+        "misinformation_fraction"
+      ],
+      "behaviors": [
+        "broadcast_message",
+        "update_trust"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "message_frequency_days": 1,
+          "message_intensity": 0.7,
+          "targeting_strength": 0.3,
+          "reach": 0.6,
+          "misinformation_fraction": 0.1
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkDynamics",
+      "description": "Generates the initial social network and updates it daily via homophilous rewiring and clustering preservation.",
+      "inputs": [
+        "state.agent.adoption_state",
+        "clock.day"
+      ],
+      "outputs": [
+        "signals.graph",
+        "signals.degrees",
+        "signals.average_degree_daily"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day == 0:\n  # Build initial graph with target degree distribution and clustering\n  deg_seq <- sample_negative_binomial(mean=degree_mean, dispersion=degree_dispersion, size=N)\n  G <- configuration_model_with_closure(deg_seq, clustering_bias)\n  apply_homophily(G, attributes=[age_group, ses], strength=homophily_strength)\nelse:\n  # Daily rewiring to maintain homophily and assortativity\n  for each edge e in sample_edges(G, fraction=rewiring_rate):\n    (u, v) <- e\n    if should_rewire(u,v, homophily_strength, adoption_assortativity=assortativity_target):\n      w <- sample_node_similar_to(u, by=[age_group, ses, adopted]) not connected to u\n      rewire_edge(G, (u,v) -> (u,w))\n# Update degrees and average degree signal\nsignals.graph <- G\nsignals.degrees <- degree(G)\nsignals.average_degree_daily <- mean(signals.degrees)",
+        "notes": [
+          "Configuration model with triadic closure to achieve clustering_bias.",
+          "Homophily applied on age_group and ses; adoption assortativity is nudged via rewiring decisions.",
+          "Rewiring uses previous-day adoption_state."
+        ]
+      },
+      "requirements": [
+        "RNG",
+        "GraphLib",
+        "Population",
+        "Clock"
+      ],
+      "module_parameters": [
+        "degree_mean",
+        "degree_dispersion",
+        "clustering_bias",
+        "homophily_strength",
+        "rewiring_rate",
+        "assortativity_target"
+      ]
+    },
+    {
+      "name": "PolicyBroadcast",
+      "description": "Broadcasts policy messages to agents, updating perceived signals, awareness, and trust in response to information and misinformation.",
+      "inputs": [
+        "state.agent.trust_policy",
+        "state.agent.adopted",
+        "clock.day"
+      ],
+      "outputs": [
+        "signals.policy_signal_by_agent",
+        "signals.messages_sent"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day % message_frequency == 0:\n  targets <- select_targets(agents, targeting_strength, criterion=non_adopters_first)\n  reached <- sample_subset(targets, fraction=policy_channel_reach)\n  for agent i in reached:\n    misinformation_factor <- 1 - misinformation_fraction\n    signal_i <- message_intensity * trust_policy_i * misinformation_factor\n    signals.policy_signal_by_agent[i] <- signal_i\n    awareness_i <- min(1.0, awareness_i + 0.2)\n    # Trust update towards signal alignment\n    trust_policy_i <- clamp(trust_policy_i + trust_update_rate * sign(message_intensity) * (1 - misinformation_fraction), -2, 2)\n  signals.messages_sent <- len(reached)\nelse:\n  for agent i:\n    signals.policy_signal_by_agent[i] <- 0.0\n  signals.messages_sent <- 0",
+        "notes": [
+          "Targeting prioritizes non-adopters; tie-breakers by low awareness.",
+          "Trust is bounded to avoid divergence; awareness saturates at 1."
+        ]
+      },
+      "requirements": [
+        "RNG",
+        "Population",
+        "Clock"
+      ],
+      "module_parameters": [
+        "message_frequency",
+        "message_intensity",
+        "targeting_strength",
+        "policy_channel_reach",
+        "misinformation_fraction",
+        "trust_update_rate"
+      ]
+    },
+    {
+      "name": "InteractionScheduler",
+      "description": "Samples daily active contacts from the underlying graph and generates exogenous random meetings.",
+      "inputs": [
+        "signals.graph",
+        "clock.day"
+      ],
+      "outputs": [
+        "signals.daily_active_edges"
+      ],
+      "dependencies": [
+        "NetworkDynamics"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "E_active <- sample_fraction_of_edges(signals.graph, fraction=daily_contact_fraction)\n# Add exogenous random contacts\nfor each agent i:\n  k ~ Poisson(exogenous_contact_rate)\n  for t in 1..k:\n    j <- sample_uniform_agent(excluding=i)\n    if RNG.uniform() < meeting_noise:\n      add_edge(E_active, (i,j))\nsignals.daily_active_edges <- E_active",
+        "notes": [
+          "Edge sampling approximates daily interactions without simulating all edges.",
+          "Random meetings introduce weak mixing beyond the graph."
+        ]
+      },
+      "requirements": [
+        "RNG",
+        "GraphLib",
+        "Population",
+        "Clock"
+      ],
+      "module_parameters": [
+        "daily_contact_fraction",
+        "meeting_noise",
+        "exogenous_contact_rate"
+      ]
+    },
+    {
+      "name": "InfluenceAndAdoption",
+      "description": "Computes adoption probabilities from social, personal, and policy signals; updates agent adoption states with optional disadoption.",
+      "inputs": [
+        "signals.daily_active_edges",
+        "signals.policy_signal_by_agent",
+        "state.agent.adopted",
+        "state.agent.openness",
+        "state.agent.threshold",
+        "clock.day"
+      ],
+      "outputs": [
+        "signals.adoption_updates"
+      ],
+      "dependencies": [
+        "InteractionScheduler",
+        "PolicyBroadcast"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "signals.adoption_updates <- []\n# Compute neighbor influence per agent from active edges\nfor agent i:\n  neigh <- neighbors_in_edges(signals.daily_active_edges, i)\n  if |neigh| > 0:\n    frac_adopted <- mean(adopted[j] for j in neigh)\n  else:\n    frac_adopted <- 0\n  social_term <- social_influence_weight * (frac_adopted - threshold_i)\n  trait_term <- personal_trait_weight * openness_i\n  policy_term <- policy_signal_weight * signals.policy_signal_by_agent[i]\n  fatigue_i <- max(0, fatigue_i - fatigue_decay)\n  logit_p <- base_adoption_logit + social_term + trait_term + policy_term - fatigue_i + RNG.normal(0, noise_scale)\n  p_adopt <- sigmoid(logit_p)\n  if adopted_i == 0 and RNG.uniform() < p_adopt:\n    adopted_i <- 1\n    last_adopt_day_i <- day\n    fatigue_i <- fatigue_i + 0.1\n    append(signals.adoption_updates, (i, 1))\n  else if adopted_i == 1 and RNG.uniform() < disadoption_rate:\n    adopted_i <- 0\n    append(signals.adoption_updates, (i, -1))",
+        "notes": [
+          "Threshold encodes individual resistance; social influence compares neighbor adoption to threshold.",
+          "Fatigue reduces adoption propensity; resets slightly upon adoption.",
+          "Noise term captures unobserved factors."
+        ]
+      },
+      "requirements": [
+        "RNG",
+        "Population",
+        "Clock"
+      ],
+      "module_parameters": [
+        "base_adoption_logit",
+        "social_influence_weight",
+        "personal_trait_weight",
+        "policy_signal_weight",
+        "fatigue_decay",
+        "disadoption_rate",
+        "noise_scale",
+        "max_memory_days"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily observables for calibration and evaluation; applies optional smoothing and reporting lag.",
+      "inputs": [
+        "state.agent.adopted",
+        "signals.adoption_updates",
+        "signals.messages_sent",
+        "signals.average_degree_daily",
+        "clock.day"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adopters_daily",
+        "observable.policy_messages_daily",
+        "observable.average_degree_daily"
+      ],
+      "dependencies": [
+        "InfluenceAndAdoption",
+        "PolicyBroadcast",
+        "NetworkDynamics"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "raw_adoption_rate <- mean(adopted_i for i in agents)\nraw_new_adopters <- sum(1 for (i, delta) in signals.adoption_updates if delta == 1)\nraw_messages <- signals.messages_sent\nraw_avg_degree <- signals.average_degree_daily\n# Apply smoothing and lag\nadoption_rate_series.append(raw_adoption_rate)\nnew_adopters_series.append(raw_new_adopters)\nmessages_series.append(raw_messages)\navg_degree_series.append(raw_avg_degree)\nadoption_rate_out <- moving_average(adoption_rate_series, window=smoothing_window).lag(report_lag_days).last()\nnew_adopters_out <- moving_average(new_adopters_series, window=smoothing_window).lag(report_lag_days).last()\nmessages_out <- moving_average(messages_series, window=smoothing_window).lag(report_lag_days).last()\navg_degree_out <- moving_average(avg_degree_series, window=smoothing_window).lag(report_lag_days).last()\n# Emit observables\nobservable.adoption_rate_daily <- adoption_rate_out\nobservable.new_adopters_daily <- new_adopters_out\nobservable.policy_messages_daily <- messages_out\nobservable.average_degree_daily <- avg_degree_out",
+        "notes": [
+          "Smoothing is causal (uses past window only) and lag simulates reporting delays.",
+          "Observables are emitted once per day."
+        ]
+      },
+      "requirements": [
+        "TimeSeriesBuffer",
+        "Population",
+        "Clock"
+      ],
+      "module_parameters": [
+        "smoothing_window",
+        "report_lag_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Seed for random number generation.",
+      "frozen": "true"
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of agents in the simulation.",
+      "frozen": "false"
+    },
+    {
+      "key": "sim_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of adopters at day 0.",
+      "frozen": "false"
+    },
+    {
+      "key": "age_share_young",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Share of agents in young age group.",
+      "frozen": "false"
+    },
+    {
+      "key": "age_share_adult",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.4,
+        "high": 0.7
+      },
+      "owner_module": "global",
+      "description": "Share of agents in adult age group.",
+      "frozen": "false"
+    },
+    {
+      "key": "age_share_senior",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.05,
+        "high": 0.3
+      },
+      "owner_module": "global",
+      "description": "Share of agents in senior age group.",
+      "frozen": "false"
+    },
+    {
+      "key": "ses_share_low",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.6
+      },
+      "owner_module": "global",
+      "description": "Share of agents in low SES.",
+      "frozen": "false"
+    },
+    {
+      "key": "ses_share_mid",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.2,
+        "high": 0.7
+      },
+      "owner_module": "global",
+      "description": "Share of agents in middle SES.",
+      "frozen": "false"
+    },
+    {
+      "key": "ses_share_high",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Share of agents in high SES.",
+      "frozen": "false"
+    },
+    {
+      "key": "openness_mean",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of openness trait distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "openness_std",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Std dev of openness trait distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "trust_policy_mean",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial trust in policy channel.",
+      "frozen": "false"
+    },
+    {
+      "key": "trust_policy_std",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Std dev of initial trust in policy channel.",
+      "frozen": "false"
+    },
+    {
+      "key": "threshold_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.9
+      },
+      "owner_module": "global",
+      "description": "Mean of personal adoption threshold.",
+      "frozen": "false"
+    },
+    {
+      "key": "threshold_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.05,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std dev of personal adoption threshold.",
+      "frozen": "false"
+    },
+    {
+      "key": "degree_mean",
+      "dtype": "float",
+      "default": 8.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 20.0
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Average degree of the contact network.",
+      "frozen": "false"
+    },
+    {
+      "key": "degree_dispersion",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.5,
+        "high": 3.0
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Dispersion of degree distribution (negative binomial shape).",
+      "frozen": "false"
+    },
+    {
+      "key": "clustering_bias",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Strength of triadic closure in initial and rewired graph.",
+      "frozen": "false"
+    },
+    {
+      "key": "homophily_strength",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Preference to connect to similar agents (age, SES, adoption).",
+      "frozen": "false"
+    },
+    {
+      "key": "rewiring_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Daily fraction of edges considered for rewiring.",
+      "frozen": "false"
+    },
+    {
+      "key": "assortativity_target",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Target adoption-based assortativity bias applied in rewiring.",
+      "frozen": "false"
+    },
+    {
+      "key": "daily_contact_fraction",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.05,
+        "high": 1.0
+      },
+      "owner_module": "InteractionScheduler",
+      "description": "Fraction of edges activated for daily interactions.",
+      "frozen": "false"
+    },
+    {
+      "key": "meeting_noise",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "InteractionScheduler",
+      "description": "Probability that a random meeting occurs when sampled.",
+      "frozen": "false"
+    },
+    {
+      "key": "exogenous_contact_rate",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "InteractionScheduler",
+      "description": "Poisson rate of random contacts per agent per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "message_frequency",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 7
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Days between policy broadcasts.",
+      "frozen": "false"
+    },
+    {
+      "key": "message_intensity",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Strength of policy signal per message.",
+      "frozen": "false"
+    },
+    {
+      "key": "targeting_strength",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Degree to which non-adopters are prioritized in messaging.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_channel_reach",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Fraction of targeted agents reached per broadcast.",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Share of messages effectively countered by misinformation.",
+      "frozen": "false"
+    },
+    {
+      "key": "trust_update_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Daily learning rate for trust updates due to broadcasts.",
+      "frozen": "false"
+    },
+    {
+      "key": "base_adoption_logit",
+      "dtype": "float",
+      "default": -2.0,
+      "bounds": {
+        "low": -5.0,
+        "high": 0.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Baseline log-odds of adoption in absence of other factors.",
+      "frozen": "false"
+    },
+    {
+      "key": "social_influence_weight",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Weight of social influence term in adoption logit.",
+      "frozen": "false"
+    },
+    {
+      "key": "personal_trait_weight",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Weight of personal openness trait in adoption logit.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_signal_weight",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Weight of policy signal in adoption logit.",
+      "frozen": "false"
+    },
+    {
+      "key": "fatigue_decay",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Daily decay of fatigue affecting adoption likelihood.",
+      "frozen": "false"
+    },
+    {
+      "key": "disadoption_rate",
+      "dtype": "float",
+      "default": 0.001,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Daily probability that an adopter reverts to non-adopter.",
+      "frozen": "false"
+    },
+    {
+      "key": "noise_scale",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Std dev of Gaussian noise in adoption logit.",
+      "frozen": "false"
+    },
+    {
+      "key": "max_memory_days",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 1,
+        "high": 60
+      },
+      "owner_module": "InfluenceAndAdoption",
+      "description": "Horizon for memory of past interactions/policy in behavior update.",
+      "frozen": "false"
+    },
+    {
+      "key": "smoothing_window",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 7
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Window for moving average smoothing of observables.",
+      "frozen": "false"
+    },
+    {
+      "key": "report_lag_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 3
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Reporting lag applied to observables.",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_adoption.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adopters_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "count(adoption_updates == +1)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_adoption.csv:new_adopters"
+    },
+    {
+      "id": "observable.policy_messages_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "signals.messages_sent",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_policy.csv:messages_sent"
+    },
+    {
+      "id": "observable.average_degree_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(degree(graph))",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "network_bench.csv:avg_degree"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAPE",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "MAPE",
+        "config": {
+          "epsilon": 1.0
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "PeakTimingError",
+        "config": {
+          "window": [
+            0,
+            59
+          ]
+        }
+      }
+    },
+    {
+      "name": "PearsonR",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "Correlation",
+        "config": {
+          "method": "pearson"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "network": {
+      "degree_mean": 8.0,
+      "degree_dispersion": 1.5,
+      "clustering_bias": 0.2,
+      "homophily_strength": 0.5
+    },
+    "agent_attributes": {
+      "age_shares": [
+        0.25,
+        0.6,
+        0.15
+      ],
+      "ses_shares": [
+        0.3,
+        0.5,
+        0.2
+      ],
+      "openness_mean": 0.0,
+      "openness_std": 0.5,
+      "trust_policy_mean": 0.0,
+      "trust_policy_std": 0.5,
+      "threshold_mean": 0.4,
+      "threshold_std": 0.15,
+      "initial_adoption_rate": 0.05
+    }
+  },
+  "algorithms": {
+    "ConfigurationGraphWithClustering": "Generates a configuration model graph from a degree sequence and adds triadic closures to reach target clustering.",
+    "HomophilousRewiring": "Edge rewiring process that prefers linking similar agents by attributes and nudges adoption assortativity.",
+    "DailyActiveEdgeSampling": "Samples a fraction of edges to represent daily interactions plus Poisson random exogenous contacts.",
+    "TargetedBroadcast": "Selects non-adopters preferentially and broadcasts messages with specified reach and intensity, incorporating misinformation.",
+    "LogisticAdoption": "Adoption probability computed via logistic model combining social, personal, policy terms, and fatigue with noise."
+  },
+  "data_sources": [
+    {
+      "name": "train_adoption.csv",
+      "purpose": "Calibration and evaluation of adoption levels and new adopter counts.",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "new_adopters"
+      ]
+    },
+    {
+      "name": "train_policy.csv",
+      "purpose": "Calibration of policy broadcast intensity and timing.",
+      "fields_used": [
+        "date",
+        "messages_sent"
+      ]
+    },
+    {
+      "name": "network_bench.csv",
+      "purpose": "External validation of average network degree over time.",
+      "fields_used": [
+        "date",
+        "avg_degree"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "engine.py",
+        "description": "Main simulation loop, module scheduling, clock management, and random seed initialization."
+      },
+      {
+        "name": "agents.py",
+        "description": "Definitions for Person and PolicyChannel agents, attribute initialization utilities."
+      },
+      {
+        "name": "network_module.py",
+        "description": "NetworkDynamics module implementation including graph generation and rewiring."
+      },
+      {
+        "name": "policy_module.py",
+        "description": "PolicyBroadcast module and targeting logic."
+      },
+      {
+        "name": "interaction_module.py",
+        "description": "InteractionScheduler module and daily active edge sampling."
+      },
+      {
+        "name": "influence_module.py",
+        "description": "InfluenceAndAdoption module implementing logistic adoption updates."
+      },
+      {
+        "name": "aggregation_module.py",
+        "description": "AdoptionAggregator module and observable computation with smoothing and lag."
+      },
+      {
+        "name": "params.py",
+        "description": "Parameter registry with defaults, bounds, and ownership for SBI and configuration."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Data loading, observable-to-data binding, metric computation, and result serialization."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "scipy",
+      "networkx",
+      "pandas",
+      "numba"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "MAPE",
+    "TimeToPeak",
+    "PearsonR"
+  ]
+}

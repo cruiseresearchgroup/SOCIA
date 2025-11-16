@@ -1,0 +1,225 @@
+{
+  "summary": "The simulation framework is largely in place and runs, but calibration/evaluation logic reuses a mutable Simulation instance across trials without resetting state and does not evaluate on the specified window. This corrupts metrics and leads to NaN/None scores during calibration. Micro-transition capture is always on and may explode memory/IO. CLI overrides bypass registry safeguards. Addressing these issues will stabilize calibration, reduce resource usage, and improve alignment with ground truth.",
+  "critical_issues": [
+    {
+      "issue": "Calibration reuses the same Simulation instance across trials without resetting state",
+      "impact": "Metrics and internal state accumulate across runs, corrupting comparisons between trials and producing invalid (NaN/None) scores. Trials are not comparable and best_params selection is unreliable.",
+      "solution": "Instantiate a fresh Simulation per evaluation or add a Simulation.reset() (or reset_state()) method and call it before each run. Ensure parameters are applied to the new instance or re-applied after reset.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Evaluation metrics are computed on full-series instead of the requested calibration window",
+      "impact": "Length mismatches with ground truth cause NaN/None RMSE and MAE, breaking the optimization loop and yielding invalid calibration results.",
+      "solution": "Extend Simulation.evaluate() to accept a window argument and slice both simulated observables and ground-truth series to [start:end] (inclusive) before metric computation. Use this in evaluate_params().",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Calibration score casts possibly None to float in RandomSearchCalibrator",
+      "impact": "When rmse_agg is None/NaN (due to window mismatch or missing GT), float(None) raises TypeError and interrupts calibration.",
+      "solution": "Guard against None/NaN before casting; default to +inf if metric is missing or not finite.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Micro-transition capture is on by default and stored in module I/O",
+      "impact": "O(N*days) records can cause high memory usage and very large JSON artifacts, slowing runs and potentially causing OOM on larger populations or budgets.",
+      "solution": "Default capture_micro to False and add a parameter or CLI flag to enable it. Optionally subsample records and avoid saving them in module I/O unless explicitly requested.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "CLI overrides bypass ParameterRegistry.set_params() and unknown/frozen checks",
+      "impact": "Unknown keys and frozen params can be silently overwritten, reducing safety and reproducibility.",
+      "solution": "Use registry.set_params() to apply overrides and persist warnings.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Evaluation window handling",
+      "current_approach": "evaluate() compares full-length observed series to ground truth or returns None metrics; evaluate_params ignores window alignment.",
+      "suggested_approach": "Add a window parameter to evaluate() and slice both simulated and GT series before computing RMSE/MAE/Peak/Time-to-Peak.",
+      "expected_benefit": "Valid, comparable metrics for calibration and more robust fitting."
+    },
+    {
+      "aspect": "Micro-transition data volume",
+      "current_approach": "All micro-transitions recorded daily for all agents and saved to module I/O.",
+      "suggested_approach": "Default off; if enabled, sample a fraction (e.g., 5-10%), and do not store in daily IO unless explicitly requested.",
+      "expected_benefit": "Substantial reduction in memory/IO footprint and faster runs."
+    },
+    {
+      "aspect": "Parameter bounds enforcement",
+      "current_approach": "bounds() is defined but not used during apply().",
+      "suggested_approach": "Clamp updates in ParamsAdapter.apply() using registry.bounds(key) to keep values in valid ranges.",
+      "expected_benefit": "More stable calibration and prevention of invalid configurations."
+    },
+    {
+      "aspect": "Network reproducibility",
+      "current_approach": "NetworkX generators are called with seed=None.",
+      "suggested_approach": "Pass a seed (from random_seed) to the graph constructors.",
+      "expected_benefit": "Fully deterministic simulations given a seed."
+    },
+    {
+      "aspect": "Observation aggregation responsibilities",
+      "current_approach": "ObservationAggregator mutates state (raw and cumulative) and returns emissions; Simulation.run also updates observables.",
+      "suggested_approach": "Keep raw accumulation in aggregator, but move cumulative computation to commit or ensure aggregator only returns emissions without appending cumulative list.",
+      "expected_benefit": "Cleaner separation of concerns and fewer subtle state coupling risks."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Add window support to Simulation.evaluate(gt=None, window=None) and slice series before computing metrics.",
+      "reason": "Avoid length mismatches and NaN/None metrics; enable windowed calibration.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "In evaluate_params, build a fresh Simulation for each evaluation or call a new reset() method; apply params to that instance; pass window to evaluate().",
+      "reason": "Prevent state carry-over across trials and produce comparable metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Harden calibration score handling: treat None/NaN as +inf in RandomSearchCalibrator.fit().",
+      "reason": "Prevent exceptions and ensure robust optimization.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Default capture_micro to False; add CLI flag or parameter toggle; optionally subsample micro records.",
+      "reason": "Reduce memory/IO footprint and avoid performance degradation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Apply CLI overrides via ParameterRegistry.set_params() and persist warnings.",
+      "reason": "Respect frozen/unknown keys and ensure consistent validation.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Clamp parameters to bounds in ParamsAdapter.apply() using registry.bounds().",
+      "reason": "Ensure valid parameter ranges and avoid instability.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Seed NetworkX graph generators with the configured random_seed to ensure reproducibility.",
+      "reason": "Make network generation reproducible.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Avoid duplicative cumulative updates; compute cumulative_adoptions in Simulation.run commit (using emitted smoothed_new) and keep aggregator focused on raw/smoothed/lagged emissions.",
+      "reason": "Simplify data flow and reduce coupling.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Guard saving of micro-transitions in module_daily_io or sample the records; optionally skip saving them in save_all_io().",
+      "reason": "Keep artifact sizes manageable and avoid timeouts.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Overall adoption rate RMSE",
+      "current_gap": "NaN/None due to window mismatch; if fixed, still may not fit observed timing of peaks.",
+      "suggestion": "Use windowed evaluation and calibrate social_weight/media_weight/baseline_media_intensity; optionally add time-varying media pulses and policy adherence heterogeneity parameters for better peak timing."
+    },
+    {
+      "metric": "New adoptions (incident) shape",
+      "current_gap": "Smoothing and lag are applied but may not match reporting artifacts in data.",
+      "suggestion": "Tune smoothing_window_days and report_lag_days against data (or infer from data). Consider weekday seasonality or surge/pulse events aligned to known interventions."
+    },
+    {
+      "metric": "Community-level adoption curves",
+      "current_gap": "Uniform community assignment and policy targeting by size only.",
+      "suggestion": "Allow variable community mixing and targeted media/policy strength per community from data (if available), and include degree-biased reach for influencers."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement windowed evaluation in Simulation.evaluate() and use it in evaluate_params().",
+    "Reset or recreate Simulation for each calibrator trial to avoid state accumulation.",
+    "Harden RandomSearchCalibrator.fit() score extraction to handle None/NaN metrics.",
+    "Default capture_micro to False and add a flag/parameter to enable or subsample it.",
+    "Apply CLI overrides via ParameterRegistry.set_params() and persist warnings.",
+    "Clamp parameter updates to registry bounds in ParamsAdapter.apply().",
+    "Seed NetworkX graph generators for reproducibility."
+  ],
+  "additional_comments": "The codebase has strong structure with modular components and clear parameter registry. Adding windowed evaluation, proper resetting, and safe calibration scoring will stabilize the pipeline. Consider optional gzip compression for large IO and removing unused imports (sys).",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def evaluate(self, gt: Optional[Dict[str, List[float]]] = None) -> Dict[str, Any]:\n    # ...\n    y_true_rate = gt.get(\"overall_adoption_rate\", []) if gt else []\n    y_true_new = gt.get(\"new_adoptions\", []) if gt else []\n    # compute metrics on full series\n",
+      "after": "def evaluate(self, gt: Optional[Dict[str, List[float]]] = None, window: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:\n    obs = self.state[\"observables\"]\n    y_hat_rate_full = obs.get(\"adoption_rate_daily\", [])\n    y_hat_new_full = obs.get(\"new_adoptions_daily\", [])\n    if gt is None:\n        gt = self._load_ground_truth()\n    y_true_rate_full = gt.get(\"overall_adoption_rate\", []) if gt else []\n    y_true_new_full = gt.get(\"new_adoptions\", []) if gt else []\n    # slice by window\n    if window is not None:\n        s, e = window\n        y_hat_rate = y_hat_rate_full[s:e+1]\n        y_hat_new = y_hat_new_full[s:e+1]\n        y_true_rate = y_true_rate_full[s:e+1] if y_true_rate_full else []\n        y_true_new = y_true_new_full[s:e+1] if y_true_new_full else []\n    else:\n        y_hat_rate, y_hat_new = y_hat_rate_full, y_hat_new_full\n        y_true_rate, y_true_new = y_true_rate_full, y_true_new_full\n    # compute metrics on sliced series\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    adapter = ParamsAdapter(registry=simulator.params)\n    adapter.apply(simulator, params)\n    start, end = window\n    simulator.run(start, end)\n    metrics = simulator.evaluate()\n    rmse_agg = metrics.get(\"RMSE_overall_adoption\", None)\n",
+      "after": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    # create a fresh simulator to avoid state carryover\n    reg = simulator.params\n    sim_eval = Simulation(params=reg, artifacts_root=simulator.artifacts_root, data_dir=simulator.data_dir)\n    adapter = ParamsAdapter(registry=sim_eval.params)\n    adapter.apply(sim_eval, params)\n    start, end = window\n    sim_eval.run(start, end)\n    metrics = sim_eval.evaluate(window=window)\n    rmse_agg = metrics.get(\"RMSE_overall_adoption\", None)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "score = float(metrics.get(\"RMSE_aggregate\", float(\"inf\")))",
+      "after": "score_raw = metrics.get(\"RMSE_aggregate\", None)\nscore = float(score_raw) if isinstance(score_raw, (int, float)) and math.isfinite(float(score_raw)) else float(\"inf\")",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.state = {\n    # ...\n    \"capture_micro\": True,\n}",
+      "after": "self.state = {\n    # ...\n    \"capture_micro\": bool(self.params.values.get(\"capture_micro\", False)),\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "for m in self.modules:\n    out = m.forward(self.state, buffers, self.params, t)\n    # Save outputs to buffer\n    for k, v in out.items():\n        buffers[k] = v\n    daily_io[m.name] = {**out}\n",
+      "after": "for m in self.modules:\n    out = m.forward(self.state, buffers, self.params, t)\n    for k, v in out.items():\n        buffers[k] = v\n    # Optionally skip micro transitions in IO to reduce size\n    io_out = dict(out)\n    if not self.params.values.get(\"save_micro_io\", False):\n        io_out.pop(\"micro.transitions\", None)\n    daily_io[m.name] = io_out\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "raw_params = load_parameters_file(args.param_file)\n# ...\nregistry = ParameterRegistry(defs, raw_params)\nwarnings = {}\nfor k, v in overrides_dict.items():\n    if registry.is_frozen(k):\n        warnings[k] = f\"Parameter '{k}' is frozen and ignored override.\"\n        continue\n    registry.values[k] = v\n",
+      "after": "raw_params = load_parameters_file(args.param_file)\nregistry = ParameterRegistry(load_parameter_definitions(args.parameter_defs, raw_params), raw_params)\n# apply overrides via registry API\nwarnings = registry.set_params(**overrides_dict)\nif warnings:\n    print(\"Override warnings:\", warnings)\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "for i in range(N):\n    if net_type == 0:\n        G = nx.watts_strogatz_graph(N, k, rewiring_prob, seed=None)\n",
+      "after": "seed_val = int(self.params.values.get(\"random_seed\", 42))\nif net_type == 0:\n    G = nx.watts_strogatz_graph(N, k, rewiring_prob, seed=seed_val)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "for k, v in updates.items():\n    if self.registry.is_frozen(k):\n        warnings[k] = f\"Parameter '{k}' is frozen; ignoring update.\"\n        continue\n    self.registry.values[k] = v\n",
+      "after": "for k, v in updates.items():\n    if self.registry.is_frozen(k):\n        warnings[k] = f\"Parameter '{k}' is frozen; ignoring update.\"\n        continue\n    low, high = self.registry.bounds(k)\n    if isinstance(v, (int, float)) and (low is not None or high is not None):\n        if low is not None: v = max(low, v)\n        if high is not None: v = min(high, v)\n    self.registry.values[k] = v\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "metrics = simulator.evaluate()\n# Construct aggregate metrics\nrmse_agg = metrics.get(\"RMSE_overall_adoption\", None)\nmae_agg = metrics.get(\"MAE_new_adoptions\", None)\n",
+      "after": "metrics = sim_eval.evaluate(window=window)\n# Construct aggregate metrics\nrmse_agg = metrics.get(\"RMSE_overall_adoption\", None)\nmae_agg = metrics.get(\"MAE_new_adoptions\", None)\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration expands the simulation code comprehensively and adds safety in JSON dumping. However, calibration still reuses the mutable simulator across trials, evaluation ignores windows, and override application bypasses registry validation.",
+    "positive_impacts": [
+      "Safe JSON dumping with NaN/inf sanitization reduces parsing errors.",
+      "Clear modularization of media, influence, decay, and observation modules.",
+      "Rich parameter registry and adapters provide a flexible calibration surface."
+    ],
+    "negative_impacts": [
+      "Calibration scoring attempts to float(None) in RandomSearchCalibrator if metrics are missing.",
+      "Overrides applied directly to registry values bypass frozen/unknown checks.",
+      "Micro-transitions always recorded, risking large artifacts and memory pressure."
+    ],
+    "suggestions": [
+      "Implement a window-aware evaluation and reset/recreate simulation per trial.",
+      "Harden calibration score handling and apply CLI overrides via set_params().",
+      "Default micro capture to off and add subsampling; avoid saving in IO unless requested.",
+      "Clamp parameter updates to bounds and seed the network generator for reproducibility."
+    ]
+  }
+}

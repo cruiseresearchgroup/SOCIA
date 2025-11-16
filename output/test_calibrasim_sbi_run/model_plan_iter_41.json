@@ -1,0 +1,783 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion-of-adoption model on a social network with peer influence, targeted policy broadcasting, contact scheduling, and adherence decay. Designed for calibration against daily adoption time series.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "community_id",
+        "degree",
+        "susceptibility",
+        "adoption_threshold",
+        "personal_bias",
+        "adopted",
+        "adherence",
+        "fatigue",
+        "last_adopted_day",
+        "exposure_count"
+      ],
+      "behaviors": [
+        "schedule_contacts_daily",
+        "receive_media_exposure",
+        "update_adoption_state",
+        "adherence_decay_and_relapse"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "age_group_probs": {
+            "0-17": 0.2,
+            "18-34": 0.3,
+            "35-49": 0.25,
+            "50+": 0.25
+          },
+          "community_assignment": "uniform_over_[0..(community_count-1)]",
+          "initial_adoption_rate": 0.05,
+          "adoption_threshold_distribution": {
+            "type": "truncated_normal",
+            "mean": 0.6,
+            "sd": 0.2,
+            "low": 0.0,
+            "high": 2.0
+          },
+          "personal_bias_distribution": {
+            "type": "normal",
+            "mean": 0.0,
+            "sd": 0.15
+          },
+          "susceptibility_distribution": {
+            "type": "beta",
+            "alpha": 2.0,
+            "beta": 5.0
+          },
+          "adherence_initial": {
+            "if_adopted": 1.0,
+            "if_not_adopted": 0.0
+          }
+        }
+      }
+    },
+    {
+      "name": "Broadcaster",
+      "attributes": [
+        "daily_budget",
+        "message_intensity",
+        "target_top_k_fraction",
+        "retargeting_cooldown_days",
+        "media_decay_rate",
+        "last_targeted_set"
+      ],
+      "behaviors": [
+        "select_targets",
+        "broadcast_messages",
+        "decay_media_effects"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "daily_budget": 500,
+          "message_intensity": 0.7,
+          "target_top_k_fraction": 0.05,
+          "retargeting_cooldown_days": 7,
+          "media_decay_rate": 0.5
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "ContactScheduler",
+      "description": "Generates daily contact events between persons based on a base small-world network, random mixing, and assortativity.",
+      "inputs": [
+        "state.persons",
+        "network.base_graph"
+      ],
+      "outputs": [
+        "signal.contact_events",
+        "signal.contacts_per_capita_daily"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  base_neighbors = neighbors_of(i) in base_graph\n  k_contacts ~ Poisson(contact_rate_mean)\n  n_base = round(k_contacts * (1 - random_mixing_fraction))\n  n_random = k_contacts - n_base\n  contacts = sample_without_replacement(base_neighbors, min(n_base, len(base_neighbors)))\n  # assortative random mixing by community and adoption\n  candidate_pool = all_nodes if n_random > 0 else []\n  if n_random > 0:\n    weights = []\n    for j in candidate_pool:\n      w = 1.0\n      if community_id(j) == community_id(i): w += assortativity_strength\n      if adopted(j) == adopted(i): w += 0.5 * assortativity_strength\n      weights.append(max(w, 0.001))\n    contacts += weighted_sample_without_replacement(candidate_pool \\ {i} \\ base_neighbors, n_random, weights)\n  for each contact j in contacts:\n    w_ij ~ LogNormal(mu=log(edge_weight_mean^2 / sqrt(edge_weight_sd^2 + edge_weight_mean^2)), sigma=sqrt(log(1 + (edge_weight_sd^2 / edge_weight_mean^2))))\n    emit (i, j, w_ij) into signal.contact_events\nif Bernoulli(daily_rewiring_prob):\n  rewire a small fraction of edges in base_graph using Watts-Strogatz with base_network_k and network_rewiring_prob\nsignal.contacts_per_capita_daily = len(signal.contact_events) / population_size",
+        "notes": [
+          "Base network created at initialization via Watts-Strogatz (N, base_network_k, network_rewiring_prob).",
+          "Edge weights drawn lognormal to ensure positive contact strengths.",
+          "Assortativity increases likelihood of in-community and same-adoption-state contacts."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy"
+      ],
+      "module_parameters": [
+        "contact_rate_mean",
+        "random_mixing_fraction",
+        "daily_rewiring_prob",
+        "base_network_k",
+        "edge_weight_mean",
+        "edge_weight_sd",
+        "community_count",
+        "assortativity_strength",
+        "network_rewiring_prob"
+      ]
+    },
+    {
+      "name": "PolicyBroadcast",
+      "description": "Selects influential targets and broadcasts policy messages that translate into person-level media exposure signals.",
+      "inputs": [
+        "state.persons",
+        "network.base_graph"
+      ],
+      "outputs": [
+        "signal.media_exposure",
+        "signal.message_reach_rate"
+      ],
+      "dependencies": [
+        "ContactScheduler"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "compute degree centrality deg[i] for all nodes i (cached)\nK = max(1, floor(population_size * target_top_k_fraction))\ntargets = top_K_nodes_by(deg) excluding last_targeted_set if within retargeting_cooldown_days\nif len(targets) > broadcaster_daily_budget:\n  targets = random_sample(targets, broadcaster_daily_budget)\nfor each person i:\n  baseline = 0.0\n  if i in targets:\n    baseline += message_intensity\n  # spillover: neighbors of targets get partial exposure\n  for neighbor t in neighbors_that_are_targets(i):\n    baseline += 0.25 * message_intensity / max(1, degree(i))\n  # apply media memory decay\n  media_prev = media_memory[i] if exists else 0.0\n  media_memory[i] = media_prev * (1 - media_decay_rate) + baseline\n  signal.media_exposure[i] = media_memory[i]\nsignal.message_reach_rate = mean(1.0 if signal.media_exposure[i] > 0 else 0.0 for i in persons)\nupdate last_targeted_set and last_targeted_day",
+        "notes": [
+          "media_memory is per-person, decaying geometric memory of policy exposure.",
+          "Spillover models information diffusion beyond direct targets."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy"
+      ],
+      "module_parameters": [
+        "broadcaster_daily_budget",
+        "message_intensity",
+        "target_top_k_fraction",
+        "retargeting_cooldown_days",
+        "media_decay_rate"
+      ]
+    },
+    {
+      "name": "AdoptionUpdate",
+      "description": "Updates person adoption and adherence based on peer influence through contact events, media exposure, personal thresholds, noise, and relapse dynamics.",
+      "inputs": [
+        "state.persons",
+        "signal.contact_events",
+        "signal.media_exposure"
+      ],
+      "outputs": [
+        "state.persons",
+        "signal.adoption_transitions"
+      ],
+      "dependencies": [
+        "ContactScheduler",
+        "PolicyBroadcast"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "initialize peer_influence[i] = 0 for all persons\nfor (i, j, w_ij) in signal.contact_events:\n  peer_influence[i] += w_ij * adopted(j)\n  peer_influence[j] += w_ij * adopted(i)\n# cap influence by max_influence_neighbors and normalize\nfor each person i:\n  peer_influence[i] = peer_influence[i] / (1.0 + max(1, min(degree(i), max_influence_neighbors)))\n# compute adoption probability via logistic model\nsignal.adoption_transitions = []\nfor each person i:\n  if not adopted(i):\n    x = peer_influence_strength * peer_influence[i] + media_influence_strength * signal.media_exposure[i] + personal_bias(i) - adoption_threshold(i)\n    p_adopt = 1.0 / (1.0 + exp(-(x)))\n    p_adopt = clip(p_adopt + Normal(0, noise_scale), 0.0, 1.0)\n    if Bernoulli(p_adopt):\n      set adopted(i) = True\n      adherence(i) = 1.0\n      last_adopted_day(i) = current_day\n      signal.adoption_transitions.append((i, 0, 1))\n  else:\n    # adherence decay and potential relapse\n    adherence(i) = max(0.0, adherence(i) * (1 - adherence_decay_rate))\n    if current_day - last_adopted_day(i) >= relapse_cooldown_days:\n      if Bernoulli(relapse_prob * (1 - adherence(i))):\n        set adopted(i) = False\n        adherence(i) = 0.0\n        signal.adoption_transitions.append((i, 1, 0))",
+        "notes": [
+          "Logistic response to combined peer and media inputs against individual thresholds.",
+          "Adherence decay reduces commitment over time; relapse allows churn."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "peer_influence_strength",
+        "media_influence_strength",
+        "adoption_threshold_mean",
+        "adoption_threshold_sd",
+        "personal_bias_sd",
+        "noise_scale",
+        "adherence_decay_rate",
+        "relapse_prob",
+        "relapse_cooldown_days",
+        "max_influence_neighbors"
+      ]
+    },
+    {
+      "name": "ObservationAggregator",
+      "description": "Aggregates daily observables for calibration and evaluation.",
+      "inputs": [
+        "state.persons",
+        "signal.contact_events",
+        "signal.media_exposure",
+        "signal.adoption_transitions"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adoptions_daily",
+        "observable.message_reach_daily",
+        "observable.contacts_per_capita_daily"
+      ],
+      "dependencies": [
+        "AdoptionUpdate",
+        "PolicyBroadcast",
+        "ContactScheduler"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate = mean(1.0 if adopted(i) else 0.0 for i in persons)\nnew_adoptions = count of (i, 0, 1) in signal.adoption_transitions\ncontacts_per_capita = len(signal.contact_events) / population_size\nmessage_reach = mean(1.0 if signal.media_exposure[i] > 0 else 0.0 for i in persons)\nif smoothing_window_days > 1:\n  apply moving average of window smoothing_window_days to each observable series\napply report_lag_days by shifting series forward if report_lag_days > 0\nemit observables",
+        "notes": [
+          "Moving average smoothing is optional and controlled by parameter.",
+          "Report lag can align model observables with reporting delays in data."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "pandas"
+      ],
+      "module_parameters": [
+        "smoothing_window_days",
+        "report_lag_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 1000000000
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG to ensure reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 200000
+      },
+      "owner_module": "global",
+      "description": "Number of Person agents.",
+      "frozen": false
+    },
+    {
+      "key": "simulation_length_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 10,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulation days.",
+      "frozen": true
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of adopters at day 0.",
+      "frozen": false
+    },
+    {
+      "key": "contact_rate_mean",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 40.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Mean daily contacts per person (Poisson).",
+      "frozen": false
+    },
+    {
+      "key": "random_mixing_fraction",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Fraction of daily contacts drawn from outside base neighbors.",
+      "frozen": false
+    },
+    {
+      "key": "daily_rewiring_prob",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Probability of rewiring a small fraction of edges each day.",
+      "frozen": false
+    },
+    {
+      "key": "base_network_k",
+      "dtype": "int",
+      "default": 8,
+      "bounds": {
+        "low": 2,
+        "high": 50
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Each node connects to k nearest neighbors in Watts-Strogatz base network.",
+      "frozen": false
+    },
+    {
+      "key": "network_rewiring_prob",
+      "dtype": "float",
+      "default": 0.08,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Rewiring probability for Watts-Strogatz network generation.",
+      "frozen": false
+    },
+    {
+      "key": "edge_weight_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 5.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Mean of contact edge weight distribution (lognormal).",
+      "frozen": false
+    },
+    {
+      "key": "edge_weight_sd",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Standard deviation of contact edge weight distribution (lognormal).",
+      "frozen": false
+    },
+    {
+      "key": "community_count",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 1,
+        "high": 50
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Number of communities for homophily and assortative mixing.",
+      "frozen": false
+    },
+    {
+      "key": "assortativity_strength",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "ContactScheduler",
+      "description": "Weighting factor for preferring in-community and same-adoption contacts in random mixing.",
+      "frozen": false
+    },
+    {
+      "key": "broadcaster_daily_budget",
+      "dtype": "int",
+      "default": 500,
+      "bounds": {
+        "low": 0,
+        "high": 100000
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Number of individuals that can be targeted per day.",
+      "frozen": false
+    },
+    {
+      "key": "message_intensity",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Per-target base strength of policy messaging.",
+      "frozen": false
+    },
+    {
+      "key": "target_top_k_fraction",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Fraction of highest-degree nodes considered for targeting.",
+      "frozen": false
+    },
+    {
+      "key": "retargeting_cooldown_days",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 0,
+        "high": 30
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Minimum days before a previously targeted person can be targeted again.",
+      "frozen": false
+    },
+    {
+      "key": "media_decay_rate",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Geometric decay rate of media memory per day.",
+      "frozen": false
+    },
+    {
+      "key": "peer_influence_strength",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Scaling factor on peer influence from contacts.",
+      "frozen": false
+    },
+    {
+      "key": "media_influence_strength",
+      "dtype": "float",
+      "default": 0.9,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Scaling factor on media exposure influence.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.5
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Mean of individual adoption thresholds.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.8
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Standard deviation of individual adoption thresholds.",
+      "frozen": false
+    },
+    {
+      "key": "personal_bias_sd",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Standard deviation of person-level baseline bias toward adoption.",
+      "frozen": false
+    },
+    {
+      "key": "noise_scale",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Additive Gaussian noise scale in adoption probability.",
+      "frozen": false
+    },
+    {
+      "key": "adherence_decay_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Daily multiplicative decay of adherence for adopters.",
+      "frozen": false
+    },
+    {
+      "key": "relapse_prob",
+      "dtype": "float",
+      "default": 0.005,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Daily probability of relapse (adopted to not adopted) scaled by low adherence.",
+      "frozen": false
+    },
+    {
+      "key": "relapse_cooldown_days",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 0,
+        "high": 60
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Minimum days after adoption before relapse is considered.",
+      "frozen": false
+    },
+    {
+      "key": "max_influence_neighbors",
+      "dtype": "int",
+      "default": 25,
+      "bounds": {
+        "low": 5,
+        "high": 200
+      },
+      "owner_module": "AdoptionUpdate",
+      "description": "Cap on neighbors considered for peer influence normalization.",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "ObservationAggregator",
+      "description": "Moving average window applied to observables.",
+      "frozen": false
+    },
+    {
+      "key": "report_lag_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 14
+      },
+      "owner_module": "ObservationAggregator",
+      "description": "Reporting lag to align with observed data.",
+      "frozen": true
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "count_transitions(0->1)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:new_adoptions"
+    },
+    {
+      "id": "observable.message_reach_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(media_exposure > 0)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:message_reach"
+    },
+    {
+      "id": "observable.contacts_per_capita_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "len(contact_events) / population_size",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:contacts_per_capita"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "PeakTimingError",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeakError",
+        "config": {
+          "window": [
+            0,
+            60
+          ]
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "network_generator": "Watts-Strogatz",
+    "network_params": {
+      "k": 8,
+      "rewiring_prob": 0.08
+    },
+    "community_count": 10,
+    "initial_adoption_rate": 0.05
+  },
+  "algorithms": {
+    "NetworkGeneration": "Watts-Strogatz small-world graph with N=population_size, k=base_network_k, p=network_rewiring_prob.",
+    "ContactSampling": "Poisson draws per agent with split between base neighbors and random mixing, weighted by assortativity; lognormal contact weights.",
+    "PolicyTargeting": "Degree-centrality top-k targeting with cooldown; geometric media memory with spillover.",
+    "AdoptionDecision": "Logistic function over peer and media inputs minus individual threshold with Gaussian noise; adherence decay and relapse.",
+    "Smoothing": "Simple moving average over observables with specified window."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and evaluation of adoption and related observables.",
+      "fields_used": [
+        "adoption_rate",
+        "new_adoptions",
+        "message_reach",
+        "contacts_per_capita"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Simulation entry point; orchestrates initialization, stepping, and output."
+      },
+      {
+        "name": "entities.py",
+        "description": "Definitions for Person and Broadcaster classes and state containers."
+      },
+      {
+        "name": "network.py",
+        "description": "Network creation utilities (Watts-Strogatz) and caching of centralities."
+      },
+      {
+        "name": "modules/contact_scheduler.py",
+        "description": "Implements ContactScheduler module."
+      },
+      {
+        "name": "modules/policy_broadcast.py",
+        "description": "Implements PolicyBroadcast module."
+      },
+      {
+        "name": "modules/adoption_update.py",
+        "description": "Implements AdoptionUpdate module."
+      },
+      {
+        "name": "modules/observation.py",
+        "description": "Implements ObservationAggregator module."
+      },
+      {
+        "name": "params.py",
+        "description": "Parameter schema, defaults, bounds, and validation utilities."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Load target data, align columns, and export simulation outputs."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric computations (RMSE, MAE, peak timing error) referencing observables."
+      }
+    ],
+    "dependencies": [
+      "numpy>=1.24",
+      "pandas>=2.0",
+      "networkx>=3.2",
+      "scipy>=1.10"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption",
+    "MAE_new_adoptions",
+    "PeakTimingError"
+  ]
+}

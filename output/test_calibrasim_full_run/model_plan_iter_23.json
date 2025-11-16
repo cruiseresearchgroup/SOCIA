@@ -1,0 +1,919 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based social diffusion model for household adoption of a city recycling program under peer influence, policy incentives, and media outreach on a dynamic social network.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "neighborhood_id",
+        "income",
+        "attitude_env",
+        "adoption_state",
+        "adoption_time",
+        "perceived_peer_adoption",
+        "social_signal",
+        "degree",
+        "centrality",
+        "satisfaction",
+        "cost_sensitivity",
+        "incentive_sensitivity",
+        "media_reach_prob",
+        "churn_propensity"
+      ],
+      "behaviors": [
+        "update_social_perception",
+        "decide_adopt",
+        "decide_churn"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "initial_adoption_fraction": 0.05,
+          "attitude_env_mean": 0.6,
+          "attitude_env_sd": 0.2,
+          "income_log_mean": 10.5,
+          "income_log_sd": 0.5,
+          "cost_sensitivity_mean": 0.6,
+          "cost_sensitivity_sd": 0.15,
+          "incentive_sensitivity_mean": 0.5,
+          "incentive_sensitivity_sd": 0.15,
+          "media_reach_prob_mean": 0.6,
+          "media_reach_prob_sd": 0.2,
+          "churn_propensity_mean": 0.1,
+          "churn_propensity_sd": 0.05
+        }
+      }
+    },
+    {
+      "name": "Neighborhood",
+      "attributes": [
+        "id",
+        "policy_multiplier",
+        "median_income",
+        "avg_attitude_env",
+        "adoption_rate",
+        "incentive_budget_remaining"
+      ],
+      "behaviors": [
+        "apply_policy_multiplier",
+        "track_adoption_rate"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "num_neighborhoods": 10,
+          "policy_multiplier_mean": 1.0,
+          "policy_multiplier_sd": 0.2,
+          "budget_per_neighborhood": 50000.0
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkDynamics",
+      "description": "Builds the initial social network with homophily and updates edges via rewiring.",
+      "inputs": [],
+      "outputs": [
+        "graph.social_network",
+        "Person.degree",
+        "Person.centrality"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  if network_type == 'small_world':\n    G <- WattsStrogatz(N=population_size, k=round(avg_degree), p=rewiring_prob_ws)\n  else if network_type == 'scale_free':\n    G <- BarabasiAlbert(N=population_size, m=preferential_attachment_m)\n  else:\n    G <- ErdosRenyi(N=population_size, p=avg_degree/(population_size-1))\n  # Homophily post-processing\n  for each edge (i,j) in G:\n    if rand() < homophily_by_attitude and |att_i - att_j| > 0.3:\n      attempt to rewire j to a node j' with closer attitude\n  update Person.degree, Person.centrality (eigenvector or degree normalized)\nelse:\n  # Daily rewiring\n  num_rewire <- Binomial(|E|, rewiring_rate_daily)\n  repeat num_rewire times:\n    pick random edge (i,j), remove it\n    pick node i, connect to node j' sampled with prob proportional to (1 - |att_i - att_j'|) if homophily>0 else uniform\n  update Person.degree, Person.centrality (incremental if available)",
+        "notes": [
+          "Centrality can be degree-normalized to [0,1] by dividing by max degree.",
+          "Ensure network remains connected with a minimal degree > 0; if node becomes isolated, attach to nearest neighbor by attitude."
+        ]
+      },
+      "requirements": [
+        "resource:GraphStore:social_network",
+        "library:networkx",
+        "RandomNumberGenerator",
+        "PersonRegistry"
+      ],
+      "module_parameters": [
+        "network_type",
+        "avg_degree",
+        "rewiring_prob_ws",
+        "preferential_attachment_m",
+        "rewiring_rate_daily",
+        "homophily_by_attitude"
+      ]
+    },
+    {
+      "name": "SocialInfluence",
+      "description": "Computes perceived peer adoption via exponential moving average and transforms it into a social signal.",
+      "inputs": [
+        "graph.social_network",
+        "Person.adoption_state"
+      ],
+      "outputs": [
+        "Person.perceived_peer_adoption",
+        "Person.social_signal"
+      ],
+      "dependencies": [
+        "NetworkDynamics"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  neighbors <- N(i)\n  if neighbors not empty:\n    if neighbor_weighting == 'uniform':\n      peer_adopt <- mean(adoption_state[j] for j in neighbors)\n    else:\n      weights <- degree[j]/sum(degree[k] for k in neighbors)\n      peer_adopt <- sum(weights[j]*adoption_state[j] for j in neighbors)\n  else:\n    peer_adopt <- global_adoption_rate_previous_day\n  # Exponential moving average memory\n  p_old <- perceived_peer_adoption[i]\n  p_new <- memory_decay * p_old + (1 - memory_decay) * peer_adopt\n  perceived_peer_adoption[i] <- clamp(p_new, 0, 1)\n  # Nonlinear norm sensitivity\n  noise <- Normal(0, attention_noise_std)\n  social_signal[i] <- tanh(local_norm_sensitivity * (perceived_peer_adoption[i] - 0.5)) + noise\n  social_signal[i] <- clamp(social_signal[i], -1, 1)",
+        "notes": [
+          "Global adoption rate from AggregationAndReporting t-1; use 0 if t=0.",
+          "tanh transform captures norm internalization; adjustable by local_norm_sensitivity."
+        ]
+      },
+      "requirements": [
+        "Graph traversal",
+        "RandomNumberGenerator",
+        "AggregationCache"
+      ],
+      "module_parameters": [
+        "memory_decay",
+        "neighbor_weighting",
+        "attention_noise_std",
+        "local_norm_sensitivity"
+      ]
+    },
+    {
+      "name": "PolicyAndMedia",
+      "description": "Generates time-varying incentives and media outreach intensity by neighborhood with budget constraints and feedback to adoption progress.",
+      "inputs": [
+        "Neighborhood.adoption_rate",
+        "day_index"
+      ],
+      "outputs": [
+        "signal.incentive_per_signup_by_neighborhood",
+        "signal.media_intensity_by_neighborhood",
+        "signal.media_reach_prob_modifier_by_neighborhood"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each neighborhood n:\n  if policy_start_day <= t <= policy_end_day and Neighborhood[n].incentive_budget_remaining > 0:\n    # Feedback rule: stronger incentives if behind target\n    gap <- max(0, target_adoption_goal - Neighborhood[n].adoption_rate)\n    incentive <- policy_multiplier_global * (incentive_per_signup_base * (1 + gap))\n    incentive <- min(incentive, Neighborhood[n].incentive_budget_remaining)\n  else:\n    incentive <- 0\n  signal.incentive_per_signup_by_neighborhood[n] <- incentive\n  # Media schedule: base + pulse\n  phase <- (2*pi*t)/media_pulse_period_days\n  media_intensity <- media_intensity_base + media_pulse_amplitude * max(0, sin(phase))\n  # Modulate by neighborhood performance (more media if lagging)\n  media_intensity <- media_intensity * (1 + 0.5*gap)\n  signal.media_intensity_by_neighborhood[n] <- media_intensity\n  # Reach probability modifier maps intensity to reach uplift\n  signal.media_reach_prob_modifier_by_neighborhood[n] <- min(0.5, media_intensity * 0.2)\n\n# Budget update happens in Aggregation step when new adopters are counted and incentive payouts are deducted.",
+        "notes": [
+          "policy_multiplier_global is implied by Neighborhood.policy_multiplier at init; operationally multiply incentive by neighborhood-specific multiplier.",
+          "Budget is decremented by new_adopters * incentive_per_signup after AdoptionDecision."
+        ]
+      },
+      "requirements": [
+        "NeighborhoodRegistry",
+        "Trigonometric functions",
+        "TimeKeeper"
+      ],
+      "module_parameters": [
+        "policy_start_day",
+        "policy_end_day",
+        "incentive_per_signup_base",
+        "media_intensity_base",
+        "media_pulse_amplitude",
+        "media_pulse_period_days",
+        "target_adoption_goal",
+        "policy_multiplier_global"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Computes adoption probabilities and transitions non-adopters to adopters using a logistic utility with stochasticity and capacity capping.",
+      "inputs": [
+        "Person.social_signal",
+        "Person.attitude_env",
+        "Person.income",
+        "Person.cost_sensitivity",
+        "Person.incentive_sensitivity",
+        "Person.media_reach_prob",
+        "Person.centrality",
+        "Neighborhood.policy_multiplier",
+        "signal.incentive_per_signup_by_neighborhood",
+        "signal.media_intensity_by_neighborhood",
+        "signal.media_reach_prob_modifier_by_neighborhood"
+      ],
+      "outputs": [
+        "Person.adoption_state",
+        "Person.adoption_time"
+      ],
+      "dependencies": [
+        "SocialInfluence",
+        "PolicyAndMedia"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "candidates <- [i | i not adopted]\n# Compute raw probabilities\nfor i in candidates:\n  n <- neighborhood_id[i]\n  inc_effect <- incentive_sensitivity[i] * signal.incentive_per_signup_by_neighborhood[n]\n  media_reach <- media_reach_prob[i] + signal.media_reach_prob_modifier_by_neighborhood[n]\n  media_effect <- media_reach * signal.media_intensity_by_neighborhood[n]\n  cost_term <- base_cost * cost_income_scaling * (1 / max(1, income[i])) * cost_sensitivity[i]\n  util <- beta0 + beta_peer * social_signal[i] + beta_attitude * (attitude_env[i]-0.5) + beta_incentive * inc_effect + beta_media * media_effect - beta_cost * cost_term + centrality_weight * centrality[i]\n  p[i] <- 1 / (1 + exp(-util/decision_temperature))\n# Optional capacity cap to avoid unrealistic surges\ncap <- max_daily_adoption_fraction * len(candidates)\nsum_p <- sum(p[i] for i in candidates)\nscale <- 1.0 if sum_p <= cap or cap <= 0 else (cap / sum_p)\nfor i in candidates:\n  if rand() < p[i] * scale:\n    adoption_state[i] <- 1\n    adoption_time[i] <- t",
+        "notes": [
+          "decision_temperature > 0 smooths the logistic; smaller values increase determinism.",
+          "max_daily_adoption_fraction=1.0 disables capping."
+        ]
+      },
+      "requirements": [
+        "RandomNumberGenerator",
+        "LogisticFunction",
+        "Neighborhood lookup"
+      ],
+      "module_parameters": [
+        "beta0",
+        "beta_peer",
+        "beta_cost",
+        "beta_attitude",
+        "beta_incentive",
+        "beta_media",
+        "decision_temperature",
+        "base_cost",
+        "cost_income_scaling",
+        "centrality_weight",
+        "max_daily_adoption_fraction"
+      ]
+    },
+    {
+      "name": "DisadoptionChurn",
+      "description": "Allows adopters to churn (dis-adopt) based on dissatisfaction and costs; updates satisfaction state.",
+      "inputs": [
+        "Person.adoption_state",
+        "Person.satisfaction",
+        "Person.cost_sensitivity",
+        "Neighborhood.policy_multiplier"
+      ],
+      "outputs": [
+        "Person.adoption_state",
+        "Person.satisfaction"
+      ],
+      "dependencies": [
+        "AdoptionDecision"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i with adoption_state == 1:\n  # Update satisfaction: increases with habit formation, decreases with implicit costs\n  sat_old <- satisfaction[i]\n  habit_gain <- satisfaction_update_rate * 0.02\n  cost_penalty <- satisfaction_update_rate * churn_sensitivity_cost * cost_sensitivity[i] * 0.01\n  sat_new <- sat_old + habit_gain - cost_penalty\n  sat_new <- (1 - dissatisfaction_memory_decay) * sat_new + dissatisfaction_memory_decay * sat_old\n  satisfaction[i] <- clamp(sat_new, 0, 1)\n  # Churn probability if satisfaction falls below threshold\n  if satisfaction[i] < satisfaction_threshold:\n    p_churn <- churn_rate_base + churn_sensitivity_cost * (satisfaction_threshold - satisfaction[i])\n    if rand() < clamp(p_churn, 0, 1):\n      adoption_state[i] <- 0",
+        "notes": [
+          "Disadoption re-opens the possibility to adopt later.",
+          "Set churn_rate_base low to keep churn rare unless satisfaction is low."
+        ]
+      },
+      "requirements": [
+        "RandomNumberGenerator"
+      ],
+      "module_parameters": [
+        "churn_rate_base",
+        "churn_sensitivity_cost",
+        "satisfaction_threshold",
+        "satisfaction_update_rate",
+        "dissatisfaction_memory_decay"
+      ]
+    },
+    {
+      "name": "AggregationAndReporting",
+      "description": "Aggregates daily adoption metrics, updates neighborhood budgets, and exposes observables.",
+      "inputs": [
+        "Person.adoption_state",
+        "Person.adoption_time",
+        "Neighborhood.policy_multiplier",
+        "signal.incentive_per_signup_by_neighborhood"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adopters_daily",
+        "observable.cumulative_adopters_daily",
+        "observable.adoption_rate_by_neighborhood",
+        "Neighborhood.adoption_rate",
+        "Neighborhood.incentive_budget_remaining"
+      ],
+      "dependencies": [
+        "AdoptionDecision",
+        "DisadoptionChurn",
+        "PolicyAndMedia"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "# Compute global metrics\nN <- population_size\nadopters_today <- count(i where adoption_time[i] == t)\ndisadopters_today <- count(i where adoption_state changed 1->0 at t)\ncurrent_adopters <- count(i where adoption_state[i] == 1)\nadoption_rate <- current_adopters / N\nnew_adopters_daily <- max(0, adopters_today)\ncumulative_adopters <- cumulative_adopters_prev + new_adopters_daily - disadopters_today\n# By-neighborhood metrics and budget updates\nfor each neighborhood n:\n  ids <- persons in n\n  rate_n <- mean(adoption_state[i] for i in ids)\n  observable.adoption_rate_by_neighborhood[n] <- rate_n\n  Neighborhood[n].adoption_rate <- rate_n\n  payouts <- signal.incentive_per_signup_by_neighborhood[n] * count(i in ids where adoption_time[i] == t)\n  Neighborhood[n].incentive_budget_remaining <- max(0, Neighborhood[n].incentive_budget_remaining - payouts)\n# Expose smoothed observables if smoothing_window_days>1\nobservable.adoption_rate_daily <- Smooth(adoption_rate, window=smoothing_window_days)\nobservable.new_adopters_daily <- Smooth(new_adopters_daily, window=smoothing_window_days)\nobservable.cumulative_adopters_daily <- cumulative_adopters\ncache global_adoption_rate_previous_day <- adoption_rate",
+        "notes": [
+          "Smoothing uses simple moving average with centered or trailing window; trailing recommended.",
+          "Cumulative adopters accounts for disadoptions by subtracting disadopters."
+        ]
+      },
+      "requirements": [
+        "TimeSeriesStore",
+        "NeighborhoodRegistry"
+      ],
+      "module_parameters": [
+        "smoothing_window_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "small_world",
+      "bounds": null,
+      "owner_module": "NetworkDynamics",
+      "description": "Type of base network: small_world | scale_free | erdos_renyi",
+      "frozen": false
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 40.0
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Target average degree for network generation.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob_ws",
+      "dtype": "float",
+      "default": 0.08,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Watts\u2013Strogatz rewiring probability.",
+      "frozen": false
+    },
+    {
+      "key": "preferential_attachment_m",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1.0,
+        "high": 10.0
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Number of edges to attach from a new node to existing nodes in BA model.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_rate_daily",
+      "dtype": "float",
+      "default": 0.001,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.02
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Daily probability per edge of rewiring.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_by_attitude",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkDynamics",
+      "description": "Probability to rewire edges that connect dissimilar attitudes during initialization.",
+      "frozen": false
+    },
+    {
+      "key": "memory_decay",
+      "dtype": "float",
+      "default": 0.85,
+      "bounds": {
+        "low": 0.5,
+        "high": 0.99
+      },
+      "owner_module": "SocialInfluence",
+      "description": "EMA decay for perceived peer adoption.",
+      "frozen": false
+    },
+    {
+      "key": "neighbor_weighting",
+      "dtype": "categorical",
+      "default": "uniform",
+      "bounds": null,
+      "owner_module": "SocialInfluence",
+      "description": "How to weight neighbor influence: uniform | degree_weighted.",
+      "frozen": false
+    },
+    {
+      "key": "attention_noise_std",
+      "dtype": "float",
+      "default": 0.03,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Std dev of noise added to the social signal.",
+      "frozen": false
+    },
+    {
+      "key": "local_norm_sensitivity",
+      "dtype": "float",
+      "default": 2.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 5.0
+      },
+      "owner_module": "SocialInfluence",
+      "description": "Slope inside tanh for mapping perceived adoption to social signal.",
+      "frozen": false
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 15,
+      "bounds": {
+        "low": 0.0,
+        "high": 180.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Day to start incentives and media campaign.",
+      "frozen": false
+    },
+    {
+      "key": "policy_end_day",
+      "dtype": "int",
+      "default": 120,
+      "bounds": {
+        "low": 1.0,
+        "high": 365.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Day to end the policy campaign.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_per_signup_base",
+      "dtype": "float",
+      "default": 20.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 200.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Base incentive payout per new signup in currency units.",
+      "frozen": false
+    },
+    {
+      "key": "media_intensity_base",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Baseline media intensity scaling.",
+      "frozen": false
+    },
+    {
+      "key": "media_pulse_amplitude",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Amplitude of periodic media pulses.",
+      "frozen": false
+    },
+    {
+      "key": "media_pulse_period_days",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 7.0,
+        "high": 60.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Period of media pulses in days.",
+      "frozen": false
+    },
+    {
+      "key": "target_adoption_goal",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.9
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Target neighborhood adoption rate used for feedback.",
+      "frozen": false
+    },
+    {
+      "key": "policy_multiplier_global",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 2.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Global policy multiplier applied to incentives.",
+      "frozen": false
+    },
+    {
+      "key": "beta0",
+      "dtype": "float",
+      "default": -1.5,
+      "bounds": {
+        "low": -5.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Intercept term for adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "beta_peer",
+      "dtype": "float",
+      "default": 2.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on social signal.",
+      "frozen": false
+    },
+    {
+      "key": "beta_cost",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on perceived cost.",
+      "frozen": false
+    },
+    {
+      "key": "beta_attitude",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 4.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on environmental attitude deviation from 0.5.",
+      "frozen": false
+    },
+    {
+      "key": "beta_incentive",
+      "dtype": "float",
+      "default": 0.06,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight converting monetary incentive to utility.",
+      "frozen": false
+    },
+    {
+      "key": "beta_media",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on media exposure.",
+      "frozen": false
+    },
+    {
+      "key": "decision_temperature",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.2,
+        "high": 3.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Softmax temperature for logistic conversion of utility to probability.",
+      "frozen": false
+    },
+    {
+      "key": "base_cost",
+      "dtype": "float",
+      "default": 100.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 300.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Baseline perceived cost to start recycling (time/supplies) in currency-equivalent units.",
+      "frozen": false
+    },
+    {
+      "key": "cost_income_scaling",
+      "dtype": "float",
+      "default": 50000.0,
+      "bounds": {
+        "low": 10000.0,
+        "high": 150000.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Scaler to convert income to cost relief: cost term uses 1/max(1, income).",
+      "frozen": false
+    },
+    {
+      "key": "centrality_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Additional utility weight for more central individuals.",
+      "frozen": false
+    },
+    {
+      "key": "max_daily_adoption_fraction",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Cap on the fraction of non-adopters who can adopt in a day. 1.0 disables capping.",
+      "frozen": false
+    },
+    {
+      "key": "churn_rate_base",
+      "dtype": "float",
+      "default": 0.002,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "DisadoptionChurn",
+      "description": "Baseline daily churn probability when dissatisfied.",
+      "frozen": false
+    },
+    {
+      "key": "churn_sensitivity_cost",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "DisadoptionChurn",
+      "description": "Effect of cost (and low satisfaction) on churn probability and satisfaction decay.",
+      "frozen": false
+    },
+    {
+      "key": "satisfaction_threshold",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DisadoptionChurn",
+      "description": "Below this satisfaction level, churn risk increases.",
+      "frozen": false
+    },
+    {
+      "key": "satisfaction_update_rate",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.05,
+        "high": 1.0
+      },
+      "owner_module": "DisadoptionChurn",
+      "description": "Speed of satisfaction adjustment toward habit gain or cost penalty.",
+      "frozen": false
+    },
+    {
+      "key": "dissatisfaction_memory_decay",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.9
+      },
+      "owner_module": "DisadoptionChurn",
+      "description": "Memory of past satisfaction levels (0=no memory, 0.9=slow change).",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1.0,
+        "high": 14.0
+      },
+      "owner_module": "AggregationAndReporting",
+      "description": "Window length for moving-average smoothing of daily observables.",
+      "frozen": false
+    },
+    {
+      "key": "total_days",
+      "dtype": "int",
+      "default": 150,
+      "bounds": {
+        "low": 30.0,
+        "high": 365.0
+      },
+      "owner_module": "global",
+      "description": "Total simulation duration in days.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AggregationAndReporting",
+      "formula_or_field": "mean(Person.adoption_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "data/city_recycling_timeseries.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adopters_daily",
+      "source_module": "AggregationAndReporting",
+      "formula_or_field": "count(Person.adoption_time == day_t)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "data/city_recycling_timeseries.csv:new_adopters"
+    },
+    {
+      "id": "observable.cumulative_adopters_daily",
+      "source_module": "AggregationAndReporting",
+      "formula_or_field": "cumsum(new_adopters_daily - disadopters_daily)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "data/city_recycling_timeseries.csv:cumulative_adopters"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_new_adopters",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "PeakTimeError",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "PeakTimeError",
+        "config": {
+          "unit": "days"
+        }
+      }
+    },
+    {
+      "name": "PeakMagnitudeError",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "PeakMagnitudeError",
+        "config": {
+          "relative": true
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "neighborhoods": 10,
+    "initial_adoption_fraction": 0.05,
+    "assignments": "Persons are assigned to neighborhoods uniformly at random; attributes drawn from specified distributions; network built per NetworkDynamics rules."
+  },
+  "algorithms": {
+    "network_generation": "Watts\u2013Strogatz small-world or Barab\u00e1si\u2013Albert scale-free using networkx.",
+    "homophily_rewiring": "Edge swap procedure to increase assortativity on attitude.",
+    "social_signal_ema": "Exponential moving average with memory_decay; tanh nonlinearity.",
+    "adoption_choice": "Logistic choice with temperature; optional aggregate cap on expected adoptions.",
+    "churn_process": "Thresholded stochastic churn with satisfaction dynamics.",
+    "smoothing": "Trailing moving average over smoothing_window_days for observables."
+  },
+  "data_sources": [
+    {
+      "name": "city_recycling_timeseries",
+      "purpose": "Calibration and evaluation of adoption dynamics.",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "new_adopters",
+        "cumulative_adopters"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "engine.py",
+        "description": "Core simulation loop, timekeeper, module scheduler, and RNG management."
+      },
+      {
+        "name": "entities.py",
+        "description": "Definitions for Person and Neighborhood data structures and registries."
+      },
+      {
+        "name": "module_network.py",
+        "description": "Implements NetworkDynamics module."
+      },
+      {
+        "name": "module_influence.py",
+        "description": "Implements SocialInfluence module."
+      },
+      {
+        "name": "module_policy.py",
+        "description": "Implements PolicyAndMedia module."
+      },
+      {
+        "name": "module_adoption.py",
+        "description": "Implements AdoptionDecision module."
+      },
+      {
+        "name": "module_churn.py",
+        "description": "Implements DisadoptionChurn module."
+      },
+      {
+        "name": "module_agg.py",
+        "description": "Implements AggregationAndReporting module and metrics computation."
+      },
+      {
+        "name": "params.py",
+        "description": "Parameter schema, defaults, bounds, and validation utilities."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Load observed data, write simulated observables, and bind fields to metrics."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 60,
+    "end_day": 89
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "MAE_new_adopters",
+    "PeakTimeError",
+    "PeakMagnitudeError"
+  ]
+}

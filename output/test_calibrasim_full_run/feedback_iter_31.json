@@ -1,0 +1,232 @@
+{
+  "summary": "The code runs a simplified agent-based adoption model with calibration scaffolding, but it diverges substantially from the 'Mask Adoption Dynamics Simulation' specification. Key entities (Household, Location, Retailer, Government, MediaChannel, SocialNetwork as a first-class entity) and interactions (policy enforcement, movement, purchasing under supply constraints, restocking, contextual adoption) are missing. Recent changes improve network clustering, awareness integration, and calibration ergonomics, but some new issues remain (policy signal gated by trust; calibrators still writing artifacts under SKIP_IO). The next iteration should prioritize aligning entities/parameters with the spec, implementing small-world networks, decoupling policy influence from trust gating, adding supply/purchasing stubs, and extending metrics for context and inequality.",
+  "critical_issues": [
+    {
+      "issue": "Missing core entities and interactions (Household, Location, Retailer, Government, MediaChannel, movement, policy enforcement, supply chain, and purchasing)",
+      "impact": "Simulation outputs cannot represent mask adoption dynamics under policy enforcement, media messaging, and supply constraints. Metrics like contextual adoption, stockout frequency, and policy effect size are impossible to compute.",
+      "solution": "Introduce minimal versions of the missing entities and wire them into the daily loop: (1) Locations with mask policies and enforcement; (2) Retailers with inventory, price, restocking; (3) Government/MediaChannel to broadcast messages; (4) Movement scheduler assigning each agent to a context each day; (5) Purchasing step before daily use to update mask availability and record stockouts.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Parameter set does not match the specification",
+      "impact": "Scenarios required by the task cannot be expressed or configured (e.g., restock lead time, enforcement strength, misinformation rate, location mix). Calibration/experiments cannot be reproduced against the spec.",
+      "solution": "Augment DEFAULT_PARAM_DEFS with spec-aligned keys and wire them into modules: simulation_days/time_step_hours, social_network_type='small_world' + rewiring probability, price_elasticity, retailer_restock_rate, supply_lead_time_days, initial_inventory_per_capita, media_campaign_intensity, misinformation_rate, enforcement_strength, fine_amount, location_mix, disease_incidence_signal, comfort_penalty, compliance_cost_disutility.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Network topology not honoring small_world",
+      "impact": "Social diffusion properties (path length, clustering) differ from spec, leading to biased adoption curves and wrong sensitivity to social influence.",
+      "solution": "Implement a Watts\u2013Strogatz small-world generator when social_network_type == 'small_world', controlled by average_degree and rewiring probability.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Policy signal gated by current trust (signal = intensity * trust_policy * (1 - misinformation_fraction))",
+      "impact": "Early messages have near-zero effect if trust starts around 0, suppressing policy influence until trust is updated; this can stall adoption and misrepresent campaign effects.",
+      "solution": "Decouple immediate policy signal from trust; use trust to modulate responsiveness but ensure a floor effect. For example, signal_base = intensity * (1 - misinformation); signal = signal_base * (0.5 + 0.5 * tanh(trust_policy)). Also add a small minimum floor.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Missing contextual and inequality metrics; no stockout tracking",
+      "impact": "Cannot evaluate location-specific adoption, inequality by demographics, or stockout frequency, all of which are required for policy evaluation and alignment with real-world data.",
+      "solution": "Extend AdoptionAggregator to compute adoption by current location, inequality index across age/income groups, track purchasing attempts vs stockouts, and compute policy_effect_size via a simple on/off counterfactual within the same run.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Calibration routines still write artifacts even in constrained environments",
+      "impact": "Unnecessary I/O can cause slowdowns or failures in sandboxes and tests.",
+      "solution": "Wrap file writes in calibrators with if not SKIP_IO guards as already done in ParamsAdapter.apply.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Awareness variable only increases; no decay aside from fixed-length memory",
+      "impact": "Awareness can saturate to 1.0 and unrealistically amplify policy effects over time.",
+      "solution": "Introduce awareness_decay parameter to gradually reduce awareness daily, blending with message bumps.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Redundant 'pass' statements before real implementations",
+      "impact": "Hurts readability and may confuse maintainers; minor risk of accidental early returns if refactored.",
+      "solution": "Remove redundant 'pass' lines where functions already implement logic.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Social network topology",
+      "current_approach": "Stub-matching with homophily and optional triadic closure",
+      "suggested_approach": "Implement Watts\u2013Strogatz small-world generator with average_degree and rewiring probability when social_network_type = 'small_world'",
+      "expected_benefit": "More realistic diffusion dynamics (short average path lengths with clustering) and closer alignment with the spec"
+    },
+    {
+      "aspect": "Policy influence",
+      "current_approach": "Immediate signal multiplied by trust; trust updated via campaign",
+      "suggested_approach": "Use a base policy signal independent of trust and modulate responsiveness with a bounded function of trust with a floor, plus awareness decay",
+      "expected_benefit": "Ensures campaigns have an initial effect, reduces unrealistic stalls, and yields smoother, more plausible adoption curves"
+    },
+    {
+      "aspect": "Supply and purchasing",
+      "current_approach": "Not modeled",
+      "suggested_approach": "Add Retailer with inventory/price/restocking and Person/Household purchasing decisions using price_elasticity and income; track stockouts and subsidies",
+      "expected_benefit": "Captures availability constraints and affordability impacts; enables stockout_frequency metric and policy testing"
+    },
+    {
+      "aspect": "Movement and context",
+      "current_approach": "No movement; no context-dependent requirements",
+      "suggested_approach": "Daily scheduler draws each Person\u2019s context from location_mix and enforces per-Location mask policies with enforcement_strength and fine_amount",
+      "expected_benefit": "Supports contextual_adoption_rate metrics and realistic enforcement effects"
+    },
+    {
+      "aspect": "Risk perception",
+      "current_approach": "Indirectly via awareness; disease signals ignored",
+      "suggested_approach": "Add risk_perception that evolves with media messaging and disease_incidence_signal; include a risk_perception_sensitivity term in the adoption logit",
+      "expected_benefit": "Improves responsiveness to exogenous signals, better matching real data dynamics"
+    },
+    {
+      "aspect": "Metrics and inequality",
+      "current_approach": "Overall adoption rate and a few derived measures",
+      "suggested_approach": "Compute contextual adoption, inequality index across age and income, stockout frequency, and policy effect size",
+      "expected_benefit": "Richer evaluation aligned with the spec; supports targeted policy analysis"
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Add spec-aligned parameters to DEFAULT_PARAM_DEFS and wire them into modules",
+      "reason": "Enable configuration and experimentation per the task (network type, restock, enforcement, misinformation, location mix, disease signals)",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement small-world network in NetworkDynamics._build_initial_graph with a branch on social_network_type",
+      "reason": "Honor the spec and correct diffusion structure",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Decouple PolicyBroadcast signal from trust and add awareness decay",
+      "reason": "Avoid zeroed initial policy influence and runaway awareness amplification",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Guard calibrator file writes with SKIP_IO flag",
+      "reason": "Reduce I/O and improve performance in constrained environments",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Extend AdoptionAggregator to compute contextual adoption and inequality, and track stockouts",
+      "reason": "Deliver required metrics and improve policy evaluation capability",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Introduce minimal Retailer and purchasing step; track stockouts and mask_inventory",
+      "reason": "Enable supply constraints to affect adoption; support stockout_frequency metric",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove redundant 'pass' statements where functions already contain implementations",
+      "reason": "Improve readability and reduce confusion",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "contextual_adoption_rate",
+      "current_gap": "No context modeling; only overall adoption available",
+      "suggestion": "Model daily contexts (home, work, school, retail, transit) via location_mix and per-context policies; compute adoption by context"
+    },
+    {
+      "metric": "inequality_index",
+      "current_gap": "No inequality computed by demographics",
+      "suggestion": "Track adoption by age_group and income (SES) and compute Gini or Theil-like index or coefficient of variation across groups"
+    },
+    {
+      "metric": "stockout_frequency",
+      "current_gap": "No supply or purchasing; cannot compute stockouts",
+      "suggestion": "Add Retailer with inventory and restocking; count days with attempted purchases that could not be fulfilled"
+    },
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "No controlled effect estimation",
+      "suggestion": "Approximate via a daily counterfactual: toggle policy_signal_weight=0 for a shadow run over the last N days and take the difference in adoption rates"
+    }
+  ],
+  "prioritized_actions": [
+    "Implement a Watts\u2013Strogatz small-world network controlled by social_network_type and rewiring probability",
+    "Decouple policy signal from trust; add awareness_decay to prevent saturation",
+    "Add minimal Retailer and purchasing with inventory/restocking, and stockout tracking",
+    "Introduce a daily context scheduler (location_mix) and per-Location enforcement affecting adoption that day",
+    "Extend aggregator to compute contextual adoption, inequality index, and stockout_frequency",
+    "Expand DEFAULT_PARAM_DEFS with the spec-aligned parameters; migrate existing names or alias where necessary",
+    "Guard calibrator writes with SKIP_IO and remove redundant pass statements"
+  ],
+  "additional_comments": "Recent improvements (awareness memory, triadic closure, NoOpCalibrator, SKIP_IO guard in ParamsAdapter, time-budget guards) move in the right direction for robustness and speed. The largest gap remains conceptual alignment with the spec: adding entities and interactions is essential for meaningful results and evaluation.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "DEFAULT_PARAM_DEFS = {\n    # Global\n    \"random_seed\": dict(dtype=\"int\", default=42, bounds=[1, 2147483647], owner_module=\"global\", frozen=True),\n    \"population_size\": dict(dtype=\"int\", default=5000, bounds=[100, 100000], owner_module=\"global\", frozen=False),\n    \"sim_days\": dict(dtype=\"int\", default=60, bounds=[30, 365], owner_module=\"global\", frozen=False),\n    \"initial_adoption_rate\": dict(dtype=\"float\", default=0.05, bounds=[0.0, 0.2], owner_module=\"global\", frozen=False),\n    ...\n}",
+      "after": "DEFAULT_PARAM_DEFS = {\n    # Global\n    \"random_seed\": dict(dtype=\"int\", default=42, bounds=[1, 2147483647], owner_module=\"global\", frozen=True),\n    \"population_size\": dict(dtype=\"int\", default=5000, bounds=[100, 100000], owner_module=\"global\", frozen=False),\n    \"sim_days\": dict(dtype=\"int\", default=60, bounds=[30, 365], owner_module=\"global\", frozen=False),\n    \"time_step_hours\": dict(dtype=\"int\", default=24, bounds=[1, 24], owner_module=\"global\", frozen=False),\n    \"initial_adoption_rate\": dict(dtype=\"float\", default=0.05, bounds=[0.0, 1.0], owner_module=\"global\", frozen=False),\n    # Network\n    \"social_network_type\": dict(dtype=\"str\", default=\"small_world\", owner_module=\"NetworkDynamics\", frozen=False),\n    \"ws_rewiring_p\": dict(dtype=\"float\", default=0.05, bounds=[0.0, 1.0], owner_module=\"NetworkDynamics\", frozen=False),\n    # Policy/Media\n    \"media_campaign_intensity\": dict(dtype=\"float\", default=0.3, bounds=[0.0, 2.0], owner_module=\"PolicyBroadcast\", frozen=False),\n    \"misinformation_rate\": dict(dtype=\"float\", default=0.1, bounds=[0.0, 1.0], owner_module=\"PolicyBroadcast\", frozen=False),\n    \"awareness_decay\": dict(dtype=\"float\", default=0.02, bounds=[0.0, 0.2], owner_module=\"PolicyBroadcast\", frozen=False),\n    # Enforcement\n    \"enforcement_strength\": dict(dtype=\"float\", default=0.3, bounds=[0.0, 1.0], owner_module=\"Location\", frozen=False),\n    \"fine_amount\": dict(dtype=\"float\", default=50.0, bounds=[0.0, 1000.0], owner_module=\"Location\", frozen=False),\n    # Supply/Retail\n    \"mask_price\": dict(dtype=\"float\", default=1.0, bounds=[0.0, 20.0], owner_module=\"Retailer\", frozen=False),\n    \"price_elasticity\": dict(dtype=\"float\", default=-0.8, bounds=[-5.0, 0.0], owner_module=\"Retailer\", frozen=False),\n    \"retailer_restock_rate\": dict(dtype=\"float\", default=0.1, bounds=[0.0, 1.0], owner_module=\"Retailer\", frozen=False),\n    \"supply_lead_time_days\": dict(dtype=\"int\", default=7, bounds=[1, 60], owner_module=\"Retailer\", frozen=False),\n    \"initial_inventory_per_capita\": dict(dtype=\"float\", default=2.0, bounds=[0.0, 50.0], owner_module=\"Retailer\", frozen=False),\n    # Movement\n    \"location_mix\": dict(dtype=\"dict\", default={\"home\":0.5,\"work\":0.25,\"school\":0.1,\"retail\":0.1,\"transit_public\":0.05}, owner_module=\"Scheduler\", frozen=False),\n    # Risk perception\n    \"disease_incidence_signal\": dict(dtype=\"float\", default=0.01, bounds=[0.0, 1.0], owner_module=\"InfluenceAndAdoption\", frozen=False),\n    \"risk_perception_sensitivity\": dict(dtype=\"float\", default=0.5, bounds=[0.0, 5.0], owner_module=\"InfluenceAndAdoption\", frozen=False),\n    \"comfort_penalty\": dict(dtype=\"float\", default=0.2, bounds=[0.0, 2.0], owner_module=\"InfluenceAndAdoption\", frozen=False),\n    \"compliance_cost_disutility\": dict(dtype=\"float\", default=0.2, bounds=[0.0, 2.0], owner_module=\"InfluenceAndAdoption\", frozen=False),\n    ...\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _build_initial_graph(self, N: int, persons: List[Person], rng: random.Random) -> List[set]:\n    mean_deg = float(self.params.get(\"degree_mean\", 8.0))\n    adj: List[set] = [set() for _ in range(N)]\n    # Sample degrees via Poisson approx\n    degs = [max(0, self._poisson(mean_deg, rng)) for _ in range(N)]\n    ...",
+      "after": "def _build_initial_graph(self, N: int, persons: List[Person], rng: random.Random) -> List[set]:\n    adj: List[set] = [set() for _ in range(N)]\n    net_type = str(self.params.get(\"social_network_type\", \"small_world\")).lower()\n    k = max(2, int(round(float(self.params.get(\"degree_mean\", 8.0)))))\n    if net_type == \"small_world\":\n        p_rewire = float(self.params.get(\"ws_rewiring_p\", 0.05))\n        # Watts\u2013Strogatz ring lattice\n        for i in range(N):\n            for j in range(1, k // 2 + 1):\n                u, v = i, (i + j) % N\n                adj[u].add(v); adj[v].add(u)\n        # Rewiring\n        for i in range(N):\n            for j in list(adj[i]):\n                if i < j and rng.random() < p_rewire:\n                    # remove (i,j) and connect i to a random node not equal to i and not already a neighbor\n                    adj[i].remove(j); adj[j].remove(i)\n                    candidates = [x for x in range(N) if x != i and x not in adj[i]]\n                    if candidates:\n                        w = rng.choice(candidates)\n                        adj[i].add(w); adj[w].add(i)\n    else:\n        # Fallback: current stub-matching approach\n        mean_deg = float(self.params.get(\"degree_mean\", 8.0))\n        degs = [max(0, self._poisson(mean_deg, rng)) for _ in range(N)]\n        stubs = [i for i, k_i in enumerate(degs) for _ in range(k_i)]\n        rng.shuffle(stubs)\n        for a in range(0, len(stubs) - 1, 2):\n            u, v = stubs[a], stubs[a+1]\n            if u != v and v not in adj[u]:\n                adj[u].add(v); adj[v].add(u)\n    # Optional homophily and clustering\n    self._homophily_rewire(adj, persons, rng, fraction=0.05)\n    clustering_bias = float(self.params.get(\"clustering_bias\", 0.0))\n    if clustering_bias > 0.0:\n        self._triadic_closure(adj, rng, clustering_bias)\n    return adj",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "signal = intensity * pi.trust_policy * misinformation_factor\nsignal_by_agent[i] = signal\n# Awareness bump\npi.awareness = clamp(pi.awareness + 0.2, 0.0, 1.0)",
+      "after": "base = intensity * misinformation_factor\ntrust_amp = 0.5 + 0.5 * math.tanh(pi.trust_policy)\nsignal = base * trust_amp\nsignal_by_agent[i] = signal\n# Awareness with decay\naw_decay = float(self.params.get(\"awareness_decay\", 0.02))\npi.awareness = clamp(pi.awareness * (1.0 - aw_decay) + 0.2, 0.0, 1.0)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "if t % freq == 0:\n    ...\n    messages_sent = len(reached)\n\n# FIXED: Update awareness memory ...\nfor i, pi in enumerate(persons):\n    pi.awareness_memory.append(memory_bumps[i])\n    if len(pi.awareness_memory) > max_memory_days:\n        pi.awareness_memory = pi.awareness_memory[-max_memory_days:]",
+      "after": "if t % freq == 0:\n    ...\n    messages_sent = len(reached)\n\n# Daily awareness decay for everyone (even without a message)\naw_decay = float(self.params.get(\"awareness_decay\", 0.02))\nfor i, pi in enumerate(persons):\n    pi.awareness = clamp(pi.awareness * (1.0 - aw_decay), 0.0, 1.0)\n    pi.awareness_memory.append(memory_bumps[i])\n    if len(pi.awareness_memory) > max_memory_days:\n        pi.awareness_memory = pi.awareness_memory[-max_memory_days:]",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Save trial artifacts\ntry:\n    trial_dir = os.path.join(trial_root, f\"trial_{i}\")\n    ensure_dir(trial_dir)\n    with open(os.path.join(trial_dir, \"params_applied.json\"), \"w\", encoding=\"utf-8\") as f:\n        json.dump(sanitize_for_json(trial_params.to_dict()), f, indent=2)\n    with open(os.path.join(trial_dir, \"metrics.json\"), \"w\", encoding=\"utf-8\") as f:\n        json.dump(sanitize_for_json(score_dict), f, indent=2)\nexcept Exception:\n    pass",
+      "after": "if not SKIP_IO:\n    try:\n        trial_dir = os.path.join(trial_root, f\"trial_{i}\")\n        ensure_dir(trial_dir)\n        with open(os.path.join(trial_dir, \"params_applied.json\"), \"w\", encoding=\"utf-8\") as f:\n            json.dump(sanitize_for_json(trial_params.to_dict()), f, indent=2)\n        with open(os.path.join(trial_dir, \"metrics.json\"), \"w\", encoding=\"utf-8\") as f:\n            json.dump(sanitize_for_json(score_dict), f, indent=2)\n    except Exception:\n        pass",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Person:\n    def __init__(...):\n        self.adopted = int(adopted)\n        self.awareness = clamp(awareness, 0.0, 1.0)\n        ...",
+      "after": "class Person:\n    def __init__(...):\n        self.adopted = int(adopted)\n        self.awareness = clamp(awareness, 0.0, 1.0)\n        self.risk_perception = 0.0\n        self.mask_inventory = 0\n        self.income = 0.0\n        self.current_location_type = \"home\"",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class AdoptionAggregator(BaseModule):\n    def forward(...):\n        persons: List[Person] = state[\"persons\"]\n        N = len(persons)\n        adopted_count = sum(1 for p in persons if p.adopted == 1)\n        adoption_rate = adopted_count / float(N) if N > 0 else 0.0\n        ...",
+      "after": "class AdoptionAggregator(BaseModule):\n    def forward(...):\n        persons: List[Person] = state[\"persons\"]\n        N = len(persons)\n        adopted_count = sum(1 for p in persons if p.adopted == 1)\n        adoption_rate = adopted_count / float(N) if N > 0 else 0.0\n        # Contextual adoption\n        by_ctx = {}\n        for p in persons:\n            c = getattr(p, \"current_location_type\", \"home\")\n            if c not in by_ctx:\n                by_ctx[c] = {\"adopt\":0, \"count\":0}\n            by_ctx[c][\"adopt\"] += 1 if p.adopted == 1 else 0\n            by_ctx[c][\"count\"] += 1\n        ctx_rates = {k:(v[\"adopt\"]/v[\"count\"] if v[\"count\"]>0 else 0.0) for k,v in by_ctx.items()}\n        buffers[\"observable.contextual_adoption_rate\"] = ctx_rates\n        # Inequality across SES groups\n        ses_groups = {\"low\":[],\"mid\":[],\"high\":[]}\n        for p in persons:\n            ses_groups.get(getattr(p, \"ses\", \"mid\"), []).append(1.0 if p.adopted==1 else 0.0)\n        group_means = [sum(v)/len(v) for v in ses_groups.values() if v]\n        inequality = (max(group_means) - min(group_means)) if len(group_means)>=2 else 0.0\n        buffers[\"metric.inequality_index\"] = inequality\n        ...",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration improves robustness (time-budget guards; NoOpCalibrator; SKIP_IO guard in ParamsAdapter) and adds richer micro-dynamics (awareness memory, triadic closure). However, it also introduced a subtle gating of policy signals by trust and still lacks the core entities and interactions from the spec.",
+    "positive_impacts": [
+      "Awareness memory adds a plausible persistence effect for messaging",
+      "Triadic closure increases clustering, moving the network marginally closer to realistic structures",
+      "NoOpCalibrator and time guards improve development workflow and prevent timeouts",
+      "SKIP_IO applied in ParamsAdapter reduces unwanted I/O"
+    ],
+    "negative_impacts": [
+      "Policy signal effectiveness can be nullified initially by low trust, dampening campaign influence",
+      "Calibrators still write artifacts without SKIP_IO guards",
+      "Awareness variable lacks decay, risking saturation over longer runs",
+      "Network still not explicitly small-world as per the spec"
+    ],
+    "suggestions": [
+      "Decouple policy signal from trust and add awareness decay",
+      "Guard calibrator writes with SKIP_IO",
+      "Implement Watts\u2013Strogatz small-world topology",
+      "Begin integrating spec-required entities (Retailer, Location) with minimal functionality to support contextual metrics and stockout tracking"
+    ]
+  }
+}

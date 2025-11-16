@@ -1,0 +1,1752 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based, network-embedded simulation of mask adoption under social influence, policy, media exposure, and supply constraints, optionally coupled with SEIR disease dynamics. Individuals interact via a small-world social network and co-locate in daily schedules (household, work/school, retail, public transport). Adoption is driven by a probabilistic choice model integrating social, policy, media, risk, habit, and availability signals. Retail market dynamics determine mask availability and price. A stochastic SEIR process models infection transmission modified by mask efficacy and location factors.",
+  "entities": [
+    {
+      "name": "Individual",
+      "attributes": [
+        "id",
+        "age",
+        "household_id",
+        "occupation_type",
+        "health_state",
+        "vaccination_status",
+        "mask_adoption_state",
+        "mask_quality",
+        "mask_inventory",
+        "risk_perception",
+        "compliance_propensity",
+        "social_influence_susceptibility",
+        "trust_in_authorities",
+        "media_exposure_profile",
+        "income",
+        "location_schedule",
+        "network_neighbors",
+        "past_infection_experience",
+        "habit_strength"
+      ],
+      "behaviors": [
+        "decide_to_wear_mask",
+        "update_risk_perception",
+        "update_trust_and_beliefs_from_media",
+        "purchase_masks",
+        "comply_with_policy",
+        "attend_location",
+        "interact_with_contacts",
+        "experience_infection_and_progression",
+        "share_information_with_neighbors",
+        "form_or_decay_habits"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "age_distribution": "triangular(5, 35, 80)",
+          "vaccination_status": "Bernoulli(0.6) independent of age by default",
+          "mask_adoption_state": "Bernoulli(initial_adoption_rate)",
+          "mask_quality": "categorical by quality_mix_*",
+          "mask_inventory": "Poisson(1) truncated at >=0",
+          "risk_perception": "Beta(alpha=2, beta=(2/risk_perception_initial_mean)-2)",
+          "compliance_propensity": "Beta(alpha=2, beta=(2/compliance_propensity_mean)-2)",
+          "social_influence_susceptibility": "Normal(mean=0.5, sd=0.15, clipped to [0,1])",
+          "trust_in_authorities": "Beta(alpha=2, beta=(2/trust_in_authorities_mean)-2)",
+          "media_exposure_profile": "categorical over MediaOutlets by reach",
+          "income": "Lognormal(meanlog=ln(income_mean), sdlog=income_dispersion)",
+          "location_schedule": "Home nightly; Work for workforce_fraction on weekdays; School for school_age_fraction; Retail visits Poisson(retail_visit_rate_per_week/7); Public transport Bernoulli(public_transport_use_fraction) on commute days",
+          "network_neighbors": "Watts-Strogatz small-world with average_degree and rewiring",
+          "past_infection_experience": "0 initially for most; seed with initial infections",
+          "habit_strength": "0 for non-wearers, 0.3 for initial wearers"
+        }
+      }
+    },
+    {
+      "name": "Household",
+      "attributes": [
+        "id",
+        "member_ids",
+        "shared_norm_strength",
+        "shared_mask_stockpile"
+      ],
+      "behaviors": [
+        "influence_member_adoption",
+        "reallocate_mask_inventory"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "household_size_probs": {
+            "1": "household_size_prob_1",
+            "2": "household_size_prob_2",
+            "3": "household_size_prob_3",
+            "4": "household_size_prob_4"
+          },
+          "shared_norm_strength": "Normal(mean=0.5, sd=0.2, clip [0,1])",
+          "shared_mask_stockpile": "0 initially"
+        }
+      }
+    },
+    {
+      "name": "Location",
+      "attributes": [
+        "id",
+        "type",
+        "capacity",
+        "baseline_contact_rate",
+        "mask_requirement",
+        "enforcement_level",
+        "ventilation_factor",
+        "operating_hours"
+      ],
+      "behaviors": [
+        "host_contacts",
+        "enforce_mask_policy",
+        "deny_entry_if_noncompliant"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "types": [
+            "household",
+            "workplace",
+            "school",
+            "retail",
+            "public_transport"
+          ],
+          "counts": "derived from population and attendance rates; retail ~ retailer_count; workplaces ~ ceil(population_size*workforce_fraction/30); schools ~ ceil(population_size*school_age_fraction/200); public_transport ~ max(10, ceil(population_size*public_transport_use_fraction/300))",
+          "capacity": "type-specific: households=household size; workplace~30; school~200; retail~50; public_transport~40 scaled by location_capacity_multiplier",
+          "baseline_contact_rate": "per type from contact_rate_mod_*",
+          "ventilation_factor": "Lognormal mean 1.0, sd 0.2, clip to [0.5, 2.0]",
+          "operating_hours": "workplace/school weekdays; retail daily; public_transport daily extended"
+        }
+      }
+    },
+    {
+      "name": "PublicHealthAuthority",
+      "attributes": [
+        "policy_schedule",
+        "mandate_thresholds",
+        "messaging_strategy",
+        "enforcement_resources",
+        "fine_amount",
+        "communication_frequency"
+      ],
+      "behaviors": [
+        "set_or_update_policies",
+        "broadcast_public_messages",
+        "allocate_enforcement"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "initial_policy_level": "initial_policy_level",
+          "policy_start_day": "policy_start_day",
+          "mandate_thresholds": "Re > mandate_Re_threshold",
+          "messaging_strategy": "risk-reducing, evidence-based",
+          "enforcement_resources": "proportional to enforcement_strength",
+          "fine_amount": "fine_amount",
+          "communication_frequency": "communication_frequency"
+        }
+      }
+    },
+    {
+      "name": "Retailer",
+      "attributes": [
+        "id",
+        "stock_level",
+        "price",
+        "restock_rate",
+        "supply_lead_time",
+        "quality_mix"
+      ],
+      "behaviors": [
+        "sell_masks",
+        "restock",
+        "adjust_prices_to_demand"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "count": "retailer_count",
+          "initial_stock": "retailer_initial_stock_per_capita * population_size / retailer_count",
+          "price": "by mask type mask_price_*",
+          "restock_rate": "restock_rate_per_day",
+          "supply_lead_time": "supply_lead_time_days",
+          "quality_mix": {
+            "cloth": "quality_mix_cloth",
+            "surgical": "quality_mix_surgical",
+            "respirator": "quality_mix_respirator"
+          }
+        }
+      }
+    },
+    {
+      "name": "MediaOutlet",
+      "attributes": [
+        "id",
+        "message_bias",
+        "misinformation_rate",
+        "reach",
+        "credibility"
+      ],
+      "behaviors": [
+        "broadcast_messages",
+        "amplify_or_correct_information"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "count": "media_outlets_count",
+          "message_bias": "Uniform(-0.4, 0.4) centered around media_message_bias_mean",
+          "misinformation_rate": "misinformation_rate",
+          "reach": "Dirichlet skewed, sum to 1.0",
+          "credibility": "Normal(mean=0.6, sd=0.15, clip [0,1])"
+        }
+      }
+    },
+    {
+      "name": "DiseaseProcess",
+      "attributes": [
+        "base_transmission_rate",
+        "incubation_period",
+        "infectious_period",
+        "asymptomatic_fraction",
+        "mask_inward_efficacy",
+        "mask_outward_efficacy",
+        "contact_modifiers_by_location"
+      ],
+      "behaviors": [
+        "transmit_given_contact",
+        "progress_health_states",
+        "compute_effective_reproduction_number"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "initial_infected_fraction": "initial_infected_fraction",
+          "base_transmission_rate": "base_transmission_rate",
+          "incubation_period": "Gamma with mean incubation_period_mean, k=2",
+          "infectious_period": "Gamma with mean infectious_period_mean, k=2",
+          "asymptomatic_fraction": "asymptomatic_fraction",
+          "mask_efficacy": "mask_inward_outward with quality multipliers",
+          "contact_modifiers_by_location": "contact_rate_mod_*"
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "MaskAdoptionDecision",
+      "description": "Computes daily mask-wearing decisions for each individual based on social, policy, media, risk, habit, and availability signals; updates habit and inventory consumption.",
+      "inputs": [
+        "signals.policy.mask_requirement_by_location",
+        "signals.policy.enforcement_probability_by_location",
+        "signals.media.risk_message_index",
+        "state.individuals",
+        "state.households",
+        "state.locations",
+        "state.retail.prices"
+      ],
+      "outputs": [
+        "state.individuals.mask_adoption_state",
+        "state.individuals.habit_strength",
+        "state.individuals.mask_inventory"
+      ],
+      "dependencies": [
+        "PolicyComplianceAndEnforcement",
+        "MediaExposureAndBeliefs",
+        "MaskMarketAndRetail"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each Individual i:\n  loc <- current location from i.location_schedule\n  policy_req <- signals.policy.mask_requirement_by_location[loc.id]\n  enforce_p <- signals.policy.enforcement_probability_by_location[loc.id]\n  social_rate <- mean(mask_adoption_state among i.network_neighbors) if neighbors exist else 0\n  household_rate <- mean(mask_adoption_state among household members excluding i)\n  social_signal <- social_influence_weight * (i.social_influence_susceptibility * social_rate) + household_norm_weight * household_rate\n  media_signal <- media_effect_weight * (signals.media.risk_message_index * i.trust_in_authorities)\n  risk_signal <- i.risk_perception\n  policy_signal <- policy_req * (enforce_p * i.compliance_propensity)\n  availability <- 1 if i.mask_inventory > 0 else 0\n  utility <- social_signal + media_signal + risk_signal + policy_signal - mask_discomfort_cost\n  p_wear <- availability * sigmoid(logistic_slope_beta * (utility - peer_threshold))\n  new_state <- Bernoulli(p_wear)\n  if new_state == 1: i.mask_inventory <- max(0, i.mask_inventory - 1)\n  # habit update\n  if new_state == 1: i.habit_strength <- min(habit_max, i.habit_strength + habit_formation_rate*(1 - i.habit_strength))\n  else: i.habit_strength <- max(0, i.habit_strength * (1 - habit_decay_rate))\n  # risk perception small update from habit and past infection experience\n  i.risk_perception <- clip( i.risk_perception + 0.02*i.past_infection_experience + 0.01*(household_rate - 0.5), 0, 1 )",
+        "notes": [
+          "sigmoid(x) = 1/(1+exp(-x))",
+          "peer_threshold is the internal adoption threshold; when utility exceeds it, probability approaches 1",
+          "Availability gates wearing; separate purchase decision handled in market module"
+        ]
+      },
+      "requirements": [
+        "Daily location schedules",
+        "Current policy and media signals",
+        "Neighbor and household masks for social_rate"
+      ],
+      "module_parameters": [
+        "compliance_propensity_mean",
+        "social_influence_weight",
+        "household_norm_weight",
+        "media_effect_weight",
+        "habit_formation_rate",
+        "habit_decay_rate",
+        "initial_adoption_rate",
+        "trust_in_authorities_mean",
+        "risk_perception_initial_mean",
+        "logistic_slope_beta",
+        "peer_threshold",
+        "habit_max",
+        "mask_discomfort_cost"
+      ]
+    },
+    {
+      "name": "PolicyComplianceAndEnforcement",
+      "description": "Sets policy level over time, translates mandates to location mask requirements and enforcement probabilities, and issues fines for noncompliance at entry checks.",
+      "inputs": [
+        "time.day",
+        "observables.epi.Re_daily",
+        "state.locations",
+        "state.individuals",
+        "state.disease.prevalence"
+      ],
+      "outputs": [
+        "signals.policy.mask_requirement_by_location",
+        "signals.policy.enforcement_probability_by_location",
+        "observables.policy.fines_daily",
+        "observables.policy.noncompliance_rate_under_mandate"
+      ],
+      "dependencies": [
+        "DiseaseTransmissionAndProgression"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "policy_level <- initial_policy_level if day < policy_start_day else update_by_thresholds(Re_daily, mandate_Re_threshold)\nfor each Location L:\n  if policy_level == 'none': req<-0; enforce_p<-0\n  if policy_level == 'recommendation': req<-0; enforce_p<-0\n  if policy_level == 'mandate': req<-1; enforce_p<- enforcement_strength * enforcement_check_probability_base * L.baseline_contact_rate\n  signals.policy.mask_requirement_by_location[L.id] <- req\n  signals.policy.enforcement_probability_by_location[L.id] <- clip(enforce_p, 0, 1)\n# Entry checks and fines\nfines_today <- 0; noncomp_count <- 0; mandate_visits <- 0\nfor each Individual i at entry events to locations with req==1:\n  mandate_visits += 1\n  if i.mask_adoption_state == 0:\n    noncomp_count += 1\n    if Bernoulli(signals.policy.enforcement_probability_by_location[loc.id] * ticket_probability_base):\n      fines_today += fine_amount\nobservables.policy.fines_daily <- fines_today\nif mandate_visits > 0: observables.policy.noncompliance_rate_under_mandate <- noncomp_count / mandate_visits else 0",
+        "notes": [
+          "update_by_thresholds raises level to mandate if Re exceeds threshold for 3 consecutive days; can also relax if Re below 0.9 for 7 days",
+          "Enforcement probability scales with enforcement_strength and location contact intensity"
+        ]
+      },
+      "requirements": [
+        "Access to Re_daily",
+        "Entry event approximations based on attendance"
+      ],
+      "module_parameters": [
+        "policy_start_day",
+        "initial_policy_level",
+        "enforcement_strength",
+        "fine_amount",
+        "mandate_Re_threshold",
+        "enforcement_check_probability_base",
+        "ticket_probability_base",
+        "communication_frequency"
+      ]
+    },
+    {
+      "name": "MediaExposureAndBeliefs",
+      "description": "Generates daily public health messages and media broadcasts; updates individual risk perception and trust according to exposure, outlet bias, and misinformation.",
+      "inputs": [
+        "time.day",
+        "state.media_outlets",
+        "state.public_health_authority",
+        "state.individuals"
+      ],
+      "outputs": [
+        "signals.media.risk_message_index",
+        "state.individuals.risk_perception",
+        "state.individuals.trust_in_authorities"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day % max(1, round(1/communication_frequency)) == 0:\n  pha_msg <- baseline risk-reducing message intensity = 1.0\nelse:\n  pha_msg <- 0.5\n# Aggregate media signals\nrisk_index <- 0\nfor each MediaOutlet m:\n  content <- pha_msg * (1 - m.misinformation_rate) + m.message_bias\n  risk_index += content * m.reach * m.credibility\nsignals.media.risk_message_index <- clip(risk_index, -1, 2)\n# Update individual beliefs\nfor each Individual i:\n  exposure <- weighted sum of outlets in i.media_exposure_profile by reach\n  delta_risk <- media_belief_gain * exposure * signals.media.risk_message_index\n  i.risk_perception <- clip( (1 - media_effect_decay)*i.risk_perception + delta_risk, 0, 1 )\n  # trust nudged towards outlet credibility weighted by PHA consistency\n  i.trust_in_authorities <- clip( i.trust_in_authorities + 0.01*exposure*(mean_credibility - 0.6), 0, 1 )",
+        "notes": [
+          "media_belief_gain is derived from media_effect_weight implicitly via MaskAdoptionDecision; here we use fixed gain 0.05 internally",
+          "media_effect_decay controls memory of prior perceptions"
+        ]
+      },
+      "requirements": [
+        "Media outlets list with reach and credibility",
+        "PHA message cadence"
+      ],
+      "module_parameters": [
+        "misinformation_rate",
+        "communication_frequency",
+        "media_message_bias_mean",
+        "media_effect_decay",
+        "media_outlets_count"
+      ]
+    },
+    {
+      "name": "DiseaseTransmissionAndProgression",
+      "description": "Simulates stochastic SEIR progression and transmission via contacts at locations; computes daily Re.",
+      "inputs": [
+        "state.individuals",
+        "state.locations",
+        "signals.policy.mask_requirement_by_location"
+      ],
+      "outputs": [
+        "state.individuals.health_state",
+        "observables.epi.infections_daily",
+        "observables.epi.prevalence_daily",
+        "observables.epi.Re_daily"
+      ],
+      "dependencies": [
+        "MaskAdoptionDecision"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "new_infections <- 0\ncontacts_considered <- 0\nfor each Location L:\n  attendees <- individuals scheduled at L today\n  # Sample pair contacts using binomial approximation of random mixing\n  for each susceptible s in attendees where s.health_state == 'S':\n    lambda <- 0\n    for each infectious j in attendees where j.health_state == 'I':\n      p_base <- base_transmission_rate * contact_rate_mod[L.type] * (1/ L.ventilation_factor)\n      eff_out <- mask_outward_efficacy * quality_multiplier(j.mask_quality) if j.mask_adoption_state==1 else 0\n      eff_in <- mask_inward_efficacy * quality_multiplier(s.mask_quality) if s.mask_adoption_state==1 else 0\n      p_eff <- p_base * (1 - eff_out) * (1 - eff_in)\n      lambda += p_eff\n      contacts_considered += 1\n    if Bernoulli(1 - exp(-lambda)) == 1:\n      s.health_state <- 'E'; s.past_infection_experience <- min(1, s.past_infection_experience + 0.5)\n      new_infections += 1\n# Progression E->I and I->R\nfor each Individual i:\n  if i.health_state == 'E' and Bernoulli(1/incubation_period_mean) == 1: i.health_state <- 'I'\n  if i.health_state == 'I' and Bernoulli(1/infectious_period_mean) == 1: i.health_state <- 'R'\n# Compute prevalence and Re\nI_t <- count of health_state=='I'\nobservables.epi.infections_daily <- new_infections\nobservables.epi.prevalence_daily <- I_t / population_size\nRe_daily <- (new_infections + epsilon) / (I_t + epsilon) * infectious_period_mean\nobservables.epi.Re_daily <- Re_daily",
+        "notes": [
+          "Lambda approximation emulates cumulative risk from infectious attendees",
+          "quality_multiplier: cloth=efficacy_multiplier_cloth; surgical=...; respirator=...",
+          "epsilon is a small number 1e-6 to avoid division by zero"
+        ]
+      },
+      "requirements": [
+        "Attendance lists per location per day",
+        "Mask adoption states for efficacy",
+        "Transition parameters"
+      ],
+      "module_parameters": [
+        "base_transmission_rate",
+        "incubation_period_mean",
+        "infectious_period_mean",
+        "asymptomatic_fraction",
+        "mask_inward_efficacy",
+        "mask_outward_efficacy",
+        "efficacy_multiplier_cloth",
+        "efficacy_multiplier_surgical",
+        "efficacy_multiplier_respirator",
+        "contact_rate_mod_household",
+        "contact_rate_mod_workplace",
+        "contact_rate_mod_school",
+        "contact_rate_mod_retail",
+        "contact_rate_mod_public_transport",
+        "initial_infected_fraction"
+      ]
+    },
+    {
+      "name": "MaskMarketAndRetail",
+      "description": "Handles mask purchases, retailer stock flows, price adjustments, and inventory allocation.",
+      "inputs": [
+        "state.retailers",
+        "state.individuals",
+        "time.day"
+      ],
+      "outputs": [
+        "state.retailers.stock_level",
+        "state.retailers.price",
+        "observables.market.stockout_daily",
+        "observables.market.avg_price_daily"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "# Restock pipeline\nfor each Retailer r:\n  incoming <- Poisson(r.restock_rate * r.backlog) after supply_lead_time_days delay\n  r.stock_level += incoming\n# Price update by demand pressure\nfor each Retailer r:\n  demand_pressure <- r.yesterday_demand / max(1, r.yesterday_supply)\n  price_multiplier <- 1 + price_adjustment_sensitivity * (demand_pressure - 1)\n  r.price[cloth] <- max(0.5, mask_price_cloth * price_multiplier)\n  r.price[surgical] <- max(0.75, mask_price_surgical * price_multiplier)\n  r.price[respirator] <- max(1.0, mask_price_respirator * price_multiplier)\n# Individual purchase decisions\nfor each Individual i:\n  if i.mask_inventory <= purchase_reorder_point and Bernoulli(purchase_intent_prob) == 1:\n    # choose retailer uniformly nearby (no explicit space) and pick quality by quality_mix and income\n    budget <- min(0.01 * i.income, 20)\n    target_qty <- purchase_target_inventory - i.mask_inventory\n    buy_quality <- argmax over types of (quality_multiplier * (i.income / price))\n    purchasable <- min(target_qty, floor(budget / r.price[buy_quality]), r.stock_level[buy_quality])\n    r.stock_level[buy_quality] -= purchasable\n    i.mask_inventory += purchasable\n# Observables\nobservables.market.stockout_daily <- fraction of retailers with any type stock_level == 0\nobservables.market.avg_price_daily <- average over retailers and types weighted by daily sales",
+        "notes": [
+          "purchase_intent_prob defaults to 0.6 for those intending to wear; can be derived from habit_strength",
+          "Simple restock pipeline can be implemented with queues of delayed orders"
+        ]
+      },
+      "requirements": [
+        "Retailer inventory by type",
+        "Individual budgets and income"
+      ],
+      "module_parameters": [
+        "retailer_initial_stock_per_capita",
+        "restock_rate_per_day",
+        "supply_lead_time_days",
+        "mask_price_cloth",
+        "mask_price_surgical",
+        "mask_price_respirator",
+        "price_adjustment_sensitivity",
+        "quality_mix_cloth",
+        "quality_mix_surgical",
+        "quality_mix_respirator",
+        "purchase_reorder_point",
+        "purchase_target_inventory",
+        "retailer_count"
+      ]
+    },
+    {
+      "name": "AdoptionAndEpiAggregator",
+      "description": "Aggregates daily adoption and epidemiological statistics by location and overall; computes stockout frequency and policy cost accumulation.",
+      "inputs": [
+        "state.individuals",
+        "state.locations",
+        "observables.epi.infections_daily",
+        "observables.epi.prevalence_daily",
+        "observables.epi.Re_daily",
+        "observables.market.stockout_daily",
+        "observables.market.avg_price_daily",
+        "observables.policy.fines_daily"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.adoption_rate_by_location",
+        "observable.cumulative_infections",
+        "observable.peak_prevalence",
+        "observable.Re_daily",
+        "observable.noncompliance_rate_under_mandate",
+        "observable.stockout_frequency",
+        "observable.average_mask_price",
+        "observable.policy_costs_collected"
+      ],
+      "dependencies": [
+        "MaskAdoptionDecision",
+        "DiseaseTransmissionAndProgression",
+        "MaskMarketAndRetail",
+        "PolicyComplianceAndEnforcement"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate <- mean(i.mask_adoption_state for all individuals)\nby_loc <- for each location type T: mean(masking among attendees in T today)\ncum_infections <- cumulative sum of observables.epi.infections_daily\npeak_prev <- max historical observables.epi.prevalence_daily\nRe_series <- observables.epi.Re_daily\nnoncomp <- rolling value from observables.policy.noncompliance_rate_under_mandate\nstockout_freq <- cumulative days with stockout / day\navg_price <- moving average of observables.market.avg_price_daily weighted by sales\npolicy_costs <- cumulative sum of observables.policy.fines_daily\nemit all as observables",
+        "notes": [
+          "Aggregation should be consistent with attendance sampling",
+          "stockout_frequency is fraction up to current day"
+        ]
+      },
+      "requirements": [
+        "Access to historical time series buffers"
+      ],
+      "module_parameters": []
+    }
+  ],
+  "parameters": [
+    {
+      "key": "simulation_days",
+      "dtype": "int",
+      "default": 120,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulation days",
+      "frozen": "true"
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 1000,
+        "high": 200000
+      },
+      "owner_module": "global",
+      "description": "Number of individuals in the simulation",
+      "frozen": "true"
+    },
+    {
+      "key": "seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Random seed",
+      "frozen": "true"
+    },
+    {
+      "key": "network_topology",
+      "dtype": "categorical",
+      "default": "small_world",
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "global",
+      "description": "Network type for social graph",
+      "frozen": "true"
+    },
+    {
+      "key": "average_degree",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 4,
+        "high": 40
+      },
+      "owner_module": "global",
+      "description": "Average number of neighbors in the social network",
+      "frozen": "false"
+    },
+    {
+      "key": "rewiring_prob_small_world",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Watts\u2013Strogatz rewiring probability",
+      "frozen": "false"
+    },
+    {
+      "key": "household_size_prob_1",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": 0.05,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Probability of 1-person household",
+      "frozen": "false"
+    },
+    {
+      "key": "household_size_prob_2",
+      "dtype": "float",
+      "default": 0.35,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.6
+      },
+      "owner_module": "global",
+      "description": "Probability of 2-person household",
+      "frozen": "false"
+    },
+    {
+      "key": "household_size_prob_3",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Probability of 3-person household",
+      "frozen": "false"
+    },
+    {
+      "key": "household_size_prob_4",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.05,
+        "high": 0.4
+      },
+      "owner_module": "global",
+      "description": "Probability of 4-person household",
+      "frozen": "false"
+    },
+    {
+      "key": "workforce_fraction",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.3,
+        "high": 0.8
+      },
+      "owner_module": "global",
+      "description": "Fraction of population attending workplaces",
+      "frozen": "false"
+    },
+    {
+      "key": "school_age_fraction",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.3
+      },
+      "owner_module": "global",
+      "description": "Fraction attending schools",
+      "frozen": "false"
+    },
+    {
+      "key": "retail_visit_rate_per_week",
+      "dtype": "float",
+      "default": 2.0,
+      "bounds": {
+        "low": 0.2,
+        "high": 7.0
+      },
+      "owner_module": "global",
+      "description": "Average weekly retail visit rate per individual",
+      "frozen": "false"
+    },
+    {
+      "key": "public_transport_use_fraction",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "global",
+      "description": "Fraction of population using public transport on commute days",
+      "frozen": "false"
+    },
+    {
+      "key": "location_capacity_multiplier",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 2.0
+      },
+      "owner_module": "global",
+      "description": "Scales all location capacities",
+      "frozen": "false"
+    },
+    {
+      "key": "income_mean",
+      "dtype": "float",
+      "default": 3000.0,
+      "bounds": {
+        "low": 500.0,
+        "high": 10000.0
+      },
+      "owner_module": "global",
+      "description": "Mean monthly income used for lognormal sampling",
+      "frozen": "false"
+    },
+    {
+      "key": "income_dispersion",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.5
+      },
+      "owner_module": "global",
+      "description": "Lognormal dispersion parameter for income",
+      "frozen": "false"
+    },
+    {
+      "key": "compliance_propensity_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.2,
+        "high": 0.9
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Mean for Beta distribution of compliance propensity",
+      "frozen": "false"
+    },
+    {
+      "key": "social_influence_weight",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Weight on neighbor mask rate in adoption utility",
+      "frozen": "false"
+    },
+    {
+      "key": "household_norm_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Weight on household norms in adoption utility",
+      "frozen": "false"
+    },
+    {
+      "key": "media_effect_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Weight on media-driven risk signal in adoption utility",
+      "frozen": "false"
+    },
+    {
+      "key": "habit_formation_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Daily increase rate in habit strength when wearing",
+      "frozen": "false"
+    },
+    {
+      "key": "habit_decay_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Daily multiplicative decay of habit when not wearing",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Initial probability of wearing a mask",
+      "frozen": "false"
+    },
+    {
+      "key": "trust_in_authorities_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.9
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Mean for Beta distribution of trust in authorities",
+      "frozen": "false"
+    },
+    {
+      "key": "risk_perception_initial_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.05,
+        "high": 0.9
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Mean for initial risk perception distribution",
+      "frozen": "false"
+    },
+    {
+      "key": "logistic_slope_beta",
+      "dtype": "float",
+      "default": 5.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 10.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Slope of sigmoid in adoption probability",
+      "frozen": "false"
+    },
+    {
+      "key": "peer_threshold",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Utility threshold for significant adoption propensity",
+      "frozen": "false"
+    },
+    {
+      "key": "habit_max",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Cap on habit strength",
+      "frozen": "true"
+    },
+    {
+      "key": "mask_discomfort_cost",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Disutility offset for wearing a mask",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 0,
+        "high": 60
+      },
+      "owner_module": "PolicyComplianceAndEnforcement",
+      "description": "Day when policy mechanism activates",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_policy_level",
+      "dtype": "categorical",
+      "default": "recommendation",
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "PolicyComplianceAndEnforcement",
+      "description": "Initial policy level (none, recommendation, mandate)",
+      "frozen": "true"
+    },
+    {
+      "key": "enforcement_strength",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyComplianceAndEnforcement",
+      "description": "Scaling factor for enforcement probabilities at locations",
+      "frozen": "false"
+    },
+    {
+      "key": "fine_amount",
+      "dtype": "float",
+      "default": 50.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 500.0
+      },
+      "owner_module": "PolicyComplianceAndEnforcement",
+      "description": "Fine per noncompliance citation",
+      "frozen": "false"
+    },
+    {
+      "key": "mandate_Re_threshold",
+      "dtype": "float",
+      "default": 1.05,
+      "bounds": {
+        "low": 0.8,
+        "high": 2.0
+      },
+      "owner_module": "PolicyComplianceAndEnforcement",
+      "description": "Re threshold to trigger mandate",
+      "frozen": "false"
+    },
+    {
+      "key": "enforcement_check_probability_base",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyComplianceAndEnforcement",
+      "description": "Base probability of entry check per visit under mandate",
+      "frozen": "false"
+    },
+    {
+      "key": "ticket_probability_base",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyComplianceAndEnforcement",
+      "description": "Conditional probability of issuing citation when checked",
+      "frozen": "false"
+    },
+    {
+      "key": "communication_frequency",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 2.0
+      },
+      "owner_module": "PolicyComplianceAndEnforcement",
+      "description": "Average PHA communication frequency per day",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "MediaExposureAndBeliefs",
+      "description": "Average misinformation rate across outlets",
+      "frozen": "false"
+    },
+    {
+      "key": "media_message_bias_mean",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaExposureAndBeliefs",
+      "description": "Mean bias of media messages relative to risk-reducing baseline",
+      "frozen": "false"
+    },
+    {
+      "key": "media_effect_decay",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "MediaExposureAndBeliefs",
+      "description": "Daily decay of media-induced risk perception",
+      "frozen": "false"
+    },
+    {
+      "key": "media_outlets_count",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 1,
+        "high": 20
+      },
+      "owner_module": "MediaExposureAndBeliefs",
+      "description": "Number of media outlets simulated",
+      "frozen": "false"
+    },
+    {
+      "key": "base_transmission_rate",
+      "dtype": "float",
+      "default": 0.06,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.2
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Per-contact base transmission probability before modifiers",
+      "frozen": "false"
+    },
+    {
+      "key": "incubation_period_mean",
+      "dtype": "float",
+      "default": 4.5,
+      "bounds": {
+        "low": 2.0,
+        "high": 7.0
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Mean incubation period in days",
+      "frozen": "false"
+    },
+    {
+      "key": "infectious_period_mean",
+      "dtype": "float",
+      "default": 7.0,
+      "bounds": {
+        "low": 3.0,
+        "high": 14.0
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Mean infectious period in days",
+      "frozen": "false"
+    },
+    {
+      "key": "asymptomatic_fraction",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.6
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Fraction of infections that are asymptomatic",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_inward_efficacy",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.8
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Baseline inward mask efficacy",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_outward_efficacy",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.9
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Baseline outward mask efficacy",
+      "frozen": "false"
+    },
+    {
+      "key": "efficacy_multiplier_cloth",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Relative efficacy multiplier for cloth masks",
+      "frozen": "false"
+    },
+    {
+      "key": "efficacy_multiplier_surgical",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.8,
+        "high": 1.2
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Relative efficacy multiplier for surgical masks",
+      "frozen": "false"
+    },
+    {
+      "key": "efficacy_multiplier_respirator",
+      "dtype": "float",
+      "default": 1.4,
+      "bounds": {
+        "low": 1.1,
+        "high": 1.8
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Relative efficacy multiplier for respirators",
+      "frozen": "false"
+    },
+    {
+      "key": "contact_rate_mod_household",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 2.0
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Contact rate modifier for household",
+      "frozen": "false"
+    },
+    {
+      "key": "contact_rate_mod_workplace",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.2,
+        "high": 1.5
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Contact rate modifier for workplace",
+      "frozen": "false"
+    },
+    {
+      "key": "contact_rate_mod_school",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.2,
+        "high": 1.5
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Contact rate modifier for school",
+      "frozen": "false"
+    },
+    {
+      "key": "contact_rate_mod_retail",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Contact rate modifier for retail",
+      "frozen": "false"
+    },
+    {
+      "key": "contact_rate_mod_public_transport",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.5
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Contact rate modifier for public transport",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_infected_fraction",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.001,
+        "high": 0.05
+      },
+      "owner_module": "DiseaseTransmissionAndProgression",
+      "description": "Initial infected fraction of population",
+      "frozen": "false"
+    },
+    {
+      "key": "retailer_initial_stock_per_capita",
+      "dtype": "float",
+      "default": 3.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 10.0
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Initial total stock across retailers in units per capita",
+      "frozen": "false"
+    },
+    {
+      "key": "restock_rate_per_day",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Daily restock rate relative to backorders",
+      "frozen": "false"
+    },
+    {
+      "key": "supply_lead_time_days",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 1,
+        "high": 21
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Supply chain lead time for restocking",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_price_cloth",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.2,
+        "high": 5.0
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Base price for cloth masks",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_price_surgical",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.3,
+        "high": 6.0
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Base price for surgical masks",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_price_respirator",
+      "dtype": "float",
+      "default": 3.5,
+      "bounds": {
+        "low": 0.5,
+        "high": 10.0
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Base price for respirators",
+      "frozen": "false"
+    },
+    {
+      "key": "price_adjustment_sensitivity",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Price adjustment sensitivity to demand pressure",
+      "frozen": "false"
+    },
+    {
+      "key": "quality_mix_cloth",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.9
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Fraction of cloth masks in supply mix",
+      "frozen": "false"
+    },
+    {
+      "key": "quality_mix_surgical",
+      "dtype": "float",
+      "default": 0.35,
+      "bounds": {
+        "low": 0.05,
+        "high": 0.8
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Fraction of surgical masks in supply mix",
+      "frozen": "false"
+    },
+    {
+      "key": "quality_mix_respirator",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.6
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Fraction of respirators in supply mix",
+      "frozen": "false"
+    },
+    {
+      "key": "purchase_reorder_point",
+      "dtype": "int",
+      "default": 2,
+      "bounds": {
+        "low": 0,
+        "high": 14
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Inventory level triggering purchase",
+      "frozen": "false"
+    },
+    {
+      "key": "purchase_target_inventory",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 1,
+        "high": 60
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Target personal mask inventory after purchase",
+      "frozen": "false"
+    },
+    {
+      "key": "retailer_count",
+      "dtype": "int",
+      "default": 30,
+      "bounds": {
+        "low": 5,
+        "high": 200
+      },
+      "owner_module": "MaskMarketAndRetail",
+      "description": "Number of retailers in the market",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAndEpiAggregator",
+      "formula_or_field": "mean(Individual.mask_adoption_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "adoption_series.csv:adoption_rate"
+    },
+    {
+      "id": "observable.adoption_rate_by_location",
+      "source_module": "AdoptionAndEpiAggregator",
+      "formula_or_field": "mean(masking) by Location.type among attendees",
+      "frequency": "daily",
+      "aggregation": "by_group(location_type)",
+      "target_data_field": "adoption_by_location.csv:rate_by_type"
+    },
+    {
+      "id": "observable.cumulative_infections",
+      "source_module": "AdoptionAndEpiAggregator",
+      "formula_or_field": "cumulative sum of infections_daily",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "epi.csv:cumulative_infections"
+    },
+    {
+      "id": "observable.peak_prevalence",
+      "source_module": "AdoptionAndEpiAggregator",
+      "formula_or_field": "max(prevalence_daily)",
+      "frequency": "daily",
+      "aggregation": "max",
+      "target_data_field": "epi.csv:peak_prevalence"
+    },
+    {
+      "id": "observable.Re_daily",
+      "source_module": "AdoptionAndEpiAggregator",
+      "formula_or_field": "observables.epi.Re_daily",
+      "frequency": "daily",
+      "aggregation": "none",
+      "target_data_field": "epi.csv:Re"
+    },
+    {
+      "id": "observable.noncompliance_rate_under_mandate",
+      "source_module": "AdoptionAndEpiAggregator",
+      "formula_or_field": "noncompliant_entries / total_entries where mask_required",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "policy.csv:noncompliance_rate"
+    },
+    {
+      "id": "observable.stockout_frequency",
+      "source_module": "AdoptionAndEpiAggregator",
+      "formula_or_field": "cumulative days stockout / day",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "market.csv:stockout_frequency"
+    },
+    {
+      "id": "observable.average_mask_price",
+      "source_module": "AdoptionAndEpiAggregator",
+      "formula_or_field": "weighted mean price by sales across types",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "market.csv:avg_price"
+    },
+    {
+      "id": "observable.policy_costs_collected",
+      "source_module": "AdoptionAndEpiAggregator",
+      "formula_or_field": "cumulative fines",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "policy.csv:cumulative_fines"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "overall_adoption_rate_over_time",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "Series",
+        "config": {
+          "window": "full"
+        }
+      }
+    },
+    {
+      "name": "time_to_target_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToThreshold",
+        "config": {
+          "threshold": 0.7,
+          "direction": "up"
+        }
+      }
+    },
+    {
+      "name": "adoption_rate_by_location_type",
+      "inputs": [
+        "observable.adoption_rate_by_location"
+      ],
+      "definition": {
+        "type": "SeriesByGroup",
+        "config": {
+          "groups": [
+            "household",
+            "workplace",
+            "school",
+            "retail",
+            "public_transport"
+          ]
+        }
+      }
+    },
+    {
+      "name": "cumulative_infections",
+      "inputs": [
+        "observable.cumulative_infections"
+      ],
+      "definition": {
+        "type": "FinalValue",
+        "config": {}
+      }
+    },
+    {
+      "name": "peak_prevalence",
+      "inputs": [
+        "observable.peak_prevalence"
+      ],
+      "definition": {
+        "type": "Max",
+        "config": {}
+      }
+    },
+    {
+      "name": "effective_reproduction_number_Re",
+      "inputs": [
+        "observable.Re_daily"
+      ],
+      "definition": {
+        "type": "Series",
+        "config": {
+          "window": "full"
+        }
+      }
+    },
+    {
+      "name": "noncompliance_rate_under_mandate",
+      "inputs": [
+        "observable.noncompliance_rate_under_mandate"
+      ],
+      "definition": {
+        "type": "Mean",
+        "config": {
+          "window": "mandate_days"
+        }
+      }
+    },
+    {
+      "name": "stockout_frequency",
+      "inputs": [
+        "observable.stockout_frequency"
+      ],
+      "definition": {
+        "type": "FinalValue",
+        "config": {}
+      }
+    },
+    {
+      "name": "average_mask_price",
+      "inputs": [
+        "observable.average_mask_price"
+      ],
+      "definition": {
+        "type": "Mean",
+        "config": {
+          "window": "full"
+        }
+      }
+    },
+    {
+      "name": "policy_costs_collected",
+      "inputs": [
+        "observable.policy_costs_collected"
+      ],
+      "definition": {
+        "type": "FinalValue",
+        "config": {}
+      }
+    },
+    {
+      "name": "adoption_convergence",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "SlopeBelowThreshold",
+        "config": {
+          "window_days": 7,
+          "threshold": 0.005
+        }
+      }
+    },
+    {
+      "name": "epidemic_control",
+      "inputs": [
+        "observable.Re_daily"
+      ],
+      "definition": {
+        "type": "BelowThresholdConsecutiveDays",
+        "config": {
+          "threshold": 1.0,
+          "days": 14
+        }
+      }
+    },
+    {
+      "name": "calibration_fit",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true,
+          "target": "adoption_series.csv:adoption_rate"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "network": {
+      "type": "watts_strogatz",
+      "n": "population_size",
+      "k": "average_degree",
+      "p": "rewiring_prob_small_world"
+    },
+    "households": {
+      "size_probs": {
+        "1": 0.25,
+        "2": 0.35,
+        "3": 0.25,
+        "4": 0.15
+      }
+    },
+    "locations": {
+      "retailers": "retailer_count",
+      "workplaces": "ceil(population_size * workforce_fraction / 30)",
+      "schools": "ceil(population_size * school_age_fraction / 200)",
+      "public_transport": "max(10, ceil(population_size * public_transport_use_fraction / 300))"
+    },
+    "disease": {
+      "initial_infected_fraction": 0.01
+    },
+    "media_outlets": {
+      "count": 5
+    }
+  },
+  "algorithms": {
+    "AdoptionDecisionLogit": "Probabilistic choice using sigmoid on weighted utility of social, policy, media, risk, habit, and discomfort components gated by availability.",
+    "SEIR_Stochastic": "Discrete-time SEIR with Bernoulli transitions and contact-based exposure using location-modified transmission probabilities.",
+    "WattsStrogatzNetwork": "Small-world social network generator with given average degree and rewiring probability.",
+    "PriceAdjustmentByDemand": "Retail price updates proportionally to demand/supply ratio with sensitivity parameter; simple restock pipeline with lead time.",
+    "Re_Estimation": "Daily ratio of new infections to current infectious times mean infectious period with smoothing epsilon."
+  },
+  "data_sources": [
+    {
+      "name": "adoption_series.csv",
+      "purpose": "Calibration and validation of adoption curve",
+      "fields_used": [
+        "date",
+        "adoption_rate"
+      ]
+    },
+    {
+      "name": "epi.csv",
+      "purpose": "Validation of epidemiological outputs",
+      "fields_used": [
+        "date",
+        "Re",
+        "cumulative_infections",
+        "peak_prevalence"
+      ]
+    },
+    {
+      "name": "policy.csv",
+      "purpose": "Policy compliance and fines validation",
+      "fields_used": [
+        "date",
+        "noncompliance_rate",
+        "cumulative_fines"
+      ]
+    },
+    {
+      "name": "market.csv",
+      "purpose": "Market dynamics validation",
+      "fields_used": [
+        "date",
+        "stockout_frequency",
+        "avg_price"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point; simulation loop, configuration loading, seeding"
+      },
+      {
+        "name": "entities.py",
+        "description": "Dataclasses for Individual, Household, Location, Retailer, MediaOutlet, PublicHealthAuthority"
+      },
+      {
+        "name": "network.py",
+        "description": "Social network generation and utilities"
+      },
+      {
+        "name": "modules/adoption.py",
+        "description": "MaskAdoptionDecision module implementation"
+      },
+      {
+        "name": "modules/policy.py",
+        "description": "PolicyComplianceAndEnforcement module implementation"
+      },
+      {
+        "name": "modules/media.py",
+        "description": "MediaExposureAndBeliefs module implementation"
+      },
+      {
+        "name": "modules/disease.py",
+        "description": "DiseaseTransmissionAndProgression module implementation"
+      },
+      {
+        "name": "modules/market.py",
+        "description": "MaskMarketAndRetail module implementation"
+      },
+      {
+        "name": "modules/aggregate.py",
+        "description": "AdoptionAndEpiAggregator and metrics calculation"
+      },
+      {
+        "name": "schedules.py",
+        "description": "Location schedule generator and attendance sampling"
+      },
+      {
+        "name": "params.py",
+        "description": "Parameter schema, validation, and sampling (bounds/priors)"
+      },
+      {
+        "name": "io.py",
+        "description": "Data I/O bindings for observables and metrics; results serialization"
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "scipy",
+      "networkx",
+      "pandas",
+      "numba",
+      "dataclasses_json"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 90,
+    "end_day": 120
+  },
+  "evaluation_metrics": [
+    "overall_adoption_rate_over_time",
+    "time_to_target_adoption",
+    "adoption_rate_by_location_type",
+    "cumulative_infections",
+    "peak_prevalence",
+    "effective_reproduction_number_Re",
+    "noncompliance_rate_under_mandate",
+    "stockout_frequency",
+    "average_mask_price",
+    "policy_costs_collected"
+  ]
+}

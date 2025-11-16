@@ -1,0 +1,194 @@
+{
+  "summary": "The codebase has solid modular design and several good fixes (e.g., precomputed neighbor indices, improved policy heterogeneity, retail budget handling), but the core simulation loop and evaluation are missing. Initialization is incomplete, the network fallback is not used when data are absent, and some exposure scaling needs clipping. Addressing these will unblock runtime, enable calibration/validation, and align outputs with the task\u2019s prediction and evaluation requirements.",
+  "critical_issues": [
+    {
+      "issue": "Missing Simulation.run() method",
+      "impact": "The simulation cannot execute; main() fails at runtime. No day-by-day dynamics of policy, exposure, information diffusion, retail, and adoption are performed.",
+      "solution": "Implement a daily loop from day 0 to sim_end_day calling policy/media, exposure, info diffusion, retail, adoption, and aggregation. Update arrays in-place and append daily results.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Incomplete Simulation.initialize()",
+      "impact": "Agents are not fully initialized; arrays (is_mask_wearing, received_info, budgets, inventory, trust, compliance) are not set; the network neighbors are not built; neighbor indices aren\u2019t precomputed; retail market is not instantiated. Any downstream computation will fail.",
+      "solution": "Finish initialize(): build or fallback-generate network, call NetworkManager.build_neighbors, precompute neighbor indices, build numpy arrays for all states, set initial states from train_df day 0 or via priors, instantiate RetailMarket.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Missing Simulation.evaluate()",
+      "impact": "No calibration/validation metrics (RMSE, MAE, etc.) can be returned. The pipeline can\u2019t verify model fit nor produce prediction KPIs for days 30\u201339.",
+      "solution": "Implement evaluate(): aggregate simulated true adoption over time; aggregate empirical adoption by day from train_data.csv; compute RMSE/MAE across calibration window; report Peak, TimeTo50, Final adoption, and subgroup Gini.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No network fallback when social_network.json is absent/empty",
+      "impact": "Peer influence and information diffusion become degenerate (no neighbors), leading to under-dispersed dynamics and biased adoption predictions.",
+      "solution": "If empirical network is missing/empty, generate a small-world fallback via _generate_small_world_network(N) and build neighbors. Then precompute neighbor indices.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Weighted peer_mask_fraction can exceed 1",
+      "impact": "Inflates log-odds in adoption decision, creating unrealistic adoption spikes and unstable sensitivity to weights.",
+      "solution": "Clip per-layer peer_mask_fraction to [0, 1] after weighting (or reduce beta coefficients).",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Household influence needed but not computed",
+      "impact": "MaskAdoptionDecision.step expects household_share, but it is not provided in the current run flow, causing potential errors or zeros if mocked.",
+      "solution": "Compute household_share as the family-layer peer fraction (or explicit household aggregation) and pass it in each day.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Daily simulation loop and state updates",
+      "current_approach": "Not implemented",
+      "suggested_approach": "Run a loop day=0..sim_end_day; compute policy/media signals; compute exposures using precomputed neighbor indices; run information diffusion; process retail purchases and update budgets/inventory; compute household_share; decide adoption; aggregate outputs.",
+      "expected_benefit": "Enables end-to-end functionality, making prediction and evaluation possible."
+    },
+    {
+      "aspect": "Exposure scaling",
+      "current_approach": "Layer-weighted peer fractions multiplied by mobility; can exceed 1",
+      "suggested_approach": "Clip peer fractions to [0, 1] after weighting; alternatively reduce influence betas in MaskAdoptionDecision.",
+      "expected_benefit": "Prevents unrealistic log-odds inflation and improves numerical stability."
+    },
+    {
+      "aspect": "Network robustness",
+      "current_approach": "If social_network.json is missing/empty, neighbors remain empty",
+      "suggested_approach": "Use small-world fallback generator with typical degree and low rewiring; symmetrize edges; precompute neighbor indices.",
+      "expected_benefit": "Maintains coherent social influence dynamics under missing data."
+    },
+    {
+      "aspect": "Evaluation/calibration",
+      "current_approach": "No evaluate() method; aggregator computes noisy observation not used",
+      "suggested_approach": "Compute metrics using adoption_rate_true vs. empirical series; return RMSE/MAE for calibration (days 0\u201329) and validation summary (30\u201339).",
+      "expected_benefit": "Measurable fit quality and alignment with task\u2019s evaluation requirements."
+    },
+    {
+      "aspect": "Household influence",
+      "current_approach": "MaskAdoptionDecision expects household_share; not computed",
+      "suggested_approach": "Compute family-layer mask-wearing share (or explicit Household object aggregation) and pass to the decision module.",
+      "expected_benefit": "Captures intra-household clustering and norm effects, improving realism."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Complete Simulation.initialize() to finalize arrays, build neighbors, precompute indices, set initial states, and instantiate RetailMarket.",
+      "reason": "Prevents runtime errors and ensures all modules have required inputs.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement Simulation.run() daily loop handling policy/media, exposure, info diffusion, retail purchases, adoption decisions, and aggregation.",
+      "reason": "Core functionality required to simulate and predict adoption.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement Simulation.evaluate() to compute RMSE/MAE on calibration window and additional metrics.",
+      "reason": "Enables verification against observed data as per task requirements.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add network fallback in initialize() when social_network.json is empty; then call NetworkManager.build_neighbors and _precompute_neighbor_indices().",
+      "reason": "Ensures non-degenerate social dynamics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Clip peer_mask_fraction outputs in ExposureCalculator.compute to [0,1].",
+      "reason": "Prevents over-weighting that causes unrealistic adoption jumps.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute household_share from family-layer neighbor states each day.",
+      "reason": "Satisfies MaskAdoptionDecision input and models intra-household influence.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Ensure RetailMarket.step return signature (stock_level, price, inventory, budgets) is handled and budgets stored back.",
+      "reason": "Fixes budget/inventory accounting consistency introduced by recent change.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "RMSE (days 0\u201329)",
+      "current_gap": "Not computed; no calibration against observed series",
+      "suggestion": "Aggregate observed daily adoption from train_data.csv and compute RMSE against simulated adoption_rate_true; grid search over key weights if time permits."
+    },
+    {
+      "metric": "AdoptionRateAtT (days 30\u201339)",
+      "current_gap": "No predictions generated",
+      "suggestion": "After run(), report predicted daily adoption series for days 30\u201339 and compare (if holdout labels exist); ensure policy start day aligns with data (Day 10)."
+    },
+    {
+      "metric": "SubgroupDisparityIndex",
+      "current_gap": "No subgroup outputs",
+      "suggestion": "Compute adoption by age_group and SES if available in agent_attributes.csv; return Gini across groups and top-vs-bottom ratios."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement Simulation.run() and Simulation.evaluate().",
+    "Finish Simulation.initialize(): arrays, network fallback, neighbor indices, initial states, retailer.",
+    "Clip ExposureCalculator peer_mask_fraction to [0,1].",
+    "Compute household_share and pass to MaskAdoptionDecision.step.",
+    "Add calibration against train_data.csv (days 0\u201329) and validation reporting (days 30\u201339).",
+    "Optionally: add simple parameter search loop to reduce RMSE; implement policy monotonicity check."
+  ],
+  "additional_comments": "The recent refactor substantially improves modularity and performance (neighbor index precompute) and realism (policy heterogeneity, retail budgets). After adding the missing run/evaluation and completing initialization, the system should meet the task\u2019s prediction and evaluation goals. Consider later adding multi-replication support and policy monotonicity validation.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    ...\n    def initialize(self) -> None:\n        # Load data\n        self.agent_df = self.data_loader.load_agent_attributes()\n        self.train_df = self.data_loader.load_train_data()\n        if bool(self.params.get(\"use_empirical_network\", True)):\n            self.network_json = self.data_loader.load_social_network()\n        else:\n            self.network_json = {}\n        ...\n        for aid in agent_ids:\n            if aid in df.index:\n                row = df.loc[aid]\n                ag = str(row.get(\"age_group\", \"Unknown\"))\n                oc = str(row.get(\"occupation\", \"Unknown\"))\n                rp = float(row.get(\"risk_perception\", 0.5))\n            else:\n                ag, oc, rp = \"Unknown\", \"Unknown\", 0.5\n            age_groups.append(ag)\n            occupations.append(oc)\n            idx = self.agent_index_map[aid]\n            risk_perception[idx] = rp\n            trust[idx] = trust_mean\n            compliance[idx] = compliance_mean\n            p = self.persons[idx]\n            p.age_group = ag\n            p.occupation = oc\n            p.risk_perception = rp",
+      "after": "class Simulation:\n    ...\n    def initialize(self) -> None:\n        # Load data\n        self.agent_df = self.data_loader.load_agent_attributes()\n        self.train_df = self.data_loader.load_train_data()\n        if bool(self.params.get(\"use_empirical_network\", True)):\n            self.network_json = self.data_loader.load_social_network()\n        else:\n            self.network_json = {}\n\n        # Determine population and index maps\n        if self.agent_df is not None:\n            agent_ids = list(sorted(self.agent_df[\"agent_id\"].astype(int).unique()))\n        else:\n            agent_ids = list(range(int(10000)))\n        self.agent_ids = agent_ids\n        self.N = len(agent_ids)\n        self.agent_index_map = {aid: i for i, aid in enumerate(agent_ids)}\n        self.persons = [Person(agent_id=aid) for aid in agent_ids]\n\n        # Attributes\n        default_budget = 100.0\n        default_inventory = 1\n        trust_mean = float(self.params.get(\"trust_in_institutions_mean\", 0.5))\n        compliance_mean = 0.5\n        self.age_groups, self.occupations = [], []\n        self.risk_perception = np.zeros(self.N, dtype=float)\n        self.trust = np.full(self.N, trust_mean, dtype=float)\n        self.compliance_propensity = np.full(self.N, compliance_mean, dtype=float)\n\n        if self.agent_df is not None:\n            df = self.agent_df.set_index(\"agent_id\")\n            for aid in agent_ids:\n                idx = self.agent_index_map[aid]\n                if aid in df.index:\n                    row = df.loc[aid]\n                    ag = str(row.get(\"age_group\", \"Unknown\"))\n                    oc = str(row.get(\"occupation\", \"Unknown\"))\n                    rp = float(row.get(\"risk_perception\", 0.5))\n                else:\n                    ag, oc, rp = \"Unknown\", \"Unknown\", 0.5\n                self.age_groups.append(ag)\n                self.occupations.append(oc)\n                self.risk_perception[idx] = rp\n                p = self.persons[idx]\n                p.age_group = ag\n                p.occupation = oc\n                p.risk_perception = rp\n        else:\n            rng = self.rng\n            age_categories = [\"Youth\", \"Young Adult\", \"Middle Age\", \"Older Adult\"]\n            occ_categories = [\"Student\", \"White Collar\", \"Blue Collar\", \"Service\"]\n            self.age_groups = [age_categories[rng.integers(0, len(age_categories))] for _ in agent_ids]\n            self.occupations = [occ_categories[rng.integers(0, len(occ_categories))] for _ in agent_ids]\n            alpha = float(self.params.get(\"risk_perception_beta_alpha\", 2.0))\n            beta = float(self.params.get(\"risk_perception_beta_beta\", 3.0))\n            self.risk_perception = rng.beta(alpha, beta, size=self.N)\n            for idx, p in enumerate(self.persons):\n                p.age_group = self.age_groups[idx]\n                p.occupation = self.occupations[idx]\n                p.risk_perception = float(self.risk_perception[idx])\n\n        # Initialize states\n        self.is_mask_wearing = np.zeros(self.N, dtype=int)\n        self.received_info = np.zeros(self.N, dtype=int)\n        self.mask_inventory = np.full(self.N, default_inventory, dtype=int)\n        self.budgets = np.full(self.N, default_budget, dtype=float)\n\n        use_empirical = bool(self.params.get(\"use_empirical_initial_states\", True))\n        if use_empirical and self.train_df is not None:\n            day0 = self.train_df[self.train_df[\"day\"] == 0].copy().set_index(\"agent_id\")\n            for aid in self.agent_ids:\n                idx = self.agent_index_map[aid]\n                if aid in day0.index:\n                    self.is_mask_wearing[idx] = int(day0.loc[aid].get(\"wearing_mask\", 0))\n                    self.received_info[idx] = int(day0.loc[aid].get(\"received_info\", 0))\n        else:\n            baseline = 0.2\n            p_init = np.clip(baseline * (0.5 + self.risk_perception), 0.0, 1.0)\n            draws = self.rng.random(self.N)\n            self.is_mask_wearing = (draws < p_init).astype(int)\n            self.received_info = (self.rng.random(self.N) < 0.1).astype(int)\n\n        # Build network or fallback\n        if not self.network_json:\n            self.network_json = self._generate_small_world_network(self.N, k=6, p_rewire=0.05)\n        self.neighbors_by_layer, self.degree_by_layer = self.network_manager.build_neighbors(self.network_json)\n        self._precompute_neighbor_indices()\n\n        # Retail market\n        self.retail_market = RetailMarket(\n            population_size=self.N,\n            mask_cost_mean=float(self.params.get(\"mask_cost_mean\", 1.0)),\n            price_elasticity=float(self.params.get(\"price_elasticity\", -0.8)),\n            retailer_restock_rate=float(self.params.get(\"retailer_restock_rate\", 0.2)),\n            mask_availability=float(self.params.get(\"mask_availability\", 0.8)),\n            retailer_initial_stock_per_capita=float(self.params.get(\"retailer_initial_stock_per_capita\", 2.0)),\n            rng=self.rng\n        )",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    ...\n    # No run method defined",
+      "after": "class Simulation:\n    ...\n    def run(self) -> None:\n        self.results_daily = []\n        start_day = 0\n        end_day = self.sim_end_day\n        for day in range(start_day, end_day + 1):\n            # Policy and media signals\n            signals = self.policy_media.step(day)\n            mandate_active = int(signals[\"mandate_active\"])\n            enforcement_level = float(signals[\"enforcement_level\"])\n            guidance_intensity = float(signals[\"guidance_intensity\"])\n\n            # Exposures\n            exposures = self.exposure_calc.compute(\n                neighbor_index_by_layer=self.neighbor_index_by_layer,\n                is_mask_wearing=self.is_mask_wearing,\n                received_info=self.received_info\n            )\n            peer_mask_fraction = {L: np.clip(exposures[\"peer_mask_fraction\"][L], 0.0, 1.0) for L in [\"family\", \"work_school\", \"community\"]}\n            info_contacts = {\n                \"family\": exposures[\"info_contacts\"].get(\"family\", np.zeros(self.N)),\n                \"work_school\": exposures[\"info_contacts\"].get(\"work_school\", np.zeros(self.N)),\n                \"community\": exposures[\"info_contacts\"].get(\"community\", np.zeros(self.N)),\n            }\n\n            # Information diffusion\n            self.received_info = self.info_diffusion.step(\n                received_info=self.received_info,\n                info_contacts={\n                    \"family\": info_contacts[\"family\"],\n                    \"work_school\": info_contacts[\"work_school\"],\n                    \"community\": info_contacts[\"community\"]\n                },\n                guidance_intensity=guidance_intensity\n            )\n\n            # Retail purchases\n            if self.retail_market is not None:\n                _, _, self.mask_inventory, self.budgets = self.retail_market.step(\n                    budgets=self.budgets,\n                    mask_inventory=self.mask_inventory\n                )\n\n            # Household share (proxy via family layer peer fraction)\n            household_share = peer_mask_fraction.get(\"family\", np.zeros(self.N))\n\n            # Adoption decision\n            self.is_mask_wearing = self.mask_adoption.step(\n                day=day,\n                is_mask_wearing=self.is_mask_wearing,\n                received_info=self.received_info,\n                risk_perception=self.risk_perception,\n                age_groups=self.age_groups,\n                occupations=self.occupations,\n                peer_mask_fraction=peer_mask_fraction,\n                mandate_active=mandate_active,\n                enforcement_level=enforcement_level,\n                mask_inventory=self.mask_inventory,\n                trust=self.trust,\n                compliance_propensity=self.compliance_propensity,\n                household_share=household_share\n            )\n\n            # Aggregate\n            daily = self.aggregator.aggregate(\n                day=day,\n                is_mask_wearing=self.is_mask_wearing,\n                received_info=self.received_info,\n                age_groups=self.age_groups\n            )\n            self.results_daily.append(daily)\n\n        self.results_df = pd.DataFrame(self.results_daily)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    ...\n    # No evaluate method defined",
+      "after": "class Simulation:\n    ...\n    def evaluate(self) -> dict:\n        if self.results_df is None or self.train_df is None:\n            return {}\n        # Build observed series (days 0-29) from micro panel\n        train = self.train_df.copy()\n        obs = train.groupby(\"day\")[\"wearing_mask\"].mean().sort_index()\n        sim = self.results_df.set_index(\"day\")[\"adoption_rate_true\"]\n        # Align windows\n        cal_start = self.train_start_day\n        cal_end = self.train_end_day\n        y_true = obs.loc[cal_start:cal_end].to_numpy()\n        y_pred = sim.loc[cal_start:cal_end].reindex(range(cal_start, cal_end + 1)).to_numpy()\n        rmse = Metrics.rmse(y_true, y_pred)\n        mae = Metrics.mae(y_true, y_pred)\n\n        # Additional metrics\n        peak_val = Metrics.peak(sim.to_numpy())\n        t50 = Metrics.threshold_crossing_time(sim.to_numpy(), threshold=0.5, start_day=0)\n        final_adoption = float(sim.loc[self.validation_end_day]) if self.validation_end_day in sim.index else float(\"nan\")\n        # Gini across age groups at validation_end_day\n        day_row = self.results_df[self.results_df[\"day\"] == self.validation_end_day]\n        age_map = {}\n        if not day_row.empty:\n            # Recompute age group adoption from last day if stored\n            # Using aggregate already returns adoption_rate_by_age\n            age_map = day_row.iloc[0].get(\"adoption_rate_by_age\", {}) or {}\n        gini_age = Metrics.gini_across_groups(age_map)\n\n        return {\n            \"RMSE_adoption\": rmse,\n            \"MAE_adoption\": mae,\n            \"peak_adoption\": peak_val,\n            \"time_to_50_percent\": t50,\n            \"final_adoption\": final_adoption,\n            \"adoption_inequality_gini\": gini_age\n        }",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class ExposureCalculator:\n    ...\n    def compute(...):\n        ...\n                frac = (mask_count / deg) * wL * self.mobility_rate if deg > 0 else 0.0\n                peer_mask_fraction[L][idx] = frac\n                info_contacts[L][idx] = info_count * self.mobility_rate * wL",
+      "after": "class ExposureCalculator:\n    ...\n    def compute(...):\n        ...\n                frac = (mask_count / deg) * wL * self.mobility_rate if deg > 0 else 0.0\n                peer_mask_fraction[L][idx] = np.clip(frac, 0.0, 1.0)\n                info_contacts[L][idx] = info_count * self.mobility_rate * wL",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    ...\n    def initialize(self) -> None:\n        ...\n        # Build network neighbors\n        # self.neighbors_by_layer, self.degree_by_layer = self.network_manager.build_neighbors(self.network_json)\n        # self._precompute_neighbor_indices()",
+      "after": "class Simulation:\n    ...\n    def initialize(self) -> None:\n        ...\n        if not self.network_json:\n            self.network_json = self._generate_small_world_network(self.N, k=6, p_rewire=0.05)\n        self.neighbors_by_layer, self.degree_by_layer = self.network_manager.build_neighbors(self.network_json)\n        self._precompute_neighbor_indices()",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest changes improve metrics robustness (NaN-safe RMSE/MAE), performance (precomputed neighbor indices), retail budget handling, and policy heterogeneity. However, initialization was left incomplete and the essential run/evaluate methods are missing, so the simulation fails at runtime.",
+    "positive_impacts": [
+      "RMSE/MAE now handle NaNs and variable lengths safely",
+      "Neighbor indices are precomputed, improving performance significantly",
+      "RetailMarket.step conserves budgets and stocks properly",
+      "MaskAdoptionDecision now includes trust/compliance-modulated policy effects and household term"
+    ],
+    "negative_impacts": [
+      "initialize() ends prematurely after setting some attributes; arrays and network are not finalized",
+      "No run() or evaluate() methods, causing immediate failure",
+      "ExposureCalculator returns weighted fractions that can exceed 1, potentially destabilizing adoption probabilities"
+    ],
+    "suggestions": [
+      "Complete initialize() and add run() and evaluate() immediately",
+      "Clip exposure peer fractions and ensure household_share is computed and supplied",
+      "Add network fallback when social_network.json is missing"
+    ]
+  }
+}

@@ -1,0 +1,181 @@
+{
+  "summary": "The current iteration introduces extensive docstrings and alias mappings but accidentally removes core simulation methods and truncates the infection module. As a result, the code will fail at runtime and cannot meet the specification. Immediate fixes are to restore Simulation.step, run, visualize, save_results, and validate, and to complete _simulate_infections. Next, wire daily interactions (media, social influence, purchasing, visits/enforcement), compute required metrics (adoption rate, time to 50%, compliance, policy effect, shortages, inequality), and implement validation criteria.",
+  "critical_issues": [
+    {
+      "issue": "Core Simulation methods (step, run, visualize, save_results, validate) are missing",
+      "impact": "The program raises AttributeError at runtime (main() calls run and others). No daily state updates or metrics can be produced.",
+      "solution": "Reintroduce Simulation.step(day), run(days), visualize(), save_results(path), and validate(num_runs, days) with at least a minimal daily loop handling policy, media, purchasing, adoption, location visits/enforcement, infections, and metrics.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Infection module _simulate_infections is incomplete and contains a logic bug",
+      "impact": "No infections will be simulated correctly; epidemiology series (daily_new_infections, Rt) are not maintained. Additionally, mask effectiveness is not applied (pair reduction omitted), biasing results.",
+      "solution": "Finish _simulate_infections: compute avg mask reduction using mask_pair_reduction, include external pressure, infect susceptibles, progress I->R, and record Rt and daily_new_infections.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Daily social influence and household norm updates are not executed due to missing step loop",
+      "impact": "Adoption dynamics will not reflect peer influence, policy, or media exposure, invalidating core study objectives.",
+      "solution": "Within step(day), compute adopted_prev, household norms, peer_share per agent, call Person.perceive_risk and update_attitude, then decide adoption and perform purchases/enforcement.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Required metrics from the specification are not computed",
+      "impact": "Cannot evaluate the simulation or meet acceptance criteria (adoption_rate_over_time, time_to_50_percent_adoption, compliance, adoption_by_group, policy_effect_size, supply_shortage_days, adoption_inequality_index).",
+      "solution": "In step(day), track adoption rate, compliance in contacts (from work/public visits), compute time_to_50% when first crossing, peak adoption, group stratification (age/SES), difference-in-differences for policy effect, and shortage days (demand > sold).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Policy enforcement effects and costs are not applied without step loop",
+      "impact": "Policy levers have no effect; monotonic policy response and steady-state checks are impossible.",
+      "solution": "Use PolicyAuthority.issue_mandates and adjust_enforcement; set Location.policy_requires_mask on eligible venues; call Location.enforce_mask_policy during visits; cap incidents by enforcement capacity; record fines/cost.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Invalid averaging of mask-effect pair reduction (regression)",
+      "impact": "Underestimates the protective effect of masks, biasing infection projections upward.",
+      "solution": "Multiply type shares by mask_pair_reduction(mt_inf, mt_sus) when building avg_mask_factor.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy effect estimation",
+      "current_approach": "No policy effect metric computed.",
+      "suggested_approach": "Compute a simple difference-in-differences: average adoption in a pre-policy window minus a prior baseline vs post-policy window minus pre-policy. Record policy_effect_size per day.",
+      "expected_benefit": "Quantifies policy impact in a way consistent with empirical evaluation."
+    },
+    {
+      "aspect": "Adoption by group",
+      "current_approach": "No stratified adoption series.",
+      "suggested_approach": "Track adoption by age_group buckets (e.g., 18\u201334, 35\u201354, 55+) and SES tertiles or quintiles each day.",
+      "expected_benefit": "Enables inequality and heterogeneity analysis aligned with the spec."
+    },
+    {
+      "aspect": "Supply shortages",
+      "current_approach": "Retailer demand and sold are tracked but not aggregated into shortage days (spec metric).",
+      "suggested_approach": "Flag a day as shortage if sum(demand_yesterday) > sum(sold_yesterday) or daily_sold < daily_demand. Accumulate supply_shortage_days.",
+      "expected_benefit": "Directly produces a key metric for policy/supply evaluation."
+    },
+    {
+      "aspect": "Epidemiological realism",
+      "current_approach": "Simplified mixing, incomplete implementation.",
+      "suggested_approach": "Use location-specific contact rates and observed adoption at those locations to weight beta. Include mask pair protection (source and wearer).",
+      "expected_benefit": "More realistic infection dynamics and policy effects via location-specific compliance."
+    },
+    {
+      "aspect": "Stability and convergence checks",
+      "current_approach": "validate() absent.",
+      "suggested_approach": "Implement validation harness: steady-state stability in last 14 days, monotonic response to policy_strength, and Monte Carlo stochastic convergence.",
+      "expected_benefit": "Quality assurance against the spec\u2019s validation criteria."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Restore Simulation.step, run, visualize, save_results, validate with a minimal but functional daily pipeline",
+      "reason": "Eliminates runtime failures and implements core interactions and metrics required by the specification.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Complete Simulation._simulate_infections and multiply avg_mask_factor by mask_pair_reduction",
+      "reason": "Fixes regression causing underestimation of mask protection and enables infection time series.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add metrics: time_to_50_percent_adoption, peak_adoption_rate, average_compliance_in_contacts, adoption_by_group, policy_effect_size, supply_shortage_days, adoption_inequality_index",
+      "reason": "Brings outputs in line with the spec and enables evaluation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Call PolicyAuthority.allocate_masks after retailers begin_day and before purchasing, using last_demand/last_sold",
+      "reason": "Activates recently added allocation logic to target unmet demand.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Guard large-N network generation or provide an alternative BA sampler without storing long 'targets' list",
+      "reason": "Improves performance scalability for large populations.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "Weights for social, policy, and information effects are arbitrary and not calibrated.",
+      "suggestion": "Estimate weights via calibration to an empirical adoption time series (RMSE minimization), or use literature-based priors (e.g., peer influence 0.3\u20130.6, policy effect 0.2\u20130.5) and validate with sensitivity tests."
+    },
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "No computation; effects not benchmarked.",
+      "suggestion": "Implement DiD and compare against observed shifts in adoption after mandates in reference regions to tune enforcement_level and communication_intensity."
+    },
+    {
+      "metric": "adoption_inequality_index",
+      "current_gap": "No stratified tracking; inequality not computed per spec metric.",
+      "suggestion": "Compute Gini across SES groups and compare with survey data on mask usage by income/education to calibrate procurement_access_fraction and subsidy_rate."
+    },
+    {
+      "metric": "average_compliance_in_contacts",
+      "current_gap": "Contacts are approximated; not tied to location attendance.",
+      "suggestion": "Use observed contact matrices (e.g., POLYMOD) scaled by location attendance; calibrate enforcement probabilities to observed compliance by venue."
+    },
+    {
+      "metric": "supply_shortage_days",
+      "current_gap": "Not tracked as a cumulative metric.",
+      "suggestion": "Accumulate a counter of days with retail stockouts; compare to historical shortages (price spikes or stockout reports) to calibrate production_rate_per_day and restock_rate_per_day."
+    }
+  ],
+  "prioritized_actions": [
+    "Restore Simulation.step, run, visualize, save_results, validate (runtime fix).",
+    "Fix and complete _simulate_infections, including mask pair effectiveness and Rt.",
+    "Wire media, social influence, household norms, purchasing, and policy enforcement into step.",
+    "Add required metrics: time_to_50%, peak adoption, compliance, adoption_by_group, policy effect, shortages, inequality.",
+    "Implement validate() checks for monotonic_policy_response, steady_state_stability, and stochastic_convergence.",
+    "Enable PolicyAuthority.allocate_masks with yesterday\u2019s shortages.",
+    "Calibrate influence weights and policy parameters to empirical adoption series (optional).",
+    "Optimize network generation for large N (optional)."
+  ],
+  "additional_comments": "The explicit main() call at EOF is correctly preserved per sandbox requirement. Many docstrings and alias mappings are valuable; however, the regression removed essential functionality. Focus first on restoring the daily loop and infections, then iterate on fidelity and validation.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "        avg_mask_factor = 0.0\n        for mt_i, pi in ishare.items():\n            for mt_s, ps in sshare.items():\n                avg_mask_factor += pi * ps\n",
+      "after": "        avg_mask_factor = 0.0\n        for mt_i, pi in ishare.items():\n            for mt_s, ps in sshare.items():\n                avg_mask_factor += pi * ps * mask_pair_reduction(mt_i, mt_s)\n\n        # Combine across location types with ventilation modifiers\n        daily_contacts = sum(contact.values())\n        env_factor = 1.0 - statistics.mean([vent.get(k, 0.0) for k in contact.keys()])\n        prevalence_I = len(infectious) / max(1, len(self.people))\n\n        loc_weight = 1.0\n        if self.series.get(\"adoption_work\") and self.series.get(\"adoption_public\"):\n            work_wear = self.series[\"adoption_work\"][-1] if self.series[\"adoption_work\"] else 0.0\n            public_wear = self.series[\"adoption_public\"][-1] if self.series[\"adoption_public\"] else 0.0\n            loc_weight = 0.5 * (1 - work_wear) + 0.5 * (1 - public_wear)\n\n        expected_infections = int(len(susceptible) * daily_contacts * beta * env_factor * avg_mask_factor * loc_weight * prevalence_I)\n        expected_external = int(ext * len(susceptible))\n        new_inf = min(expected_infections + expected_external, len(susceptible))\n\n        # Counterfactual without masks\n        expected_no_mask = int(len(susceptible) * daily_contacts * beta * env_factor * 1.0 * prevalence_I) + expected_external\n        self.series.setdefault(\"expected_no_mask_infections\", []).append(expected_no_mask)\n\n        # Infect random susceptibles\n        if new_inf > 0:\n            idxs = self.rng.sample([i for i,p in enumerate(self.people) if p.health_status == 'S'], new_inf)\n            for idx in idxs:\n                self.people[idx].health_status = 'I'\n                self.people[idx].days_infected = 0\n\n        # Progress disease\n        for p in self.people:\n            if p.health_status == 'I':\n                p.days_infected += 1\n                if p.days_infected >= int(self.p.get(\"infectious_period_days\", 7)):\n                    p.health_status = 'R'\n\n        # Track series\n        self.series.setdefault(\"daily_new_infections\", []).append(new_inf)\n        self.cumulative_infections = getattr(self, \"cumulative_infections\", 0) + new_inf\n        serial = int(self.p.get(\"serial_interval_days\", 5))\n        if len(self.series[\"daily_new_infections\"]) > serial and self.series[\"daily_new_infections\"][-serial-1] > 0:\n            Rt = self.series[\"daily_new_infections\"][-1] / max(1e-6, self.series[\"daily_new_infections\"][-serial-1])\n        else:\n            Rt = 0.0\n        self.series.setdefault(\"Rt\", []).append(Rt)\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Simulation:\n    \"\"\"\n    Main simulation orchestrator for mask adoption dynamics.\n    ...\n    \"\"\"\n    def __init__(self, params: Dict[str, Any], seed: int = 42):\n        ...\n        self._threshold_reached_day = None  # FIXED\n        pass\n\n    def _small_world(self, N: int, k: int, beta: float) -> List[List[int]]:\n        ...\n",
+      "after": "class Simulation:\n    ...\n    def step(self, day: int) -> None:\n        if not self.people:\n            self.initialize()\n        # Update epidemic signals\n        self.epidemic.update_case_rate(day)\n        self.epidemic.update_risk_signal()\n\n        # Policy\n        policy_active = self.policy.issue_mandates(day, self.epidemic)\n        enforcement = self.policy.adjust_enforcement(day, self.epidemic)\n        for loc in (self.locations + self.workplaces):\n            loc.policy_requires_mask = policy_active and loc.policy_eligible\n\n        # Media\n        media_signal = self._aggregate_media_signal()\n        campaign_signal = self.policy.run_information_campaign(self.rng)\n        if campaign_signal > 0.0:\n            media_signal = clamp(media_signal + 0.5 * campaign_signal, -1.0, 1.0)\n            self.cumulative_campaign_cost += float(self.policy.campaign_cost_per_day)\n\n        # Supply begin day\n        self.supply_chain.produce_masks()\n        for r in self.retailers:\n            r.begin_day()\n            r.restock_from_supply(self.supply_chain)\n        # Optional: allocate central supply based on unmet demand yesterday\n        self.policy.allocate_masks(self.retailers, self.supply_chain, strategy=\"needs\")\n\n        # Household norms\n        adopted_prev = self._last_adopt[:] if self._last_adopt else [1.0 if (p.mask_adopted or p.current_mask_use) else 0.0 for p in self.people]\n        for hh in self.households:\n            hh.update_norm(adopted_prev)\n\n        # Decisions and purchasing\n        avg_price = statistics.mean([ret.price for ret in self.retailers]) if self.retailers else self.supply_chain.price_per_mask\n        w_peer = float(self.p.get(\"weight_peer\", 0.4))\n        w_policy = float(self.p.get(\"weight_policy\", 0.3))\n        w_media = float(self.p.get(\"weight_media\", 0.2))\n        w_household = float(self.p.get(\"weight_household\", 0.3))\n        w_prev = float(self.p.get(\"weight_prevalence\", 0.3))\n        risk_prev_sens = float(self.p.get(\"risk_perception_sensitivity_to_prevalence\", 0.5))\n        contact_rate = int(self.p.get(\"contact_rate_per_day\", 6))\n        mask_eff_perceived = float(self.p.get(\"mask_effectiveness_perceived\", 0.6))\n        habit_rate = float(self.p.get(\"habit_formation_rate\", 0.02))\n        decay_rate = float(self.p.get(\"compliance_decay_rate\", 0.01))\n        bundle_size = int(self.p.get(\"bundle_size\", 5))\n        procurement_access = float(self.p.get(\"procurement_access_fraction\", 0.8))\n\n        daily_demand = 0\n        daily_sold = 0\n        prevalence_signal_pop = sum(adopted_prev) / max(1, len(adopted_prev))\n\n        for p in self.people:\n            p.reset_daily_state()\n            peer_share = self._peer_share(adopted_prev, p.network_neighbors, contact_rate) if self.social_network else 0.0\n            hh_share = self.households[p.household_id].household_norm_mask_use if 0 <= p.household_id < len(self.households) else 0.0\n\n            p.perceive_risk(peer_share, 1.0 if policy_active else 0.0, media_signal, prevalence_signal_pop, risk_prev_sens, self.epidemic.public_risk_signal, w_peer, w_policy, w_media, hh_share, w_household, w_prev)\n            p.update_attitude(habit_rate, decay_rate, mask_eff_perceived)\n\n            desired = p.purchase_masks(self.rng, avg_price, bundle_size, self.policy.subsidy_rate, policy_active, procurement_access)\n            if desired > 0:\n                daily_demand += desired\n                qty_needed = desired\n                for ret in self.retailers:\n                    if qty_needed <= 0:\n                        break\n                    unit_price = ret.price * (1.0 - self.policy.subsidy_rate)\n                    max_affordable = int(p.budget // max(1e-6, unit_price))\n                    if max_affordable <= 0:\n                        break\n                    req = min(qty_needed, max_affordable)\n                    sold_here = ret.sell(req)\n                    if sold_here > 0:\n                        p.budget -= sold_here * unit_price\n                        p.mask_inventory += sold_here\n                        qty_needed -= sold_here\n                        daily_sold += sold_here\n                        self.cumulative_purchased += sold_here\n\n            p.decide_adoption(avg_price, policy_active, self.rng, enforcement, self.policy.penalty_amount, habit_rate, decay_rate)\n\n        # Price adjustments\n        for ret in self.retailers:\n            ret.update_price(float(self.p.get(\"retailer_price_sensitivity\", 0.05)))\n        stockout_occurred = daily_sold < daily_demand\n        self.supply_chain.adjust_prices(stockout_occurred)\n\n        # Visits and enforcement\n        incidents_today = 0\n        comp_work = comp_public = 0\n        visits_work = visits_public = 0\n        adoption_work_list = []\n        adoption_public_list = []\n        cap = max(0, int(self.policy.enforcement_capacity_per_day))\n\n        for p in self.people:\n            # Work\n            if self.rng.random() < self.p.get(\"workplace_attendance_rate\", 0.5) and self.workplaces:\n                loc = self.workplaces[p.workplace_id % len(self.workplaces)]\n                visits_work += 1\n                incident, compliant_now, denied = loc.enforce_mask_policy(p, enforcement, self.rng)\n                if incident and incidents_today < cap:\n                    incidents_today += 1\n                    self.cumulative_fines_collected += self.policy.penalty_amount\n                    self.cumulative_enforcement_cost += self.policy.enforcement_cost_per_incident\n                wearing = 1 if (p.mask_adopted or p.current_mask_use or compliant_now) and not denied else 0\n                adoption_work_list.append(wearing)\n                if wearing:\n                    comp_work += 1\n            # Public\n            if self.rng.random() < self.p.get(\"public_venue_visit_rate\", 0.3) and self.locations:\n                loc = self.locations[self.rng.randrange(len(self.locations))]\n                visits_public += 1\n                incident, compliant_now, denied = loc.enforce_mask_policy(p, enforcement, self.rng)\n                if incident and incidents_today < cap:\n                    incidents_today += 1\n                    self.cumulative_fines_collected += self.policy.penalty_amount\n                    self.cumulative_enforcement_cost += self.policy.enforcement_cost_per_incident\n                wearing = 1 if (p.mask_adopted or p.current_mask_use or compliant_now) and not denied else 0\n                adoption_public_list.append(wearing)\n                if wearing:\n                    comp_public += 1\n\n        adoption_work_rate = (sum(adoption_work_list) / max(1, len(adoption_work_list))) if adoption_work_list else 0.0\n        adoption_public_rate = (sum(adoption_public_list) / max(1, len(adoption_public_list))) if adoption_public_list else 0.0\n        comp_rate_work = (comp_work / max(1, visits_work)) if visits_work > 0 else 0.0\n        comp_rate_public = (comp_public / max(1, visits_public)) if visits_public > 0 else 0.0\n        comp_rate_all = statistics.mean([comp_rate_work, comp_rate_public]) if (visits_work + visits_public) > 0 else 0.0\n\n        adoption_today_list = [1.0 if (p.mask_adopted or p.current_mask_use) else 0.0 for p in self.people]\n        adoption_rate_today = sum(adoption_today_list) / max(1, len(adoption_today_list))\n        daily_new_adopters = sum(1 for a,b in zip(self._last_adopt, adoption_today_list) if a < 0.5 and b >= 0.5)\n\n        # Metrics\n        N = max(1, len(self.people))\n        self.series.setdefault(\"adoption_rate\", []).append(adoption_rate_today)\n        self.series.setdefault(\"average_price\", []).append(avg_price)\n        self.series.setdefault(\"supplier_inventory\", []).append(self.supply_chain.total_stock)\n        self.series.setdefault(\"retailer_inventory\", []).append(statistics.mean([r.inventory_level for r in self.retailers]) if self.retailers else 0.0)\n        self.series.setdefault(\"enforcement_incidents_per_1000\", []).append(1000.0 * incidents_today / float(N))\n        self.series.setdefault(\"compliance_rate\", []).append(comp_rate_all)\n        self.series.setdefault(\"compliance_rate_under_mandate\", []).append(comp_rate_all if policy_active else 0.0)\n        self.series.setdefault(\"policy_enforcement_level\", []).append(enforcement)\n        self.series.setdefault(\"daily_new_adopters\", []).append(daily_new_adopters)\n        self.series.setdefault(\"adoption_work\", []).append(adoption_work_rate)\n        self.series.setdefault(\"adoption_public\", []).append(adoption_public_rate)\n        self.series.setdefault(\"daily_demand\", []).append(daily_demand)\n        self.series.setdefault(\"daily_sold\", []).append(daily_sold)\n        self.series.setdefault(\"noncompliance_events\", []).append(incidents_today)\n        self.series.setdefault(\"mask_shortage_days\", []).append(1 if stockout_occurred else 0)\n        self.series.setdefault(\"inequality_of_adoption\", []).append(gini(adoption_today_list))\n\n        # time_to_50% and peak adoption\n        if self._threshold_reached_day is None and adoption_rate_today >= float(self.p.get(\"threshold_adoption\", 0.5)):\n            self._threshold_reached_day = day\n        self.series.setdefault(\"time_to_threshold\", []).append(self._threshold_reached_day if self._threshold_reached_day is not None else \"\")\n\n        # Grouped adoption (example: SES tertiles)\n        ses_vals = [p.ses for p in self.people]\n        cuts = sorted(ses_vals)\n        t1 = cuts[int(0.33*len(cuts))] if cuts else 0.33\n        t2 = cuts[int(0.66*len(cuts))] if cuts else 0.66\n        low = [adoption_today_list[i] for i,p in enumerate(self.people) if p.ses <= t1]\n        mid = [adoption_today_list[i] for i,p in enumerate(self.people) if t1 < p.ses <= t2]\n        high = [adoption_today_list[i] for i,p in enumerate(self.people) if p.ses > t2]\n        self.series.setdefault(\"adoption_by_group_ses_low\", []).append(sum(low)/max(1,len(low)) if low else 0.0)\n        self.series.setdefault(\"adoption_by_group_ses_mid\", []).append(sum(mid)/max(1,len(mid)) if mid else 0.0)\n        self.series.setdefault(\"adoption_by_group_ses_high\", []).append(sum(high)/max(1,len(high)) if high else 0.0)\n\n        self._last_adopt = adoption_today_list[:]\n\n        # Epidemiology and adaptive policy\n        self._simulate_infections(day)\n        self._adaptive_policy_adjustment(day)\n\n    def run(self, days: int) -> Dict[str, List[float]]:\n        if not self.people:\n            self.initialize()\n        for d in range(days):\n            self.step(d)\n        return self.series\n\n    def visualize(self) -> None:\n        try:\n            import matplotlib.pyplot as plt\n        except Exception as e:\n            print(\"matplotlib not available:\", e)\n            return\n        days = range(len(self.series.get(\"adoption_rate\", [])))\n        import matplotlib.pyplot as plt\n        plt.figure(figsize=(10,6))\n        if self.series.get(\"adoption_rate\"): plt.plot(days, self.series[\"adoption_rate\"], label=\"Adoption\")\n        if self.series.get(\"compliance_rate\"): plt.plot(days, self.series[\"compliance_rate\"], label=\"Compliance\")\n        if self.series.get(\"daily_new_infections\"): plt.plot(days, self.series[\"daily_new_infections\"], label=\"New infections\")\n        plt.legend(); plt.xlabel(\"Day\"); plt.title(\"Simulation summary\"); plt.tight_layout(); plt.show()\n\n    def save_results(self, path: str) -> None:\n        if not self.series:\n            return\n        keys = sorted(self.series.keys())\n        max_len = max((len(v) for v in self.series.values() if isinstance(v, list)), default=0)\n        os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None\n        with open(path, \"w\", newline=\"\") as f:\n            writer = csv.writer(f)\n            writer.writerow([\"day\"] + keys)\n            for i in range(max_len):\n                row = [i]\n                for k in keys:\n                    v = self.series.get(k, [])\n                    row.append(v[i] if i < len(v) else \"\")\n                writer.writerow(row)\n\n    def validate(self, num_runs: int = 30, days: int = 120) -> Dict[str, Any]:\n        finals = []\n        for r in range(max(1, num_runs)):\n            sim = Simulation(self.p, seed=self.rng.randint(0, 10**9))\n            series = sim.run(days)\n            ad = series.get(\"adoption_rate\", [])\n            finals.append(ad[-1] if ad else 0.0)\n        std_final = statistics.pstdev(finals) if len(finals) > 1 else 0.0\n        # Steady-state stability\n        stab = None\n        if self.series.get(\"adoption_rate\", []):\n            tail = self.series[\"adoption_rate\"][-14:]\n            changes = [abs(tail[i]-tail[i-1]) for i in range(1,len(tail))]\n            stab = sum(1 for c in changes if c < 0.005) >= 10\n        # Monotonic policy response (simple check)\n        p_low, p_high = 0.3, 0.7\n        s_low = Simulation({**self.p, \"enforcement_level\": p_low}, seed=self.rng.randint(0,10**9)).run(days)\n        s_high = Simulation({**self.p, \"enforcement_level\": p_high}, seed=self.rng.randint(0,10**9)).run(days)\n        mono = (s_high[\"adoption_rate\"][-1] >= s_low[\"adoption_rate\"][-1]) if s_high.get(\"adoption_rate\") and s_low.get(\"adoption_rate\") else None\n        return {\"std_final_adoption\": std_final, \"steady_state_stability\": stab, \"monotonic_policy_response\": mono, \"runs\": len(finals)}\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "        for r in self.retailers:\n            r.begin_day()\n            r.restock_from_supply(self.supply_chain)\n",
+      "after": "        for r in self.retailers:\n            r.begin_day()\n            r.restock_from_supply(self.supply_chain)\n        # Allocate remaining central stock to retailers based on yesterday's unmet demand\n        self.policy.allocate_masks(self.retailers, self.supply_chain, strategy=\"needs\")\n",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "The iteration added extensive documentation and parameter aliasing but inadvertently removed core functionality and partially broke epidemiology.",
+    "positive_impacts": [
+      "Improved docstrings and type annotations enhance maintainability.",
+      "Parameter alias mapping improves user ergonomics (network_type, influence weights, thresholds).",
+      "PolicyAuthority.allocate_masks and Retailer.last_demand/last_sold enable policy-based supply targeting."
+    ],
+    "negative_impacts": [
+      "Removal of Simulation.step/run/visualize/save_results/validate causes immediate runtime failure.",
+      "Truncation of _simulate_infections and removal of mask pair reduction introduces a logic bug and incomplete infection series.",
+      "Metrics required by the spec are no longer produced."
+    ],
+    "suggestions": [
+      "Revert or reintroduce the previously present core methods with a clean, minimal implementation.",
+      "Complete _simulate_infections and add unit-like checks (assertions) for non-empty series updates.",
+      "Add regression tests: after any refactor, run a smoke test executing main(), ensuring series contain expected keys and lengths."
+    ]
+  }
+}

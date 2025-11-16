@@ -1,0 +1,256 @@
+{
+  "summary": "The simulation is runnable and richer than previous iterations, but it still diverges from the task specification in key areas. The most critical gaps are missing required metrics (purchase_coverage, price_elasticity_of_adoption, stockout_frequency), no supply shock, lack of enforcement capacity constraints, incomplete validations (no_influence_sanity and 14-day convergence), and undercounted contextual compliance. There are also structural/model mismatches with the spec (no Retailer abstraction with restock interval and per-visit limits, no location_mix usage), parameter/mask-type mismatches (respirator vs N95), and a few logic issues (unmet demand ratio, metric naming). Addressing these will materially improve correctness and alignment with the task.",
+  "critical_issues": [
+    {
+      "issue": "Missing required metrics: purchase_coverage, price_elasticity_of_adoption, stockout_frequency",
+      "impact": "The simulation cannot be evaluated against the spec\u2019s metrics; decisions based on outputs will be incomplete or misleading.",
+      "solution": "Compute purchase_coverage as the share of people whose on-hand stock meets their usage need; compute price_elasticity_of_adoption using time-series regression or finite differences of adoption vs avg price; report stockout_frequency using existing outage_days_by_type and a per-type stockout rate.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Supply shock not implemented",
+      "impact": "Dynamics ignore a major exogenous driver; simulations under different supply regimes cannot be reproduced.",
+      "solution": "On supply_shock_day, multiply restock rates (and optionally inventory) by supply_shock_multiplier and persist thereafter; record shock application.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No enforcement capacity/budget constraints",
+      "impact": "Enforcement is unbounded, producing unrealistic fines and masking behavior, distorting adoption and compliance.",
+      "solution": "Respect enforcement_capacity_per_day (and optional budget) in visits_and_enforcement; stop issuing warnings/fines once capacity/budget is exhausted each day.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Incomplete validation: no_influence_sanity and 14-day convergence window missing",
+      "impact": "Model may pass validation despite violating core spec expectations; instability near the end is undetected.",
+      "solution": "Add a no_influence_sanity check (when influence/enforcement/info are zero) and change convergence to use a trailing 14-day epsilon; report both in validation.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Contextual compliance undercounts masked visitors",
+      "impact": "Compliance in mandated locations is understated because situational compliance isn\u2019t counted, biasing policy effect metrics.",
+      "solution": "Count effective_masked (adopting OR situationally masked) in masked_total for mandated locations.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Retailer behavior diverges from spec (restock interval, per-visit purchase limit); rationing can be bypassed",
+      "impact": "Agents can chain purchases to exceed per-visit limits; daily restock doesn\u2019t reflect spec\u2019s interval and restock quantity; outcomes overstate access.",
+      "solution": "Restock only on restock_interval_days; enforce purchase_limit_per_visit per person per day; group the day\u2019s purchases into one transaction per type to respect limits.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Location mix and policy by type (home, workplace, school, transit, retail) not implemented",
+      "impact": "Contextual compliance metric (required vs recommended vs optional) and behavior by context are not measurable; adoption dynamics lack heterogeneity across settings.",
+      "solution": "Instantiate locations per location_mix; assign policy/enforcement by type; track compliance separately per category.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Mask-type and parameter naming mismatch with spec",
+      "impact": "Configs following the spec won\u2019t load correctly; effectiveness/replacement behaviors may not match intended types.",
+      "solution": "Add alias mapping 'respirator' <-> 'N95' and accept both 'mask_effectiveness_by_type' and 'mask_efficacy_by_type'.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Unmet demand ratio calculated on attempts not units",
+      "impact": "Demand-supply tension is misestimated; rationing and stock impacts are misinterpreted.",
+      "solution": "Track units_requested and units_sold; compute unmet demand as 1 - (units_sold / max(1, units_requested)).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Metric naming discrepancy",
+      "impact": "Downstream evaluators expecting 'time_to_threshold_adoption' won\u2019t find it.",
+      "solution": "Rename or add an alias key 'time_to_threshold_adoption' in metrics.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Supply, pricing, and retailer dynamics",
+      "current_approach": "Single MaskMarket with daily restock and rationing per call; no supply shock; no per-visit limits; no restock interval.",
+      "suggested_approach": "Trigger supply_shock on supply_shock_day; restock only every restock_interval_days (from params); enforce purchase_limit_per_visit per agent-day; optionally introduce multiple retailers if needed.",
+      "expected_benefit": "Improves realism of availability constraints, rationing, and shock effects; aligns with spec."
+    },
+    {
+      "aspect": "Location heterogeneity and contextual compliance",
+      "current_approach": "Generated generic locations without using location_mix; contextual compliance only for 'mandate' and undercounts situational masking.",
+      "suggested_approach": "Create locations per location_mix across home/workplace/school/transit/retail with different policies and enforcement; log compliance in required/recommended/optional contexts using effective_masked.",
+      "expected_benefit": "Enables requested contextual metrics; more realistic policy heterogeneity and behavior."
+    },
+    {
+      "aspect": "Validation robustness",
+      "current_approach": "Bounds check, 7-day convergence, policy sanity, supply feasibility.",
+      "suggested_approach": "Add no_influence_sanity check and switch to 14-day convergence epsilon configurable; report pass/fail and diagnostics.",
+      "expected_benefit": "Better guarantees that trajectories reflect parameter settings and converge."
+    },
+    {
+      "aspect": "Price elasticity and demand metrics",
+      "current_approach": "Average price tracked but elasticity not computed; unmet demand ratio based on attempts.",
+      "suggested_approach": "Compute elasticity via OLS slope of adoption vs avg price; compute unmet demand based on units.",
+      "expected_benefit": "Accurate sensitivity to price; better supply-demand diagnostics."
+    },
+    {
+      "aspect": "Mask maintenance and replacement",
+      "current_approach": "Occasional consumption of one unit per visit; no per-type replacement intervals effect.",
+      "suggested_approach": "Respect replacement_interval_days_by_type: decrement wear counters; if overdue, degrade efficacy or force replacement; update purchase needs accordingly.",
+      "expected_benefit": "Closer to real-world mask usage patterns; better link between inventory and adherence."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation_code_iter_61.py",
+      "modification": "Apply supply shock to restock rates on supply_shock_day; call restock only on configured interval",
+      "reason": "Implements required supply_shock and restock scheduling per spec",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "modification": "Add enforcement capacity/budget constraints in visits_and_enforcement and count effective_masked for compliance",
+      "reason": "Aligns enforcement with capacity constraints and fixes compliance undercount",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "modification": "Compute and expose purchase_coverage, price_elasticity_of_adoption, and stockout_frequency in compute_metrics",
+      "reason": "Provides required metrics",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "modification": "Fix unmet demand ratio to use units and not attempts; enforce per-visit purchase limit",
+      "reason": "Improves accuracy of demand metric and respects rationing",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "modification": "Use location_mix to create typed locations and track contextual compliance (required/recommended/optional)",
+      "reason": "Implements spec\u2019s location modeling and contextual compliance metric",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "modification": "Add alias mapping for mask types and effectiveness keys",
+      "reason": "Ensures config compatibility with spec naming",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "modification": "Update validate() to add no_influence_sanity and 14-day convergence",
+      "reason": "Meets spec validation requirements",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "modification": "Add metric alias 'time_to_threshold_adoption' alongside 'time_to_target_adoption'",
+      "reason": "Meets exact spec key naming",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "price_elasticity_of_adoption",
+      "current_gap": "Not computed; adoption not linked to price dynamically",
+      "suggestion": "Estimate elasticity via daily OLS slope of (adoption_rate) ~ (avg_mask_price) over rolling windows; optionally use exogenous price changes (subsidies) as instruments."
+    },
+    {
+      "metric": "purchase_coverage",
+      "current_gap": "Not computed; inventory dynamics not tied to replacement intervals",
+      "suggestion": "Map replacement_interval_days_by_type from data; compute coverage as masks_on_hand / masks_needed_next_k_days; calibrate k (e.g., 7)."
+    },
+    {
+      "metric": "contextual_compliance",
+      "current_gap": "Only mandated contexts tracked; situational compliance ignored",
+      "suggestion": "Track compliance per location type and policy level using effective_masked; calibrate enforcement probabilities by context from empirical studies."
+    },
+    {
+      "metric": "stockout_frequency",
+      "current_gap": "Not reported",
+      "suggestion": "Use outage_days_by_type to compute per-type stockout days and fraction-of-days-out-of-stock; compare with retailer data if available."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement supply shock and restock scheduling; fix unmet demand metric (units-based).",
+    "Add enforcement capacity constraints and correct contextual compliance counting (effective_masked).",
+    "Compute missing metrics: purchase_coverage, price_elasticity_of_adoption, stockout_frequency; add metric alias time_to_threshold_adoption.",
+    "Use location_mix to create typed locations and track required/recommended/optional compliance.",
+    "Add validation: no_influence_sanity and 14-day convergence epsilon.",
+    "Introduce mask type/effectiveness alias mapping and start integrating replacement intervals."
+  ],
+  "additional_comments": "The recent refactor improved parameterization, information exposure tracking, and reproducibility. Focus next on aligning outputs and mechanisms with the spec\u2019s metrics and validations. Keep main() direct call per sandbox requirement.",
+  "code_snippets": [
+    {
+      "file": "simulation_code_iter_61.py",
+      "before": "def mask_market_restock(self) -> None:\n    pass\n    self.mask_market.restock()\n",
+      "after": "def mask_market_restock(self, day: int) -> None:\n    # Restock only on configured interval and apply supply shock\n    restock_interval = int(self.params.get(\"restock_interval_days\", 7))\n    shock_day = int(self.params.get(\"supply_shock_day\", -1))\n    shock_mult = float(self.params.get(\"supply_shock_multiplier\", 1.0))\n    if day == shock_day and shock_day >= 0 and not hasattr(self, \"_shock_applied\"):\n        # Persistently reduce restock rates\n        for t in self.mask_market.types_available:\n            r = int(self.mask_market.restock_rate_by_type.get(t, 0))\n            self.mask_market.restock_rate_by_type[t] = max(0, int(r * shock_mult))\n        self._shock_applied = True\n    if restock_interval <= 1 or (day % restock_interval == 0):\n        self.mask_market.restock()\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "before": "self.mask_market_restock()\nself.purchase_masks_typed(day)\n",
+      "after": "self.mask_market_restock(day)\nself.purchase_masks_typed(day)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "before": "def purchase_masks_typed(self, day: int) -> None:\n    pass\n    daily_sales = 0\n    attempts = 0\n    fulfilled_units = 0\n    total_price = 0.0\n    total_units = 0\n    ...\n                attempts += 1\n                sold = self.mask_market.sell_masks(best_t, desired)\n                if sold > 0:\n                    ...\n                    fulfilled_units += 1\n                    total_units += sold\n                    total_price += self.mask_market.consumer_price(best_t, subsidy) * sold\n                else:\n                    break\n    ...\n    unmet_ratio = 1.0 - safe_div(fulfilled_units, attempts, 0.0) if attempts > 0 else 0.0\n",
+      "after": "def purchase_masks_typed(self, day: int) -> None:\n    pass\n    daily_sales = 0\n    units_requested = 0\n    units_sold = 0\n    total_price = 0.0\n    # track per-person per-type purchases to respect per-visit limit\n    per_visit_limit = int(self.params.get(\"purchase_limit_per_visit\", 10))\n    purchases_today: Dict[Tuple[int, str], int] = {}\n    ...\n                desired = min(remaining, self.mask_market.rationing_rules.get(best_t, remaining))\n                # enforce per-visit limit per person per type per day\n                key = (p.pid, best_t)\n                already = purchases_today.get(key, 0)\n                allowed = max(0, per_visit_limit - already)\n                desired = min(desired, allowed)\n                if desired <= 0:\n                    break\n                units_requested += desired\n                sold = self.mask_market.sell_masks(best_t, desired)\n                if sold > 0:\n                    purchases_today[key] = already + sold\n                    ...\n                    units_sold += sold\n                    total_price += self.mask_market.consumer_price(best_t, subsidy) * sold\n                else:\n                    break\n    ...\n    unmet_ratio = 1.0 - safe_div(units_sold, units_requested, 0.0) if units_requested > 0 else 0.0\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "before": "for loc in self.locations:\n    visitors = visitors_by_location.get(loc.name, [])\n    if visitors:\n        frac_masked = safe_div(sum(1.0 if self.people[i].adopting else 0.0 for i in visitors), len(visitors), 0.0)\n        loc.observed_norms = frac_masked\n        norms_sum += frac_masked\n        norms_count += 1\n        if mandate_active and loc.mandate_sensitive:\n            visitors_total += len(visitors)\n            masked_total += sum(1 for i in visitors if self.people[i].adopting)\n",
+      "after": "for loc in self.locations:\n    visitors = visitors_by_location.get(loc.name, [])\n    if visitors:\n        # compute effective masked for norms and compliance\n        eff_masked_flags = []\n        for pid in visitors:\n            p = self.people[pid]\n            apply_enforcement = mandate_active and loc.mandate_sensitive\n            enforcement_prob = clamp(self.policy.enforcement_level(day) * loc.enforcement_level, 0.0, 1.0)\n            situational = False\n            if apply_enforcement and not p.adopting:\n                situational_prob = 0.2 + 0.6 * enforcement_prob\n                situational = (self.rng.random() < situational_prob)\n            eff_masked_flags.append(1.0 if (p.adopting or situational) else 0.0)\n        frac_masked = safe_div(sum(eff_masked_flags), len(visitors), 0.0)\n        loc.observed_norms = frac_masked\n        norms_sum += frac_masked\n        norms_count += 1\n        if mandate_active and loc.mandate_sensitive:\n            visitors_total += len(visitors)\n            masked_total += int(sum(eff_masked_flags))\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "before": "def visits_and_enforcement(self, day: int, visitors_by_location: Dict[str, List[int]]) -> None:\n    pass\n    state = self.policy.current_state(day)\n    mandate_active = (state == \"mandate\")\n    ...\n    for loc in self.locations:\n        visitors = visitors_by_location.get(loc.name, [])\n        if not visitors:\n            continue\n        refused_ids: List[int] = []\n        for pid in visitors:\n            p = self.people[pid]\n            ...\n            if apply_enforcement and not effective_masked:\n                if self.rng.random() < enforcement_prob:\n                    self.enforcement_actions_count += 1\n                    if getattr(loc, \"entry_refusal_if_unmasked\", False) and self.rng.random() < 0.5:\n                        refused_ids.append(pid)\n                    else:\n                        self.total_fines_count += 1\n                        self.total_fines_value += self.policy.fine_amount\n                        p.fines_paid += self.policy.fine_amount\n                        ...\n",
+      "after": "def visits_and_enforcement(self, day: int, visitors_by_location: Dict[str, List[int]]) -> None:\n    pass\n    state = self.policy.current_state(day)\n    mandate_active = (state == \"mandate\")\n    remaining_capacity = int(self.params.get(\"enforcement_capacity_per_day\", 0))\n    remaining_budget = float(self.params.get(\"enforcement_budget\", float('inf')))\n    ...\n    for loc in self.locations:\n        visitors = visitors_by_location.get(loc.name, [])\n        if not visitors:\n            continue\n        refused_ids: List[int] = []\n        for pid in visitors:\n            if remaining_capacity is not None and remaining_capacity <= 0:\n                break\n            p = self.people[pid]\n            ...\n            if apply_enforcement and not effective_masked:\n                if self.rng.random() < enforcement_prob:\n                    if remaining_capacity is not None:\n                        remaining_capacity -= 1\n                    self.enforcement_actions_count += 1\n                    if getattr(loc, \"entry_refusal_if_unmasked\", False) and self.rng.random() < 0.5:\n                        refused_ids.append(pid)\n                    else:\n                        if remaining_budget >= self.policy.fine_amount:\n                            self.total_fines_count += 1\n                            self.total_fines_value += self.policy.fine_amount\n                            remaining_budget -= self.policy.fine_amount\n                            p.fines_paid += self.policy.fine_amount\n                            p.risk = clamp(p.risk + 0.02, 0.0, 1.0)\n                            p.compliance_trait = clamp(p.compliance_trait + 0.02, 0.0, 1.0)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "before": "def compute_metrics(self) -> None:\n    pass\n    adoption_series = self.adoption_rate_over_time[:]\n    final_rate = adoption_series[-1] if adoption_series else 0.0\n    target = float(self.params.get(\"target_adoption_rate\", 0.7))\n    time_to_target = next((i for i, v in enumerate(adoption_series) if v >= target), None)\n    ...\n    self.metrics = {\n        \"adoption_rate_over_time\": adoption_series,\n        \"final_adoption_rate\": final_rate,\n        \"time_to_target_adoption\": time_to_target,\n        \"target_adoption_rate\": target,\n        ...\n    }\n",
+      "after": "def compute_metrics(self) -> None:\n    pass\n    adoption_series = self.adoption_rate_over_time[:]\n    final_rate = adoption_series[-1] if adoption_series else 0.0\n    target = float(self.params.get(\"target_adoption_rate\", 0.7))\n    time_to_target = next((i for i, v in enumerate(adoption_series) if v >= target), None)\n    # alias per spec\n    time_to_threshold = time_to_target\n    # purchase coverage: proportion with adequate supply vs need\n    min_inv = int(self.params.get(\"minimum_inventory_to_wear\", 1))\n    repl = dict(self.params.get(\"replacement_interval_days_by_type\", {}))\n    eff = dict(self.params.get(\"mask_efficacy_by_type\", self.params.get(\"mask_effectiveness_by_type\", {})))\n    def need_for(p: Person) -> int:\n        # simple: adopters need >= min_inv; if replacement info avail, require 1 per day for least-interval type owned\n        if not p.adopting:\n            return min_inv\n        owned_types = [t for t, q in p.mask_inventory_by_type.items() if q > 0]\n        if not owned_types:\n            return min_inv\n        intervals = [int(repl.get(t, 1)) for t in owned_types]\n        daily_need = 1 if intervals else 1\n        return max(min_inv, daily_need * 7)\n    covered = 0\n    for p in self.people:\n        have = sum(p.mask_inventory_by_type.values())\n        if have >= need_for(p):\n            covered += 1\n    purchase_coverage = safe_div(covered, self.population_size, 0.0)\n    # price elasticity: OLS slope of adoption vs avg_price time series\n    pe = None\n    if len(self.avg_price_over_time) == len(adoption_series) and len(adoption_series) >= 5:\n        x = self.avg_price_over_time\n        y = adoption_series\n        xbar = sum(x) / len(x)\n        ybar = sum(y) / len(y)\n        denom = sum((xi - xbar) ** 2 for xi in x)\n        if denom > 0:\n            slope = sum((xi - xbar) * (yi - ybar) for xi, yi in zip(x, y)) / denom\n            pe = slope\n    # stockout frequency\n    stockout_days = self.mask_market.outage_days_by_type\n    stockout_frequency = {t: int(days) for t, days in stockout_days.items()}\n    self.metrics = {\n        \"adoption_rate_over_time\": adoption_series,\n        \"final_adoption_rate\": final_rate,\n        \"time_to_target_adoption\": time_to_target,\n        \"time_to_threshold_adoption\": time_to_threshold,\n        \"target_adoption_rate\": target,\n        ...,\n        \"purchase_coverage\": purchase_coverage,\n        \"price_elasticity_of_adoption\": pe,\n        \"stockout_frequency\": stockout_frequency,\n    }\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "before": "def validate(self) -> Dict[str, Any]:\n    pass\n    series = self.adoption_rate_over_time\n    adoption_bounds = all(0.0 <= v <= 1.0 for v in series)\n    conv = None\n    if len(series) >= 7:\n        conv = sum(abs(series[-i - 1] - series[-i - 2]) for i in range(6)) / 6.0 < 0.001\n    ...\n    report = {\n        \"adoption_bounds\": adoption_bounds,\n        \"convergence_check\": conv,\n        \"policy_response_sanity\": policy_ok,\n        \"supply_feasibility\": supply_ok,\n        \"reproducibility_hash\": metrics_hash,\n    }\n",
+      "after": "def validate(self) -> Dict[str, Any]:\n    pass\n    series = self.adoption_rate_over_time\n    adoption_bounds = all(0.0 <= v <= 1.0 for v in series)\n    conv = None\n    if len(series) >= 15:\n        conv = sum(abs(series[-i - 1] - series[-i - 2]) for i in range(14)) / 14.0 < 0.001\n    # no_influence_sanity: only if parameters indicate no influence/enforcement/info\n    no_influence = None\n    if (\n        float(self.params.get(\"base_influence_strength\", 0.0)) == 0.0 and\n        float(self.params.get(\"info_campaign_intensity\", 0.0)) == 0.0 and\n        float(self.params.get(\"enforcement_level_default\", 0.0)) == 0.0 and\n        self.policy.states == [\"none\"]\n    ):\n        init = series[0] if series else 0.0\n        last = series[-1] if series else 0.0\n        no_influence = (abs(last - init) < 0.02)\n    ...\n    report = {\n        \"adoption_bounds\": adoption_bounds,\n        \"convergence_check_14d\": conv,\n        \"no_influence_sanity\": no_influence,\n        \"policy_response_sanity\": policy_ok,\n        \"supply_feasibility\": supply_ok,\n        \"reproducibility_hash\": metrics_hash,\n    }\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "before": "# Public locations; generated per parameters\nself.locations: List[Location] = []\nnum_locs = int(self.params.get(\"num_locations\", 30))\ncap_mean = int(self.params.get(\"location_capacity_mean\", 50))\npolicy_frac = float(self.params.get(\"mask_policy_in_locations_fraction\", 0.5))\nfor i in range(num_locs):\n    mask_pol = (self.rng.random() < policy_frac)\n    cap = max(10, int(self.rng.gauss(cap_mean, max(5, cap_mean * 0.2))))\n    ft = clamp(self.rng.random() * 0.5 + 0.1, 0.0, 1.0)\n    self.locations.append(\n        Location(\n            name=f\"Loc-{i}\",\n            enforcement_level=0.3,\n            mandate_sensitive=True,\n            entry_refusal_if_unmasked=mask_pol,\n            ltype=\"generic\",\n            capacity=cap,\n            mask_policy=mask_pol,\n            foot_traffic_rate=ft,\n        )\n    )\n",
+      "after": "# Instantiate locations from location_mix spec by type\nself.locations = []\nloc_mix = dict(self.params.get(\"location_mix\", {\"home\":0.4,\"workplace\":0.3,\"school\":0.1,\"transit\":0.1,\"retail\":0.1}))\ncap_mean = int(self.params.get(\"location_capacity_mean\", 50))\nfor ltype, share in loc_mix.items():\n    count = max(1, int(round(share * int(self.params.get(\"num_locations\", 30)))))\n    for i in range(count):\n        cap = max(10, int(self.rng.gauss(cap_mean, max(5, cap_mean * 0.2))))\n        ft = clamp(self.rng.random() * 0.5 + 0.1, 0.0, 1.0)\n        # policy by type: required in transit/retail when mandate, recommended in workplace/school, optional at home\n        if ltype in (\"transit\", \"retail\"):\n            enforcement = 0.5\n            mandate_sensitive = True\n            entry_refusal = True\n        elif ltype in (\"workplace\", \"school\"):\n            enforcement = 0.3\n            mandate_sensitive = True\n            entry_refusal = False\n        else:  # home\n            enforcement = 0.0\n            mandate_sensitive = False\n            entry_refusal = False\n        self.locations.append(\n            Location(\n                name=f\"{ltype}-{i}\",\n                enforcement_level=enforcement,\n                mandate_sensitive=mandate_sensitive,\n                entry_refusal_if_unmasked=entry_refusal,\n                ltype=ltype,\n                capacity=cap,\n                mask_policy=(ltype in (\"transit\",\"retail\",\"workplace\",\"school\")),\n                foot_traffic_rate=ft,\n            )\n        )\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_61.py",
+      "before": "self.params: Dict[str, Any] = {\n    ...\n    \"mask_types\": [\"cloth\", \"surgical\", \"N95\"],\n    \"mask_price_by_type\": {\"cloth\": 0.5, \"surgical\": 0.8, \"N95\": 1.5},\n    ...\n    \"mask_efficacy_by_type\": {\"cloth\": 0.3, \"surgical\": 0.5, \"N95\": 0.8},\n    ...\n}\n",
+      "after": "self.params: Dict[str, Any] = {\n    ...\n    \"mask_types\": [\"cloth\", \"surgical\", \"N95\"],\n    \"mask_price_by_type\": {\"cloth\": 0.5, \"surgical\": 0.8, \"N95\": 1.5},\n    ...\n    # accept either key from spec/config\n    \"mask_efficacy_by_type\": self.params.get(\"mask_effectiveness_by_type\", {\"cloth\": 0.3, \"surgical\": 0.5, \"N95\": 0.8}),\n    ...\n}\n# alias mapping for respirator <-> N95\nif \"respirator\" in self.params.get(\"mask_types\", []):\n    self.params[\"mask_types\"] = [\"N95\" if t == \"respirator\" else t for t in self.params[\"mask_types\"]]\nfor dkey in (\"mask_price_by_type\",\"initial_supply_by_type\",\"restock_rate_by_type\",\"rationing_rules\",\"mask_efficacy_by_type\"):\n    if \"respirator\" in self.params.get(dkey, {}):\n        v = dict(self.params[dkey])\n        v[\"N95\"] = v.pop(\"respirator\")\n        self.params[dkey] = v\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration made solid progress on parameterization, information exposure tracking, and reproducibility. However, some renaming/metric changes drift from the spec, and several required behaviors remain unimplemented.",
+    "positive_impacts": [
+      "Adoption probability now parameterized and reproducible via rng parameter",
+      "Information sources return exposed_ids enabling DiD-style message impact",
+      "Locations are now parameterized with capacity and foot_traffic_rate",
+      "Cohort tracking of adopters and exposures enables richer metrics"
+    ],
+    "negative_impacts": [
+      "Metric rename to time_to_target_adoption breaks spec\u2019s time_to_threshold_adoption key",
+      "Contextual compliance still undercounts due to ignoring situational masking",
+      "Restock now parameterized but still daily and without supply shocks",
+      "Retailer abstraction from spec not reflected (restock interval, per-visit limits)"
+    ],
+    "suggestions": [
+      "Add metrics alias for time_to_threshold_adoption to maintain backwards compatibility with the spec",
+      "Implement supply shocks and restock scheduling promptly; it\u2019s a small change with high impact",
+      "Introduce enforcement capacity/budget to bound fines and warnings to realistic levels",
+      "Use location_mix to instantiate typed locations and log required vs recommended vs optional compliance",
+      "Compute the missing metrics and add the 14-day convergence and no-influence checks to validation"
+    ]
+  }
+}

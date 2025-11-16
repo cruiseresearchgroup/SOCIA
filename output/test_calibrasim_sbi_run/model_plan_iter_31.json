@@ -1,0 +1,899 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based social influence and policy-responsive adoption model on a small-world network. Individuals adopt or drop a prosocial behavior (e.g., mask-wearing) under peer influence, policy stringency, risk perception, and habit persistence. A policy authority adapts interventions to risk and recent adoption.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "group_label",
+        "mask_wearing",
+        "risk_perception",
+        "base_adoption_logit_i",
+        "stubborn",
+        "habit_strength",
+        "degree",
+        "neighbors",
+        "tie_weights_to_neighbors"
+      ],
+      "behaviors": [
+        "evaluate_peer_signal",
+        "adopt_or_drop_behavior",
+        "update_habit_strength"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "N": 500,
+          "group_fraction_minor": 0.4,
+          "initial_adoption_fraction": 0.1,
+          "base_adoption_logit": -1.5,
+          "stubborn_fraction": 0.1
+        }
+      }
+    },
+    {
+      "name": "PolicyAuthority",
+      "attributes": [
+        "policy_level",
+        "days_since_change",
+        "policy_schedule_type",
+        "policy_max_level"
+      ],
+      "behaviors": [
+        "compute_risk_index",
+        "update_policy_level"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_level": 0.0,
+          "policy_schedule_type": "adaptive",
+          "policy_max_level": 1.0
+        }
+      }
+    },
+    {
+      "name": "Edge",
+      "attributes": [
+        "node_u",
+        "node_v",
+        "weight",
+        "homophily_indicator"
+      ],
+      "behaviors": [
+        "none_static"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "generator": "Watts-Strogatz",
+          "avg_degree": 8,
+          "rewiring_prob": 0.1,
+          "tie_weight_mean": 1.0,
+          "tie_weight_std": 0.2,
+          "homophily_strength": 0.3
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the social network with homophily, assigns person attributes, and sets initial adoption states.",
+      "inputs": [
+        "signal.random_seed"
+      ],
+      "outputs": [
+        "signal.network",
+        "signal.person_states",
+        "signal.group_labels",
+        "signal.tie_weights"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  set RNG seed\n  assign group_label for N agents with Bernoulli(group_fraction_minor)\n  build Watts-Strogatz graph G(N, k=avg_degree, beta=rewiring_prob)\n  increase within-group ties per homophily_strength via edge rewiring\n  assign tie weight w_e ~ max(0.01, Normal(tie_weight_mean, tie_weight_std)) for each edge\n  for each person i:\n    degree = deg(i)\n    base_adoption_logit_i = base_adoption_logit + Normal(0, 0.2)\n    stubborn ~ Bernoulli(stubborn_fraction)\n    mask_wearing ~ Bernoulli(initial_adoption_fraction)\n    habit_strength = 1.0 if mask_wearing else 0.0\n    risk_perception = 0.0\n  emit network, person_states, group_labels, tie_weights\nelse:\n  no-op",
+        "notes": [
+          "Homophily adjustment can be done by probabilistically rewiring cross-group edges to within-group, respecting degree distribution.",
+          "Edge weights encode contact intensity; used in peer signal computation."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy"
+      ],
+      "module_parameters": [
+        "N",
+        "avg_degree",
+        "rewiring_prob",
+        "homophily_strength",
+        "group_fraction_minor",
+        "tie_weight_mean",
+        "tie_weight_std",
+        "initial_adoption_fraction",
+        "base_adoption_logit",
+        "stubborn_fraction"
+      ]
+    },
+    {
+      "name": "PolicyIntervention",
+      "description": "Generates daily policy_level in [0,1] via adaptive controller or fixed/data-driven schedule; also emits enforcement and info campaign signals.",
+      "inputs": [
+        "signal.day",
+        "observable.adoption_rate_daily_lag"
+      ],
+      "outputs": [
+        "signal.policy_level",
+        "signal.enforcement_signal",
+        "signal.info_signal",
+        "signal.risk_index"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if policy_schedule_type == 'fixed':\n  policy_level = policy_max_level\nelif policy_schedule_type == 'from_data':\n  policy_level = read_data('train_data.csv', day=t, field='policy_level')\nelse:  # adaptive\n  risk_index = initial_risk_index + risk_index_trend * t + risk_index_season_amplitude * sin(2*pi*t/risk_index_season_period_days)\n  target_adoption = clip(0.5 + 0.5 * risk_index, 0.0, 1.0)\n  adoption_gap = target_adoption - adoption_rate_daily_lag\n  proposed = clip(prev_policy_level + policy_responsiveness * adoption_gap, 0.0, policy_max_level)\n  if days_since_change < policy_min_duration_days:\n    policy_level = prev_policy_level\n    days_since_change += 1\n  else:\n    if abs(proposed - prev_policy_level) > 0.02:\n      policy_level = proposed\n      days_since_change = 0\n    else:\n      policy_level = prev_policy_level\n      days_since_change += 1\nemit enforcement_signal = policy_level * enforcement_effect_weight\nemit info_signal = policy_level * info_campaign_effect\nemit risk_index as computed (or 0 when using fixed/from_data)\ncarry prev_policy_level",
+        "notes": [
+          "Uses previous day's adoption (lag) to avoid algebraic loops.",
+          "Minimum duration prevents policy thrashing.",
+          "policy_responsiveness acts like proportional control on the adoption gap."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "pandas (if from_data)"
+      ],
+      "module_parameters": [
+        "policy_schedule_type",
+        "policy_max_level",
+        "policy_responsiveness",
+        "policy_min_duration_days",
+        "enforcement_effect_weight",
+        "info_campaign_effect",
+        "initial_risk_index",
+        "risk_index_trend",
+        "risk_index_season_period_days",
+        "risk_index_season_amplitude"
+      ]
+    },
+    {
+      "name": "BehaviorAdoption",
+      "description": "Updates each person's behavior based on peer influence, policy level, risk index, habit persistence, and idiosyncratic noise.",
+      "inputs": [
+        "signal.network",
+        "signal.person_states",
+        "signal.tie_weights",
+        "signal.policy_level",
+        "signal.enforcement_signal",
+        "signal.info_signal",
+        "signal.risk_index"
+      ],
+      "outputs": [
+        "signal.person_states",
+        "signal.daily_new_adoptions"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "PolicyIntervention"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "daily_new_adoptions = 0\nfor each person i:\n  f = weighted_fraction_of_neighbors_wearing(i, tie_weights)\n  peer_signal = (1 - exp(-social_signal_saturation_k * f)) / (1 - exp(-social_signal_saturation_k + 1e-9))\n  # Perceived utility logits\n  adoption_logit = base_adoption_logit_i + peer_influence_weight * peer_signal + policy_effect_weight * policy_level + risk_perception_weight * risk_index + habit_persistence * (1 - mask_wearing) * habit_strength\n  dropout_logit = dropout_bias_logit + (-adoption_logit) + (1 - habit_persistence) * mask_wearing * habit_strength\n  # Stubborn penalty (reduces adoption probability if not wearing)\n  if (not mask_wearing) and stubborn:\n    adoption_logit = min(adoption_logit, stubborn_resistance_logit)\n  # Add logistic noise\n  adoption_prob = sigmoid(adoption_logit + Normal(0, noise_scale_logistic))\n  dropout_prob = sigmoid(dropout_logit + Normal(0, noise_scale_logistic))\n  # Spontaneous switching\n  if not mask_wearing:\n    adoption_prob = 1 - (1 - adoption_prob) * (1 - daily_spontaneous_adoption_prob)\n  else:\n    dropout_prob = 1 - (1 - dropout_prob) * (1 - daily_spontaneous_dropout_prob)\n  # Apply policy enforcement boost as multiplicative odds for adoption and reduction for dropout\n  adoption_prob = clip(adoption_prob * (1 + enforcement_signal), 0, 1)\n  dropout_prob = clip(dropout_prob * (1 - 0.5 * enforcement_signal), 0, 1)\n  # Decide\n  if not mask_wearing and Bernoulli(adoption_prob):\n    mask_wearing = True\n    daily_new_adoptions += 1\n  elif mask_wearing and Bernoulli(dropout_prob):\n    mask_wearing = False\n  # Update habit\n  habit_strength = habit_persistence * habit_strength + (1 - habit_persistence) * (1 if mask_wearing else 0)\nemit updated person_states and daily_new_adoptions",
+        "notes": [
+          "Peer signal uses a smooth saturating transform to capture diminishing returns.",
+          "Habit increases persistence; dropout_bias_logit allows asymmetric switching.",
+          "Enforcement affects effective probability rather than raw logits to keep bounds [0,1]."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "base_adoption_logit",
+        "peer_influence_weight",
+        "policy_effect_weight",
+        "risk_perception_weight",
+        "habit_persistence",
+        "stubborn_fraction",
+        "stubborn_resistance_logit",
+        "noise_scale_logistic",
+        "daily_spontaneous_adoption_prob",
+        "daily_spontaneous_dropout_prob",
+        "social_signal_saturation_k",
+        "dropout_bias_logit"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates person states to compute daily observables (adoption rates overall and by group), including a lagged signal for policy.",
+      "inputs": [
+        "signal.person_states",
+        "signal.group_labels",
+        "signal.daily_new_adoptions"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.adoption_rate_daily_ma",
+        "observable.adoption_rate_daily_lag",
+        "observable.adoption_rate_group_A",
+        "observable.adoption_rate_group_B",
+        "observable.daily_new_adoptions"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "BehaviorAdoption"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate = mean(mask_wearing over all persons)\n# groups: A is majority (1 - group_fraction_minor), B is minority (group_fraction_minor)\nAR_A = mean(mask_wearing over persons with group_label == 'A')\nAR_B = mean(mask_wearing over persons with group_label == 'B')\n# Moving average smoothing\nwindow = smoothing_window_days\nadoption_rate_ma = moving_average(adoption_rate, window)\n# Lag (1 day): store previous day's adoption_rate to serve as lag\nadoption_rate_daily_lag = adoption_rate from t-1 (initialized as first day's value at t=0)\nemit all observables including daily_new_adoptions",
+        "notes": [
+          "Initialize lag with first computed value to avoid nulls.",
+          "Smoothing used only for reporting; lag uses raw adoption rate."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "collections.deque"
+      ],
+      "module_parameters": [
+        "smoothing_window_days",
+        "report_groups",
+        "group_fraction_minor"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "sim_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulation days.",
+      "frozen": false
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Length of one tick in days.",
+      "frozen": true
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG for reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "N",
+      "dtype": "int",
+      "default": 500,
+      "bounds": {
+        "low": 100,
+        "high": 10000
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Population size (number of agents).",
+      "frozen": false
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "int",
+      "default": 8,
+      "bounds": {
+        "low": 2,
+        "high": 40
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Mean degree for the small-world network.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Watts-Strogatz rewiring probability.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_strength",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Degree of preference for within-group ties.",
+      "frozen": false
+    },
+    {
+      "key": "group_fraction_minor",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.9
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Fraction of the population in minority group B. Majority group A has 1 - this fraction.",
+      "frozen": false
+    },
+    {
+      "key": "tie_weight_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 3.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Mean of contact weight distribution on edges.",
+      "frozen": false
+    },
+    {
+      "key": "tie_weight_std",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Std deviation of contact weight distribution.",
+      "frozen": false
+    },
+    {
+      "key": "initial_adoption_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Initial fraction of adopters at t=0.",
+      "frozen": false
+    },
+    {
+      "key": "base_adoption_logit",
+      "dtype": "float",
+      "default": -1.5,
+      "bounds": {
+        "low": -5.0,
+        "high": 2.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Global baseline log-odds of adoption; individual baselines are drawn with small noise around this.",
+      "frozen": false
+    },
+    {
+      "key": "stubborn_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Fraction of agents resistant to adoption.",
+      "frozen": false
+    },
+    {
+      "key": "policy_schedule_type",
+      "dtype": "categorical",
+      "default": "adaptive",
+      "bounds": null,
+      "owner_module": "PolicyIntervention",
+      "description": "Type of policy schedule: 'adaptive', 'fixed', or 'from_data'.",
+      "frozen": true
+    },
+    {
+      "key": "policy_max_level",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Maximum policy intensity.",
+      "frozen": false
+    },
+    {
+      "key": "policy_responsiveness",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Proportional gain from adoption gap to policy adjustment.",
+      "frozen": false
+    },
+    {
+      "key": "policy_min_duration_days",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 0,
+        "high": 28
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Minimum days between policy level changes.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_effect_weight",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Strength by which enforcement augments adoption and suppresses dropout.",
+      "frozen": false
+    },
+    {
+      "key": "info_campaign_effect",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Information campaign effect strength (currently unused in decision rule; reserved for extensions).",
+      "frozen": false
+    },
+    {
+      "key": "initial_risk_index",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Baseline risk index used by the policy controller and agents.",
+      "frozen": false
+    },
+    {
+      "key": "risk_index_trend",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": -0.01,
+        "high": 0.01
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Daily linear trend in risk index.",
+      "frozen": false
+    },
+    {
+      "key": "risk_index_season_period_days",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 7,
+        "high": 60
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Period of seasonal oscillations in risk index (days).",
+      "frozen": false
+    },
+    {
+      "key": "risk_index_season_amplitude",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Amplitude of seasonal oscillations in risk index.",
+      "frozen": false
+    },
+    {
+      "key": "peer_influence_weight",
+      "dtype": "float",
+      "default": 2.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight on peer adoption signal in the adoption logit.",
+      "frozen": false
+    },
+    {
+      "key": "policy_effect_weight",
+      "dtype": "float",
+      "default": 1.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight of policy level in adoption logit.",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_weight",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight of risk index in adoption logit.",
+      "frozen": false
+    },
+    {
+      "key": "habit_persistence",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Persistence of habit strength in daily update.",
+      "frozen": false
+    },
+    {
+      "key": "stubborn_resistance_logit",
+      "dtype": "float",
+      "default": -3.0,
+      "bounds": {
+        "low": -10.0,
+        "high": 0.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Cap on adoption logit for stubborn non-adopters.",
+      "frozen": false
+    },
+    {
+      "key": "noise_scale_logistic",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Std dev of additive normal noise on logits.",
+      "frozen": false
+    },
+    {
+      "key": "daily_spontaneous_adoption_prob",
+      "dtype": "float",
+      "default": 0.005,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Random adoption independent of modeled drivers.",
+      "frozen": false
+    },
+    {
+      "key": "daily_spontaneous_dropout_prob",
+      "dtype": "float",
+      "default": 0.003,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Random dropout independent of modeled drivers.",
+      "frozen": false
+    },
+    {
+      "key": "social_signal_saturation_k",
+      "dtype": "float",
+      "default": 3.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 10.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Saturation parameter for peer signal transform.",
+      "frozen": false
+    },
+    {
+      "key": "dropout_bias_logit",
+      "dtype": "float",
+      "default": -0.5,
+      "bounds": {
+        "low": -5.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Bias term favoring persistence (negative reduces dropout).",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Window length for moving-average reporting.",
+      "frozen": false
+    },
+    {
+      "key": "report_groups",
+      "dtype": "bool",
+      "default": true,
+      "bounds": null,
+      "owner_module": "AdoptionAggregator",
+      "description": "Whether to compute group-level adoption rates.",
+      "frozen": true
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.mask_wearing)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.adoption_rate_daily_ma",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "moving_average(mean(Person.mask_wearing), window=smoothing_window_days)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate_ma"
+    },
+    {
+      "id": "observable.adoption_rate_daily_lag",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "lag1(observable.adoption_rate_daily)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate_lag"
+    },
+    {
+      "id": "observable.adoption_rate_group_A",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.mask_wearing | group_label=='A')",
+      "frequency": "daily",
+      "aggregation": "by_group(group_label)",
+      "target_data_field": "train_data.csv:adoption_rate_A"
+    },
+    {
+      "id": "observable.adoption_rate_group_B",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.mask_wearing | group_label=='B')",
+      "frequency": "daily",
+      "aggregation": "by_group(group_label)",
+      "target_data_field": "train_data.csv:adoption_rate_B"
+    },
+    {
+      "id": "observable.daily_new_adoptions",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "count_transitions(False->True)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:new_adoptions"
+    },
+    {
+      "id": "observable.policy_level_daily",
+      "source_module": "PolicyIntervention",
+      "formula_or_field": "policy_level",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:policy_level"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_adoption_group_A",
+      "inputs": [
+        "observable.adoption_rate_group_A"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_adoption_group_B",
+      "inputs": [
+        "observable.adoption_rate_group_B"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "RMSE_policy_level",
+      "inputs": [
+        "observable.policy_level_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "PeakError_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "window": 3
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeakDifference",
+        "config": {
+          "unit": "days"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 500,
+    "random_seed": 42,
+    "procedures": [
+      "Build Watts-Strogatz small-world network with homophily-adjusted rewiring.",
+      "Assign groups A/B with fraction group_fraction_minor to B.",
+      "Initialize agent attributes (base logits, stubborn flags, habit_strength).",
+      "Set initial adoption states with Bernoulli(initial_adoption_fraction).",
+      "Set policy_level=0.0 and days_since_change=policy_min_duration_days."
+    ]
+  },
+  "algorithms": {
+    "WattsStrogatzHomophily": "Generate WS(N,k,beta) then rewire a fraction of cross-group edges to within-group proportional to homophily_strength while preserving degree sequences.",
+    "SaturatingPeerSignal": "Transform neighbor adoption fraction f into s = (1 - exp(-k f)) / (1 - exp(-k)), k>0, to capture diminishing returns.",
+    "LogitDecisionWithHabit": "Compute adoption/dropout logits with drivers and noise; convert to probabilities via sigmoid; sample Bernoulli decisions; update habit via exponential smoothing.",
+    "AdaptivePolicyController": "Proportional control on adoption gap with rate-limiting and minimum-duration hysteresis; risk index is seasonal + trend.",
+    "MovingAverage": "Fixed-window simple moving average for reporting; maintain deque for O(1) updates."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and evaluation of adoption rates, policy levels, and transitions.",
+      "fields_used": [
+        "day",
+        "adoption_rate",
+        "adoption_rate_ma",
+        "adoption_rate_lag",
+        "adoption_rate_A",
+        "adoption_rate_B",
+        "new_adoptions",
+        "policy_level"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point; simulation loop, module scheduling, configuration parsing."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder and homophily rewiring."
+      },
+      {
+        "name": "modules/policy_intervention.py",
+        "description": "Implements PolicyIntervention controllers and data-driven schedules."
+      },
+      {
+        "name": "modules/behavior_adoption.py",
+        "description": "Implements BehaviorAdoption decisions and state updates."
+      },
+      {
+        "name": "modules/aggregation.py",
+        "description": "Implements AdoptionAggregator and observable emissions."
+      },
+      {
+        "name": "utils/signals.py",
+        "description": "Signal bus, timekeeping, and lag buffers."
+      },
+      {
+        "name": "utils/metrics.py",
+        "description": "Metric calculators (RMSE, MAE, PeakError, TimeToPeak)."
+      },
+      {
+        "name": "config/defaults.json",
+        "description": "Default parameter values and bounds."
+      }
+    ],
+    "dependencies": [
+      "numpy>=1.22",
+      "networkx>=3.0",
+      "pandas>=1.5",
+      "scipy>=1.8"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption",
+    "MAE_adoption_group_A",
+    "MAE_adoption_group_B",
+    "RMSE_policy_level",
+    "PeakError_adoption",
+    "TimeToPeak_adoption"
+  ]
+}

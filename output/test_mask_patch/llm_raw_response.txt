@@ -1,0 +1,2300 @@
+import os
+import sys
+import json
+import math
+import random
+import argparse
+from dataclasses import dataclass, asdict, field
+from typing import Dict, Any, Tuple, List, Optional, Callable
+
+import numpy as np
+import pandas as pd
+
+try:
+    from scipy.stats import wasserstein_distance
+    _HAVE_SCIPY = True
+except Exception:
+    _HAVE_SCIPY = False
+
+
+# Global path setup using environment variables
+PROJECT_ROOT = os.environ.get("PROJECT_ROOT", os.getcwd())
+DATA_PATH = os.environ.get("DATA_PATH", "data_fitting/mask_adoption_data")
+DATA_DIR = os.path.join(PROJECT_ROOT, DATA_PATH)
+
+
+def set_global_seed(seed: int) -> None:
+    """
+    Set global random seeds for reproducibility.
+
+    Args:
+        seed: Random seed.
+
+    Notes:
+        This function sets seeds for both numpy and random modules.
+    """
+    np.random.seed(seed)
+    random.seed(seed)
+    pass
+
+
+def ensure_dir(path: str) -> None:
+    """
+    Ensure a directory exists, otherwise create it.
+
+    Args:
+        path: Directory path to ensure.
+
+    Raises:
+        OSError: If directory creation fails for reasons other than existing.
+    """
+    os.makedirs(path, exist_ok=True)
+    pass
+
+
+def save_json(obj: Any, path: str) -> None:
+    """
+    Save a Python object as an indented JSON file.
+
+    Args:
+        obj: Serializable object.
+        path: Output file path.
+    """
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+    pass
+
+
+def load_json(path: str) -> Any:
+    """
+    Load a JSON file.
+
+    Args:
+        path: JSON file path.
+
+    Returns:
+        Parsed JSON object.
+
+    Raises:
+        FileNotFoundError: If file not found.
+        json.JSONDecodeError: If invalid JSON.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+    pass
+
+
+def parse_kv_override(s: str) -> Tuple[str, str]:
+    """
+    Parse a key=value override string.
+
+    Args:
+        s: Input string of the form key=value
+
+    Returns:
+        Tuple (key, value)
+
+    Raises:
+        ValueError: If format invalid.
+    """
+    if "=" not in s:
+        raise ValueError(f"Invalid override '{s}', expected key=value")
+    key, value = s.split("=", 1)
+    return key.strip(), value.strip()
+    pass
+
+
+@dataclass
+class SimulationConfig:
+    """
+    Configuration for running the simulation.
+
+    Attributes:
+        seed: Random seed.
+        gov_intervention_day: Day index for broadcast intervention change.
+        output_root: Root directory for saving artifacts.
+        k_runs: Number of runs for stochastic metrics.
+        forecast_days: Forecast horizon length.
+        verbose: Verbosity flag.
+    """
+    seed: int = 42
+    gov_intervention_day: int = 10
+    output_root: str = os.path.join(PROJECT_ROOT, "artifacts")
+    k_runs: int = 10
+    forecast_days: int = 10
+    verbose: bool = True
+    pass
+
+
+@dataclass
+class ParameterDefinition:
+    """
+    Definition for a single parameter.
+
+    Attributes:
+        name: Unique parameter name in registry (module.param or global).
+        default: Default value.
+        bounds: Tuple (low, high) for allowable range.
+        frozen: If True, overrides ignored.
+        dtype: Data type as string ('float', 'int', 'bool').
+        module: Owning module name or 'global'.
+        description: Human-readable description.
+    """
+    name: str
+    default: Any
+    bounds: Tuple[float, float]
+    frozen: bool = False
+    dtype: str = "float"
+    module: str = "global"
+    description: str = ""
+    pass
+
+
+class ParameterRegistry:
+    """
+    Registry managing simulation parameters with bounds, defaults, and frozen flags.
+
+    Responsibilities:
+        - Load parameter definitions from file or defaults
+        - Enforce bounds and frozen status
+        - Apply overrides from CLI or FittedParams
+        - Provide current parameter values for the simulation
+    """
+
+    def __init__(self, defs_path: str):
+        """
+        Initialize the registry.
+
+        Args:
+            defs_path: Path to parameter_definitions.json.
+        """
+        self.defs_path = defs_path
+        self.definitions: Dict[str, ParameterDefinition] = {}
+        self.values: Dict[str, Any] = {}
+        self._init_or_load_definitions()
+        pass
+
+    def _default_definitions(self) -> Dict[str, ParameterDefinition]:
+        """
+        Construct default parameter definitions for the mask adoption simulation.
+
+        Returns:
+            Dict mapping parameter names to ParameterDefinition.
+        """
+        defs: Dict[str, ParameterDefinition] = {}
+        add = lambda d: defs.__setitem__(d.name, d)
+
+        # Decision module parameters
+        add(ParameterDefinition("Decision.alpha", 0.0, (-5.0, 5.0), False, "float", "Decision", "Intercept utility"))
+        add(ParameterDefinition("Decision.gamma", 1.0, (0.0, 5.0), False, "float", "Decision", "Persistence"))
+        add(ParameterDefinition("Decision.theta_f", 1.0, (-3.0, 3.0), False, "float", "Decision", "Family influence"))
+        add(ParameterDefinition("Decision.theta_w", 1.0, (-3.0, 3.0), False, "float", "Decision", "Work influence"))
+        add(ParameterDefinition("Decision.theta_c", 1.0, (-3.0, 3.0), False, "float", "Decision", "Community influence"))
+        add(ParameterDefinition("Decision.beta_r", 0.0, (-3.0, 3.0), False, "float", "Decision", "Risk sensitivity"))
+        add(ParameterDefinition("Decision.beta_i", 0.5, (-3.0, 3.0), False, "float", "Decision", "Information memory sensitivity"))
+        add(ParameterDefinition("Decision.tau", 1.0, (0.1, 5.0), False, "float", "Decision", "Decision noise temperature"))
+
+        # Demographic effects (generic indices cover all categories)
+        for i in range(5):
+            add(ParameterDefinition(f"Decision.age_effects.{i}", 0.0, (-2.0, 2.0), False, "float", "Decision", "Age group effect"))
+        for i in range(5):
+            add(ParameterDefinition(f"Decision.occ_effects.{i}", 0.0, (-2.0, 2.0), False, "float", "Decision", "Occupation effect"))
+
+        # Info module parameters
+        add(ParameterDefinition("Info.phi_family", 0.1, (0.0, 1.0), False, "float", "Info", "Info influence family"))
+        add(ParameterDefinition("Info.phi_work", 0.1, (0.0, 1.0), False, "float", "Info", "Info influence work"))
+        add(ParameterDefinition("Info.phi_community", 0.1, (0.0, 1.0), False, "float", "Info", "Info influence community"))
+        add(ParameterDefinition("Info.lambda_broadcast_base", 0.05, (0.0, 1.0), False, "float", "Info", "Broadcast base"))
+        add(ParameterDefinition("Info.lambda_broadcast_factor_after", 1.5, (1.0, 5.0), False, "float", "Info", "Broadcast factor after intervention"))
+        add(ParameterDefinition("Info.rho_info_decay", 0.5, (0.0, 1.0), False, "float", "Info", "Info memory decay"))
+
+        # Layer weights module (normalize internally in model)
+        add(ParameterDefinition("Layers.family_weight", 1.0, (0.0, 5.0), False, "float", "Layers", "Layer weight family"))
+        add(ParameterDefinition("Layers.work_weight", 1.0, (0.0, 5.0), False, "float", "Layers", "Layer weight work"))
+        add(ParameterDefinition("Layers.community_weight", 1.0, (0.0, 5.0), False, "float", "Layers", "Layer weight community"))
+
+        # Activity module parameters (time dependency)
+        add(ParameterDefinition("Activity.base", 0.6, (0.0, 1.0), False, "float", "Activity", "Base activity level"))
+        add(ParameterDefinition("Activity.amplitude", 0.2, (0.0, 1.0), False, "float", "Activity", "Amplitude of weekly cycle"))
+        add(ParameterDefinition("Activity.phase", 0.0, (-math.pi, math.pi), False, "float", "Activity", "Phase of weekly cycle"))
+
+        # Global parameters
+        add(ParameterDefinition("Global.gov_intervention_day", 10, (0.0, 1000.0), True, "float", "global", "Intervention day (frozen)"))
+
+        return defs
+        pass
+
+    def _init_or_load_definitions(self) -> None:
+        """
+        Load parameter definitions from disk, or create defaults if not found.
+
+        Effects:
+            Populates self.definitions and self.values.
+        """
+        if os.path.exists(self.defs_path):
+            try:
+                data = load_json(self.defs_path)
+                for name, meta in data.items():
+                    self.definitions[name] = ParameterDefinition(
+                        name=name,
+                        default=meta.get("default"),
+                        bounds=tuple(meta.get("bounds", [float("-inf"), float("inf")])),
+                        frozen=bool(meta.get("frozen", False)),
+                        dtype=meta.get("dtype", "float"),
+                        module=meta.get("module", "global"),
+                        description=meta.get("description", ""),
+                    )
+                if not self.definitions:
+                    raise ValueError("Empty parameter_definitions.json")
+            except Exception:
+                self.definitions = self._default_definitions()
+                self._save_definitions()
+        else:
+            self.definitions = self._default_definitions()
+            self._save_definitions()
+
+        # Initialize values with defaults
+        self.values = {name: d.default for name, d in self.definitions.items()}
+        pass
+
+    def _save_definitions(self) -> None:
+        """
+        Save parameter definitions to disk.
+
+        Notes:
+            This creates a JSON mapping for external inspection or editing.
+        """
+        payload = {}
+        for name, d in self.definitions.items():
+            payload[name] = {
+                "default": d.default,
+                "bounds": list(d.bounds),
+                "frozen": d.frozen,
+                "dtype": d.dtype,
+                "module": d.module,
+                "description": d.description,
+            }
+        ensure_dir(os.path.dirname(self.defs_path))
+        save_json(payload, self.defs_path)
+        pass
+
+    def set_values(self, new_vals: Dict[str, Any], ignore_frozen: bool = True) -> Dict[str, str]:
+        """
+        Apply new values to registry while respecting bounds and frozen flags.
+
+        Args:
+            new_vals: Mapping param_name -> new_value
+            ignore_frozen: If True, skip overrides for frozen params with warnings.
+
+        Returns:
+            Dict of warnings for skipped or corrected parameters.
+        """
+        warnings: Dict[str, str] = {}
+        for k, v in new_vals.items():
+            if k not in self.definitions:
+                warnings[k] = f"Unknown parameter '{k}' ignored."
+                continue
+            d = self.definitions[k]
+            if d.frozen and ignore_frozen:
+                warnings[k] = f"Parameter '{k}' is frozen; override ignored."
+                continue
+            # Cast to dtype
+            try:
+                if d.dtype == "float":
+                    val = float(v)
+                elif d.dtype == "int":
+                    val = int(v)
+                elif d.dtype == "bool":
+                    val = bool(v) if isinstance(v, bool) else (str(v).lower() in ("true", "1", "yes"))
+                else:
+                    val = v
+            except Exception:
+                warnings[k] = f"Parameter '{k}' could not be cast to {d.dtype}; override ignored."
+                continue
+            # Enforce bounds
+            low, high = d.bounds
+            if isinstance(val, (int, float)):
+                if val < low:
+                    warnings[k] = f"Parameter '{k}' clipped to lower bound {low}."
+                    val = low
+                if val > high:
+                    warnings[k] = f"Parameter '{k}' clipped to upper bound {high}."
+                    val = high
+            self.values[k] = val
+        return warnings
+        pass
+
+    def to_json(self) -> Dict[str, Any]:
+        """
+        Serialize current parameter values.
+
+        Returns:
+            Dict of param_name -> value.
+        """
+        return dict(self.values)
+        pass
+
+    def get(self, name: str, default: Any = None) -> Any:
+        """
+        Get current value of a parameter.
+
+        Args:
+            name: Parameter name.
+            default: Fallback value if not present.
+
+        Returns:
+            Parameter value or default.
+        """
+        return self.values.get(name, default)
+        pass
+
+
+@dataclass
+class FittedParams:
+    """
+    Container for all parameters needed by the simulator (Calibrasim compatible).
+
+    Attributes:
+        decision_weights: Decision head weights and demographic effects.
+        layer_weights: Layer weights for social influence.
+        info_params: Information propagation parameters.
+        noise_params: Noise parameters (e.g., temperature).
+        module_params: Module-specific parameters (optional).
+        engine_type: Compatibility identifier.
+        meta: Free-form metadata (e.g., calibrator name, seed).
+    """
+    decision_weights: Dict[str, float]
+    layer_weights: Dict[str, float]
+    info_params: Dict[str, float]
+    noise_params: Dict[str, float]
+    module_params: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    engine_type: str = "calibrasim"
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert to serializable dictionary.
+
+        Returns:
+            Dict representation.
+        """
+        return asdict(self)
+        pass
+
+
+class ParamsAdapter:
+    """
+    Adapter translating FittedParams into the simulation ParameterRegistry.
+
+    Responsibilities:
+        - Map FittedParams fields to registry parameter names
+        - Respect frozen parameters
+        - Persist parameters_used.json after application
+    """
+
+    def __init__(self, registry: ParameterRegistry, used_path: str):
+        """
+        Initialize adapter.
+
+        Args:
+            registry: Simulation parameter registry reference.
+            used_path: Output path for parameters_used.json.
+        """
+        self.registry = registry
+        self.used_path = used_path
+        pass
+
+    def apply(self, simulation: "Simulation", params: FittedParams) -> Dict[str, str]:
+        """
+        Apply FittedParams to the simulation via its parameter registry.
+
+        Args:
+            simulation: Simulation instance.
+            params: Fitted parameter container.
+
+        Returns:
+            Warnings dict.
+        """
+        mapping: Dict[str, Any] = {}
+
+        # Decision weights
+        for k, v in params.decision_weights.items():
+            if k in ("age_effects", "occ_effects"):
+                # Demographics handled as indexed effects 0..N-1
+                if isinstance(v, dict):
+                    for j, val in enumerate(v.values()):
+                        mapping[f"Decision.{k}.{j}"] = float(val)
+            else:
+                mapping[f"Decision.{k}"] = float(v)
+
+        # Layer weights
+        for k, v in params.layer_weights.items():
+            if k == "family":
+                mapping["Layers.family_weight"] = float(v)
+            elif k in ("work", "work_school", "workschool"):
+                mapping["Layers.work_weight"] = float(v)
+            elif k == "community":
+                mapping["Layers.community_weight"] = float(v)
+
+        # Info
+        for k, v in params.info_params.items():
+            if k in ("phi_family", "phi_work", "phi_community"):
+                mapping[f"Info.{k}"] = float(v)
+            elif k == "lambda_broadcast_base":
+                mapping["Info.lambda_broadcast_base"] = float(v)
+            elif k in ("lambda_broadcast_factor_after", "lambda_broadcast_factor_after_day10"):
+                mapping["Info.lambda_broadcast_factor_after"] = float(v)
+            elif k in ("rho_info_decay",):
+                mapping["Info.rho_info_decay"] = float(v)
+
+        # Noise
+        for k, v in params.noise_params.items():
+            if k == "tau":
+                mapping["Decision.tau"] = float(v)
+
+        # Module-specific params
+        for mod, sub in params.module_params.items():
+            for k, v in sub.items():
+                mapping[f"{mod}.{k}"] = float(v)
+
+        warnings = simulation.set_params(mapping)
+        # Persist parameters used
+        save_json(simulation.param_registry.to_json(), self.used_path)
+        return warnings
+        pass
+
+    def capture(self, simulation: "Simulation") -> FittedParams:
+        """
+        Capture current simulation parameters into a FittedParams object.
+
+        Args:
+            simulation: Simulation instance.
+
+        Returns:
+            FittedParams reconstructed from parameter registry values.
+        """
+        vals = simulation.param_registry.to_json()
+        decision = {
+            "alpha": vals.get("Decision.alpha", 0.0),
+            "gamma": vals.get("Decision.gamma", 1.0),
+            "theta_f": vals.get("Decision.theta_f", 1.0),
+            "theta_w": vals.get("Decision.theta_w", 1.0),
+            "theta_c": vals.get("Decision.theta_c", 1.0),
+            "beta_r": vals.get("Decision.beta_r", 0.0),
+            "beta_i": vals.get("Decision.beta_i", 0.5),
+            "tau": vals.get("Decision.tau", 1.0),
+        }
+        # Demographics arrays to dicts
+        age_effs = {str(i): vals.get(f"Decision.age_effects.{i}", 0.0) for i in range(5)}
+        occ_effs = {str(i): vals.get(f"Decision.occ_effects.{i}", 0.0) for i in range(5)}
+        decision["age_effects"] = age_effs
+        decision["occ_effects"] = occ_effs
+
+        layer = {
+            "family": vals.get("Layers.family_weight", 1.0),
+            "work_school": vals.get("Layers.work_weight", 1.0),
+            "community": vals.get("Layers.community_weight", 1.0),
+        }
+
+        info = {
+            "phi_family": vals.get("Info.phi_family", 0.1),
+            "phi_work": vals.get("Info.phi_work", 0.1),
+            "phi_community": vals.get("Info.phi_community", 0.1),
+            "lambda_broadcast_base": vals.get("Info.lambda_broadcast_base", 0.05),
+            "lambda_broadcast_factor_after": vals.get("Info.lambda_broadcast_factor_after", 1.5),
+            "rho_info_decay": vals.get("Info.rho_info_decay", 0.5),
+        }
+
+        noise = {"tau": vals.get("Decision.tau", 1.0)}
+
+        fitted = FittedParams(
+            decision_weights=decision,
+            layer_weights=layer,
+            info_params=info,
+            noise_params=noise,
+            module_params={
+                "Activity": {
+                    "base": vals.get("Activity.base", 0.6),
+                    "amplitude": vals.get("Activity.amplitude", 0.2),
+                    "phase": vals.get("Activity.phase", 0.0),
+                }
+            },
+            engine_type="calibrasim",
+            meta={}
+        )
+        return fitted
+        pass
+
+    def validate_frozen(self, params: FittedParams) -> Dict[str, str]:
+        """
+        Check for attempts to override frozen parameters.
+
+        Args:
+            params: Fitted parameters.
+
+        Returns:
+            Dict of warnings.
+        """
+        warnings: Dict[str, str] = {}
+        # Example: adding support for frozen global params (none set via FittedParams by default)
+        for name, d in self.registry.definitions.items():
+            if d.frozen and name in params.module_params.get("Global", {}):
+                warnings[name] = "Attempt to override frozen parameter; ignored."
+        return warnings
+        pass
+
+
+class Calibrator:
+    """
+    Pluggable calibrator interface with a stable evaluation callback signature.
+
+    Concrete implementations:
+        - LogitHeadCalibrator
+        - RandomSearchCalibrator
+        - SNPECalibrator
+    """
+
+    def fit(
+        self,
+        bundle: Any,
+        simulator: "Simulation",
+        evaluator: Callable[["Simulation", FittedParams, Tuple[int, int]], Dict[str, Any]],
+        train_window: Tuple[int, int],
+        seed: int,
+        budget: int = 100,
+        artifacts_dir: Optional[str] = None,
+        params_adapter: Optional[ParamsAdapter] = None,
+    ) -> FittedParams:
+        """
+        Fit model parameters strictly on the training window.
+
+        Args:
+            bundle: Data bundle (raw inputs as needed).
+            simulator: Simulation instance.
+            evaluator: Evaluator callable.
+            train_window: (start_idx, end_idx) indices for training window days.
+            seed: Random seed.
+            budget: Iterations budget.
+            artifacts_dir: Directory to store calibration artifacts.
+            params_adapter: Adapter to apply FittedParams to simulator.
+
+        Returns:
+            FittedParams best solution found.
+
+        Notes:
+            Derived classes must override this method.
+        """
+        raise NotImplementedError("Calibrator.fit must be implemented by subclasses.")
+        pass
+
+
+def sigmoid(x: np.ndarray) -> np.ndarray:
+    """
+    Numerically-stable logistic sigmoid function.
+
+    Args:
+        x: Input array.
+
+    Returns:
+        Sigmoid-transformed array in (0, 1).
+    """
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -35.0, 35.0)))
+    pass
+
+
+def build_multiplex_adjacency(
+    social: Dict[str, Dict[str, List[int]]],
+    id2idx: Dict[int, int],
+    n: int,
+) -> Dict[str, List[np.ndarray]]:
+    """
+    Build multiplex adjacency lists per layer from social network mapping.
+
+    Args:
+        social: Mapping agent_id_str -> {'family': [nbrs], 'work_school': [nbrs], 'community': [nbrs]}
+        id2idx: Mapping agent_id -> 0..N-1
+        n: Number of agents
+
+    Returns:
+        Dict layer -> list of neighbor index arrays of length n
+    """
+    layers = ["family", "work_school", "community"]
+    adj: Dict[str, List[set]] = {layer: [set() for _ in range(n)] for layer in layers}
+    for k_str, v in social.items():
+        i = id2idx.get(int(k_str))
+        if i is None:
+            continue
+        for layer in layers:
+            for nbr in v.get(layer, []):
+                j = id2idx.get(int(nbr))
+                if j is None or j == i:
+                    continue
+                # Symmetric undirected
+                adj[layer][i].add(j)
+                adj[layer][j].add(i)
+    out: Dict[str, List[np.ndarray]] = {}
+    for layer in layers:
+        arr_list: List[np.ndarray] = []
+        for i in range(n):
+            if not adj[layer][i]:
+                arr_list.append(np.array([], dtype=int))
+            else:
+                arr_list.append(np.array(sorted(list(adj[layer][i])), dtype=int))
+        out[layer] = arr_list
+    return out
+    pass
+
+
+def compute_layer_share(states_prev: np.ndarray, neighbors: List[np.ndarray]) -> np.ndarray:
+    """
+    Compute neighbor adoption shares for each agent in a layer.
+
+    Args:
+        states_prev: Previous adoption states (N,)
+        neighbors: List of arrays of neighbors indices (length N)
+
+    Returns:
+        Share per agent (N,)
+    """
+    N = states_prev.shape[0]
+    shares = np.zeros(N, dtype=float)
+    for i in range(N):
+        nbrs = neighbors[i]
+        if nbrs.size == 0:
+            shares[i] = 0.0
+        else:
+            shares[i] = float(np.mean(states_prev[nbrs]))
+    return shares
+    pass
+
+
+def wasserstein_safe(u_values: np.ndarray, v_values: np.ndarray) -> float:
+    """
+    Compute 1-Wasserstein distance between two 1D distributions with a fallback.
+
+    Args:
+        u_values: Sample 1
+        v_values: Sample 2
+
+    Returns:
+        Wasserstein distance (float)
+    """
+    if _HAVE_SCIPY:
+        return float(wasserstein_distance(u_values, v_values))
+    else:
+        # Fallback: mean absolute difference between sorted samples
+        try:
+            u = np.sort(u_values)
+            v = np.sort(v_values)
+            n = min(len(u), len(v))
+            if n == 0:
+                return 0.0
+            return float(np.mean(np.abs(u[:n] - v[:n])))
+        except Exception:
+            return float(np.mean(np.abs(u_values - v_values)))
+    pass
+
+
+class Module:
+    """
+    Base module class for DAG-scheduled updates.
+
+    Methods:
+        forward(state, buffers, params, t): compute outputs to buffers without committing to state.
+    """
+
+    def __init__(self, name: str):
+        """
+        Initialize base module.
+
+        Args:
+            name: Module name.
+        """
+        self.name = name
+        self.supports_calibration: bool = True
+        pass
+
+    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], params: Dict[str, Any], t: int) -> None:
+        """
+        Run forward update for time step t. Must write to buffers only.
+
+        Args:
+            state: Global state dict with fields (e.g., 'prev').
+            buffers: Buffers to write outputs for this step (overwritten each t).
+            params: Module-specific params sub-dict.
+            t: Time index.
+
+        Notes:
+            Derived modules must implement this method.
+        """
+        raise NotImplementedError("Module.forward must be implemented by subclasses.")
+        pass
+
+
+class ActivityModule(Module):
+    """
+    Time-dependent activity module producing a scalar activity level per time step.
+
+    The activity level follows a weekly sinusoidal pattern:
+        activity(t) = base + amplitude * sin(2*pi*(t % 7)/7 + phase)
+    """
+
+    def __init__(self, name: str = "Activity"):
+        """
+        Initialize ActivityModule.
+        """
+        super().__init__(name)
+        pass
+
+    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], params: Dict[str, Any], t: int) -> None:
+        """
+        Compute activity level for time t and store in buffers.
+
+        Args:
+            state: Global state (unused).
+            buffers: Buffer dict to write 'activity_level'.
+            params: 'base', 'amplitude', 'phase'
+            t: Time index.
+        """
+        base = float(params.get("base", 0.6))
+        amp = float(params.get("amplitude", 0.2))
+        phase = float(params.get("phase", 0.0))
+        weekly_pos = (t % 7) / 7.0
+        act = base + amp * math.sin(2.0 * math.pi * weekly_pos + phase)
+        act = float(max(0.0, min(1.0, act)))
+        buffers["activity_level"] = act
+        pass
+
+
+class InfoPropagationModule(Module):
+    """
+    Information propagation module combining peer influence and broadcast.
+
+    Outputs:
+        - 'received_info': binary vector (N,)
+        - 'mem_next': next memory state vector (N,)
+    """
+
+    def __init__(self, neighbors: Dict[str, List[np.ndarray]], name: str = "Info"):
+        """
+        Initialize InfoPropagationModule.
+
+        Args:
+            neighbors: Multiplex adjacency lists per layer.
+            name: Module name.
+        """
+        super().__init__(name)
+        self.neighbors = neighbors
+        pass
+
+    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], params: Dict[str, Any], t: int) -> None:
+        """
+        Compute information receipt and memory update.
+
+        Args:
+            state: Contains 'prev_state', 'mem_prev', 'global'.
+            buffers: Buffer to write 'received_info' and 'mem_next'.
+            params: Info module parameters.
+            t: Time index.
+
+        Notes:
+            - Broadcast intensity changes after intervention day.
+            - Memory update with exponential decay.
+        """
+        prev_states: np.ndarray = state["prev_state"]
+        mem_prev: np.ndarray = state["mem_prev"]
+        N = prev_states.shape[0]
+
+        # Compute neighbor shares
+        share_f = compute_layer_share(prev_states, self.neighbors["family"])
+        share_w = compute_layer_share(prev_states, self.neighbors["work_school"])
+        share_c = compute_layer_share(prev_states, self.neighbors["community"])
+
+        # Apply activity scaling
+        activity_level = float(buffers.get("activity_level", 1.0))
+        share_f *= activity_level
+        share_w *= activity_level
+        share_c *= activity_level
+
+        phi_f = float(params.get("phi_family", 0.1))
+        phi_w = float(params.get("phi_work", 0.1))
+        phi_c = float(params.get("phi_community", 0.1))
+        lam_base = float(params.get("lambda_broadcast_base", 0.05))
+        lam_factor_after = float(params.get("lambda_broadcast_factor_after", 1.5))
+        rho = float(params.get("rho_info_decay", 0.5))
+        intervention_day = int(state.get("global", {}).get("gov_intervention_day", 10))
+
+        # Broadcast schedule
+        lam_t = lam_base if t < intervention_day else lam_base * lam_factor_after
+
+        u = phi_f * share_f + phi_w * share_w + phi_c * share_c + lam_t
+        p_info = 1.0 - np.exp(-np.clip(u, 0.0, 50.0))
+
+        # Stochastic receipt
+        rec = (np.random.rand(N) < p_info).astype(np.float64)
+        mem_next = rho * mem_prev + (1.0 - rho) * rec
+
+        buffers["received_info"] = rec
+        buffers["mem_next"] = mem_next
+        pass
+
+
+class DecisionModule(Module):
+    """
+    Decision-making module computing mask adoption probabilities and states.
+
+    Utility uses a logistic model:
+        logits = alpha + gamma*prev + theta_f*share_f + theta_w*share_w + theta_c*share_c
+                 + beta_r*risk + beta_i*mem + demographics
+        p = sigmoid(logits / tau)
+    """
+
+    def __init__(self, neighbors: Dict[str, List[np.ndarray]], demographics: Dict[str, np.ndarray], name: str = "Decision"):
+        """
+        Initialize DecisionModule.
+
+        Args:
+            neighbors: Multiplex adjacency lists to compute neighbor shares.
+            demographics: Dict with 'age_oh' and 'occ_oh' one-hot arrays (N x K).
+            name: Module name.
+        """
+        super().__init__(name)
+        self.neighbors = neighbors
+        self.demographics = demographics
+        pass
+
+    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], params: Dict[str, Any], t: int) -> None:
+        """
+        Compute adoption probabilities and sample next adoption state.
+
+        Args:
+            state: Contains 'prev_state', 'mem_prev', 'risk'.
+            buffers: Write 'p_adopt' and 'state_next'.
+            params: Decision module parameters.
+            t: Time index.
+        """
+        prev_states: np.ndarray = state["prev_state"]
+        mem_prev: np.ndarray = state["mem_prev"]
+        risk: np.ndarray = state["risk"]
+        N = prev_states.shape[0]
+
+        # Shares
+        share_f = compute_layer_share(prev_states, self.neighbors["family"])
+        share_w = compute_layer_share(prev_states, self.neighbors["work_school"])
+        share_c = compute_layer_share(prev_states, self.neighbors["community"])
+
+        # Apply activity scaling
+        activity_level = float(buffers.get("activity_level", 1.0))
+        share_f *= activity_level
+        share_w *= activity_level
+        share_c *= activity_level
+
+        alpha = float(params.get("alpha", 0.0))
+        gamma = float(params.get("gamma", 1.0))
+        theta_f = float(params.get("theta_f", 1.0))
+        theta_w = float(params.get("theta_w", 1.0))
+        theta_c = float(params.get("theta_c", 1.0))
+        beta_r = float(params.get("beta_r", 0.0))
+        beta_i = float(params.get("beta_i", 0.5))
+        tau = float(params.get("tau", 1.0))
+
+        logits = (
+            alpha + gamma * prev_states + theta_f * share_f + theta_w * share_w + theta_c * share_c
+            + beta_r * risk + beta_i * mem_prev
+        )
+
+        # Demographic effects
+        age_oh = self.demographics.get("age_oh")
+        occ_oh = self.demographics.get("occ_oh")
+        if age_oh is not None and age_oh.shape[1] > 0:
+            # Sum indexed effects mapped to registry keys
+            K_age = age_oh.shape[1]
+            for j in range(K_age):
+                wj = float(params.get(f"age_effects.{j}", 0.0))
+                logits += wj * age_oh[:, j]
+        if occ_oh is not None and occ_oh.shape[1] > 0:
+            K_occ = occ_oh.shape[1]
+            for j in range(K_occ):
+                wj = float(params.get(f"occ_effects.{j}", 0.0))
+                logits += wj * occ_oh[:, j]
+
+        # Temperature scaling
+        logits = logits / max(1e-6, tau)
+        p = sigmoid(logits)
+
+        next_states = (np.random.rand(N) < p).astype(np.float64)
+
+        buffers["p_adopt"] = p
+        buffers["state_next"] = next_states
+        pass
+
+
+class Simulation:
+    """
+    Main simulation engine coordinating modules, state, I/O, and evaluation.
+
+    Features:
+        - DAG scheduler for modules per time step
+        - Parameter registry with bounds and frozen flags
+        - Data loading and ID alignment
+        - Observables generation and evaluation metrics
+    """
+
+    def __init__(self, data_dir: str, cfg: SimulationConfig, artifacts_dir: str):
+        """
+        Initialize Simulation.
+
+        Args:
+            data_dir: Directory with input data files.
+            cfg: Simulation configuration.
+            artifacts_dir: Directory to save outputs.
+        """
+        self.cfg = cfg
+        self.data_dir = data_dir
+        self.artifacts_dir = artifacts_dir
+        ensure_dir(self.artifacts_dir)
+        self.param_defs_path = os.path.join(self.artifacts_dir, "parameter_definitions.json")
+        self.params_used_path = os.path.join(self.artifacts_dir, "parameters_used.json")
+        self.param_registry = ParameterRegistry(self.param_defs_path)
+
+        # Data containers
+        self.agents_df: Optional[pd.DataFrame] = None
+        self.social_raw: Optional[Dict[str, Any]] = None
+        self.train_df: Optional[pd.DataFrame] = None
+        self.val_df: Optional[pd.DataFrame] = None
+        self.test_df: Optional[pd.DataFrame] = None
+
+        # ID mapping
+        self.common_ids: Optional[np.ndarray] = None
+        self.id2idx: Optional[Dict[int, int]] = None
+
+        # Network
+        self.neighbors: Optional[Dict[str, List[np.ndarray]]] = None
+
+        # Observed time series
+        self.obs_wearing_train: Optional[np.ndarray] = None
+        self.obs_received_train: Optional[np.ndarray] = None
+        self.obs_days_train: Optional[List[int]] = None
+
+        self.obs_wearing_val: Optional[np.ndarray] = None
+        self.obs_days_val: Optional[List[int]] = None
+
+        self.obs_wearing_test: Optional[np.ndarray] = None
+        self.obs_days_test: Optional[List[int]] = None
+
+        # Encoded demographics and risk
+        self.age_oh: Optional[np.ndarray] = None
+        self.occ_oh: Optional[np.ndarray] = None
+        self.risk: Optional[np.ndarray] = None
+
+        # Modules
+        self.modules: List[Module] = []
+        self._module_params_map: Dict[str, Dict[str, Any]] = {}
+
+        # Run buffers and outputs
+        self.buffers: Dict[str, Any] = {}
+        self.outputs: Dict[str, Any] = {}
+
+        # FIXED: Add error handling and deterministic setup
+        # Implement explicit seed control for reproducibility
+        set_global_seed(self.cfg.seed)
+        pass
+
+    def load_data(self) -> None:
+        """
+        Load dataset from CSV/JSON files in data_dir and perform ID alignment.
+
+        Files expected:
+            - agent_attributes.csv
+            - social_network.json
+            - train_data.csv
+            - val_data.csv (optional; if missing, we create 80/20 split from train)
+            - test_data.csv (optional)
+
+        Raises:
+            RuntimeError: If critical files are missing or have no overlapping IDs.
+        """
+        # Paths
+        agents_path = os.path.join(self.data_dir, "agent_attributes.csv")
+        social_path = os.path.join(self.data_dir, "social_network.json")
+        train_path = os.path.join(self.data_dir, "train_data.csv")
+        val_path = os.path.join(self.data_dir, "val_data.csv")
+        test_path = os.path.join(self.data_dir, "test_data.csv")
+
+        # Load
+        try:
+            self.agents_df = pd.read_csv(agents_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load agent_attributes.csv: {e}")
+
+        try:
+            with open(social_path, "r", encoding="utf-8") as f:
+                self.social_raw = json.load(f)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load social_network.json: {e}")
+
+        try:
+            self.train_df = pd.read_csv(train_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load train_data.csv: {e}")
+
+        if os.path.exists(val_path):
+            try:
+                self.val_df = pd.read_csv(val_path)
+            except Exception:
+                self.val_df = None
+        else:
+            self.val_df = None
+
+        if os.path.exists(test_path):
+            try:
+                self.test_df = pd.read_csv(test_path)
+            except Exception:
+                self.test_df = None
+        else:
+            self.test_df = None
+
+        # ID alignment across agents, social, and train
+        agent_ids = set(self.agents_df["agent_id"].astype(int).tolist())
+        social_ids = set(int(k) for k in self.social_raw.keys())
+        train_ids = set(self.train_df["agent_id"].astype(int).tolist())
+        common = sorted(list(agent_ids & social_ids & train_ids))
+        if not common:
+            raise RuntimeError("No common agent IDs across agent_attributes, social_network, and train_data")
+        self.common_ids = np.array(common, dtype=int)
+        self.id2idx = {aid: i for i, aid in enumerate(common)}
+
+        # Filter agents and social to common ids
+        self.agents_df = self.agents_df[self.agents_df["agent_id"].isin(common)].copy()
+        self.neighbors = build_multiplex_adjacency(self.social_raw, self.id2idx, len(self.common_ids))
+
+        # Risk vector
+        self.risk = (
+            self.agents_df.set_index("agent_id").loc[self.common_ids]["risk_perception"].to_numpy(dtype=np.float64)
+        )
+
+        # Demographics encoding to One-Hot (excluding baseline implicit)
+        age_cats = sorted(pd.unique(self.agents_df["age_group"].astype(str)))
+        occ_cats = sorted(pd.unique(self.agents_df["occupation"].astype(str)))
+        age_map = {c: i for i, c in enumerate(age_cats)}
+        occ_map = {c: i for i, c in enumerate(occ_cats)}
+        N = len(self.common_ids)
+        self.age_oh = np.zeros((N, max(1, len(age_cats) - 1)), dtype=np.float64)
+        self.occ_oh = np.zeros((N, max(1, len(occ_cats) - 1)), dtype=np.float64)
+        # choose first as baseline
+        age_baseline = age_cats[0] if age_cats else None
+        occ_baseline = occ_cats[0] if occ_cats else None
+        age_index_map = {c: j for j, c in enumerate([x for x in age_cats if x != age_baseline])}
+        occ_index_map = {c: j for j, c in enumerate([x for x in occ_cats if x != occ_baseline])}
+        for idx, aid in enumerate(self.common_ids):
+            row = self.agents_df[self.agents_df["agent_id"] == aid].iloc[0]
+            ag = str(row["age_group"])
+            oc = str(row["occupation"])
+            if ag in age_index_map:
+                self.age_oh[idx, age_index_map[ag]] = 1.0
+            if oc in occ_index_map:
+                self.occ_oh[idx, occ_index_map[oc]] = 1.0
+
+        # Pivot train data to T x N matrices
+        self.obs_wearing_train, self.obs_received_train, self.obs_days_train = self._pivot_states(self.train_df)
+
+        # Validation data: If explicit val_data provided, align and pivot; else create 80/20 from train days (strict)
+        if self.val_df is not None:
+            # Align IDs
+            val_ids = set(self.val_df["agent_id"].astype(int).tolist())
+            # Ensure same agents; restrict to common
+            miss = (set(self.common_ids.tolist()) - val_ids)
+            if miss:
+                # Filter out missing agents to keep alignment
+                self.common_ids = np.array(sorted(list(set(self.common_ids.tolist()) - miss)), dtype=int)
+                self.id2idx = {aid: i for i, aid in enumerate(self.common_ids)}
+                # Rebuild adjacency and re-encode demographics
+                self.neighbors = build_multiplex_adjacency(self.social_raw, self.id2idx, len(self.common_ids))
+                self.agents_df = self.agents_df[self.agents_df["agent_id"].isin(self.common_ids)].copy()
+                N = len(self.common_ids)
+                # Recreate demographics with reduced set
+                self.risk = self.agents_df.set_index("agent_id").loc[self.common_ids]["risk_perception"].to_numpy(dtype=np.float64)
+                # Re-encode one-hot
+                age_cats = sorted(pd.unique(self.agents_df["age_group"].astype(str)))
+                occ_cats = sorted(pd.unique(self.agents_df["occupation"].astype(str)))
+                age_baseline = age_cats[0] if age_cats else None
+                occ_baseline = occ_cats[0] if occ_cats else None
+                self.age_oh = np.zeros((N, max(1, len(age_cats) - 1)), dtype=np.float64)
+                self.occ_oh = np.zeros((N, max(1, len(occ_cats) - 1)), dtype=np.float64)
+                age_index_map = {c: j for j, c in enumerate([x for x in age_cats if x != age_baseline])}
+                occ_index_map = {c: j for j, c in enumerate([x for x in occ_cats if x != occ_baseline])}
+                for idx, aid in enumerate(self.common_ids):
+                    row = self.agents_df[self.agents_df["agent_id"] == aid].iloc[0]
+                    ag = str(row["age_group"])
+                    oc = str(row["occupation"])
+                    if ag in age_index_map:
+                        self.age_oh[idx, age_index_map[ag]] = 1.0
+                    if oc in occ_index_map:
+                        self.occ_oh[idx, occ_index_map[oc]] = 1.0
+                # Repivot training data for reduced set
+                self.obs_wearing_train, self.obs_received_train, self.obs_days_train = self._pivot_states(self.train_df)
+            # Now pivot val
+            self.obs_wearing_val, _, self.obs_days_val = self._pivot_states(self.val_df)
+        else:
+            # FIXED: Temporal Holdout Split (STRICT) - 80/20 by days on train_data
+            days_sorted = sorted(list(pd.unique(self.train_df["day"].astype(int))))
+            if not days_sorted:
+                raise RuntimeError("No days in train_data for holdout split.")
+            split_idx = max(1, int(math.floor(0.8 * len(days_sorted))))
+            days_train = set(days_sorted[:split_idx])
+            days_val = days_sorted[split_idx:]
+            if not days_val:
+                raise RuntimeError("No validation days available after temporal split.")
+            # Build val_df from train_df slice
+            val_df_constructed = self.train_df[self.train_df["day"].isin(days_val)].copy()
+            self.obs_wearing_val, _, self.obs_days_val = self._pivot_states(val_df_constructed)
+
+        # Test data
+        if self.test_df is not None:
+            self.obs_wearing_test, _, self.obs_days_test = self._pivot_states(self.test_df)
+        else:
+            self.obs_wearing_test, self.obs_days_test = None, None
+        pass
+
+    def _pivot_states(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List[int]]:
+        """
+        Pivot agent-day records to T x N arrays for wearing_mask and received_info.
+
+        Args:
+            df: DataFrame with columns ['day', 'agent_id', 'wearing_mask', 'received_info'].
+
+        Returns:
+            Tuple (wearing, received, days_sorted)
+        """
+        days_sorted = sorted(pd.unique(df["day"].astype(int)))
+        N = len(self.common_ids)
+        day_to_idx = {d: i for i, d in enumerate(days_sorted)}
+        wearing = np.zeros((len(days_sorted), N), dtype=np.float64)
+        received = np.zeros((len(days_sorted), N), dtype=np.float64)
+        for _, row in df.iterrows():
+            d = int(row["day"])
+            a = int(row["agent_id"])
+            if a not in self.id2idx:
+                continue
+            i_day = day_to_idx[d]
+            i_agent = self.id2idx[a]
+            wearing[i_day, i_agent] = 1.0 if bool(row.get("wearing_mask", 0)) else 0.0
+            received[i_day, i_agent] = 1.0 if bool(row.get("received_info", 0)) else 0.0
+        return wearing, received, days_sorted
+        pass
+
+    def build_modules(self) -> None:
+        """
+        Build and register modules in execution order for the DAG scheduler.
+
+        Order:
+            1. Activity
+            2. InfoPropagation
+            3. Decision
+        """
+        demographics = {"age_oh": self.age_oh, "occ_oh": self.occ_oh}
+        self.modules = [
+            ActivityModule(name="Activity"),
+            InfoPropagationModule(neighbors=self.neighbors, name="Info"),
+            DecisionModule(neighbors=self.neighbors, demographics=demographics, name="Decision"),
+        ]
+        pass
+
+    def set_params(self, mapping: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Set parameters in the registry and return warnings.
+
+        Args:
+            mapping: Dict of param_name -> value
+
+        Returns:
+            Warnings dict from registry.
+        """
+        warnings = self.param_registry.set_values(mapping, ignore_frozen=True)
+        # Persist parameters used
+        save_json(self.param_registry.to_json(), self.params_used_path)
+        return warnings
+        pass
+
+    def get_params(self) -> Dict[str, Any]:
+        """
+        Get current parameter values.
+
+        Returns:
+            Dict param_name -> value.
+        """
+        return self.param_registry.to_json()
+        pass
+
+    def _module_params(self, module_name: str) -> Dict[str, Any]:
+        """
+        Extract module-specific parameters from registry for a given module.
+
+        Args:
+            module_name: Module name.
+
+        Returns:
+            Dict of parameters relevant to the module.
+        """
+        p = {}
+        for k, v in self.param_registry.values.items():
+            if k.startswith(f"{module_name}."):
+                sub = k.split(".", 1)[1]
+                p[sub] = v
+        return p
+        pass
+
+    def run(self, start_idx: int, end_idx: int, init_prev_states: Optional[np.ndarray] = None) -> Dict[str, Any]:
+        """
+        Run the simulation forward from start_idx to end_idx-1.
+
+        Args:
+            start_idx: Start day index in observed arrays.
+            end_idx: End day index (exclusive).
+            init_prev_states: Optional initial previous state; if None, use observed wearing at start_idx-1.
+
+        Returns:
+            Dict outputs with keys:
+                'states': T x N simulated adoption
+                'probs': T x N adoption probabilities
+                'info': T x N info received
+                'days': List of day indices simulated
+        """
+        if self.neighbors is None:
+            raise RuntimeError("Neighbors not built. Call load_data() first.")
+
+        T = end_idx - start_idx
+        if T <= 0:
+            raise ValueError("Invalid window for simulation: empty or negative length.")
+        N = len(self.common_ids)
+
+        # Initialize prior state either from provided init or observed day before start_idx if available
+        if init_prev_states is not None:
+            prev = init_prev_states.copy().astype(np.float64)
+        else:
+            if start_idx > 0 and self.obs_wearing_train is not None and start_idx - 1 < self.obs_wearing_train.shape[0]:
+                prev = self.obs_wearing_train[start_idx - 1, :].copy().astype(np.float64)
+            elif self.obs_wearing_val is not None and start_idx - 1 < self.obs_wearing_val.shape[0]:
+                prev = self.obs_wearing_val[start_idx - 1, :].copy().astype(np.float64)
+            else:
+                # Default all zeros if unavailable
+                prev = np.zeros(N, dtype=np.float64)
+
+        # Memory initial
+        mem_prev = np.zeros(N, dtype=np.float64)
+
+        # Outputs arrays
+        states = np.zeros((T, N), dtype=np.float64)
+        probs = np.zeros((T, N), dtype=np.float64)
+        info = np.zeros((T, N), dtype=np.float64)
+
+        # Prepare global constants
+        global_state = {"gov_intervention_day": int(self.param_registry.get("Global.gov_intervention_day", 10))}
+
+        # Run DAG loop
+        for t in range(start_idx, end_idx):
+            # Prepare per-step buffers
+            self.buffers = {}
+            # Module params
+            p_activity = self._module_params("Activity")
+            p_info = self._module_params("Info")
+            p_decision = self._module_params("Decision")
+
+            # State view
+            state_view = {
+                "prev_state": prev,
+                "mem_prev": mem_prev,
+                "risk": self.risk,
+                "global": global_state,
+            }
+
+            # Activity
+            self.modules[0].forward(state_view, self.buffers, p_activity, t)
+            # Info
+            self.modules[1].forward(state_view, self.buffers, p_info, t)
+            rec = self.buffers.get("received_info")
+            mem_next = self.buffers.get("mem_next")
+
+            # Update state_view memory for decision
+            state_view["mem_prev"] = mem_next
+
+            # Decision
+            self.modules[2].forward(state_view, self.buffers, p_decision, t)
+            p = self.buffers.get("p_adopt")
+            nxt = self.buffers.get("state_next")
+
+            # Commit to arrays
+            k = t - start_idx
+            info[k, :] = rec
+            probs[k, :] = p
+            states[k, :] = nxt
+            # Prepare for next
+            prev = nxt
+            mem_prev = mem_next
+
+        self.outputs = {
+            "states": states,
+            "probs": probs,
+            "info": info,
+            "days": list(range(start_idx, end_idx)),
+        }
+        return self.outputs
+        pass
+
+    def evaluate(self, observed_wearing: np.ndarray, start_idx: int, end_idx: int) -> Dict[str, Any]:
+        """
+        Evaluate simulation outputs against observed data on [start_idx, end_idx).
+
+        Args:
+            observed_wearing: Observed wearing matrix T_obs x N.
+            start_idx: Start day index within observed_wearing.
+            end_idx: End day index (exclusive) within observed_wearing.
+
+        Returns:
+            Metrics dictionary with keys:
+                - RMSE_aggregate
+                - MAE_aggregate
+                - Brier
+                - TransitionFit: dict with P01, P11, P10, P00 errors
+                - Wasserstein
+                - observed_daily_rates, predicted_daily_rates_mean
+        """
+        if not self.outputs:
+            raise RuntimeError("No simulation outputs available. Run the simulation first.")
+
+        sim_states = self.outputs["states"]
+        sim_probs = self.outputs["probs"]
+        T = end_idx - start_idx
+        if T != sim_states.shape[0]:
+            raise RuntimeError("Simulation outputs length does not match evaluation window.")
+
+        obs = observed_wearing[start_idx:end_idx, :]
+        sim_rates = sim_states.mean(axis=1)
+        obs_rates = obs.mean(axis=1)
+
+        rmse = float(np.sqrt(np.mean((sim_rates - obs_rates) ** 2)))
+        mae = float(np.mean(np.abs(sim_rates - obs_rates)))
+        brier = float(np.mean((sim_probs - obs) ** 2))
+
+        # Transition metrics
+        if T >= 2:
+            prev_obs = obs[:-1, :].flatten()
+            curr_obs = obs[1:, :].flatten()
+            prev_sim = sim_states[:-1, :].flatten()
+            curr_sim = sim_states[1:, :].flatten()
+
+            def trans_probs(prev_flat: np.ndarray, curr_flat: np.ndarray) -> Dict[str, float]:
+                p01 = float(np.mean((prev_flat == 0.0) & (curr_flat == 1.0)))
+                p11 = float(np.mean((prev_flat == 1.0) & (curr_flat == 1.0)))
+                p10 = float(np.mean((prev_flat == 1.0) & (curr_flat == 0.0)))
+                p00 = float(np.mean((prev_flat == 0.0) & (curr_flat == 0.0)))
+                return {"P01": p01, "P11": p11, "P10": p10, "P00": p00}
+
+            obs_tp = trans_probs(prev_obs, curr_obs)
+            sim_tp = trans_probs(prev_sim, curr_sim)
+            trans_err = {k: abs(sim_tp[k] - obs_tp[k]) for k in ["P01", "P11", "P10", "P00"]}
+        else:
+            trans_err = {"P01": 0.0, "P11": 0.0, "P10": 0.0, "P00": 0.0}
+
+        # Distributional distance
+        wdist = wasserstein_safe(sim_rates, obs_rates)
+
+        metrics = {
+            "RMSE_aggregate": rmse,
+            "MAE_aggregate": mae,
+            "Brier": brier,
+            "TransitionFit": trans_err,
+            "Wasserstein": wdist,
+            "observed_daily_rates": obs_rates.tolist(),
+            "predicted_daily_rates_mean": sim_rates.tolist(),
+        }
+        return metrics
+        pass
+
+    def save_results(self, results_path: str) -> None:
+        """
+        Save current simulation outputs to JSON.
+
+        Args:
+            results_path: File path to write outputs.
+        """
+        if not self.outputs:
+            raise RuntimeError("No outputs to save; run the simulation first.")
+        payload = {
+            "days": self.outputs["days"],
+            "states": self.outputs["states"].tolist(),
+            "probs": self.outputs["probs"].tolist(),
+            "info": self.outputs["info"].tolist(),
+        }
+        save_json(payload, results_path)
+        pass
+
+    def save_module_io(self, module: Module, path: str) -> None:
+        """
+        Save module-specific outputs if they write buffers; here, saving latest buffers.
+
+        Args:
+            module: Module instance.
+            path: Output file path.
+        """
+        payload = {
+            "module": module.name,
+            "buffers": {k: (v.tolist() if isinstance(v, np.ndarray) else float(v) if isinstance(v, (int, float)) else v)
+                        for k, v in self.buffers.items()}
+        }
+        save_json(payload, path)
+        pass
+
+    def save_all_io(self, root_dir: str) -> None:
+        """
+        Save I/O for all modules and global outputs.
+
+        Args:
+            root_dir: Directory to save under.
+        """
+        ensure_dir(root_dir)
+        for mod in self.modules:
+            self.save_module_io(mod, os.path.join(root_dir, f"{mod.name}_io.json"))
+        self.save_results(os.path.join(root_dir, "simulation_outputs.json"))
+        pass
+
+    def visualize(self, path_png: str, observed: Optional[np.ndarray] = None, start_idx: int = 0, end_idx: Optional[int] = None) -> None:
+        """
+        Create a simple line plot for daily adoption rates.
+
+        Args:
+            path_png: Path to save PNG plot.
+            observed: Observed wearing matrix for comparison (optional).
+            start_idx: Start index for plotting.
+            end_idx: End index (exclusive) for plotting.
+
+        Notes:
+            Uses matplotlib if available; otherwise writes a placeholder JSON message.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            if not self.outputs:
+                raise RuntimeError("Run simulation before visualization.")
+            sim_rates = self.outputs["states"].mean(axis=1)
+            days = self.outputs["days"]
+            if end_idx is None:
+                end_idx = len(days)
+            plt.figure(figsize=(8, 4))
+            plt.plot(days[:end_idx - start_idx], sim_rates[:end_idx - start_idx], label="Simulated")
+            if observed is not None:
+                obs_rates = observed[start_idx:end_idx, :].mean(axis=1)
+                plt.plot(days[:end_idx - start_idx], obs_rates, label="Observed", linestyle="--")
+            plt.xlabel("Day index")
+            plt.ylabel("Adoption rate")
+            plt.title("Mask Adoption Rates: Simulation vs Observed")
+            plt.legend()
+            ensure_dir(os.path.dirname(path_png))
+            plt.tight_layout()
+            plt.savefig(path_png)
+            plt.close()
+        except Exception:
+            # Fallback: save a basic JSON indicating that plotting failed
+            save_json({"note": "Visualization not available in this environment."}, path_png + ".json")
+        pass
+
+
+class LogitHeadCalibrator(Calibrator):
+    """
+    Logistic head calibrator estimating decision weights from micro-transitions.
+
+    FIXED: Implemented robust feature construction and gradient-based optimization with L2 regularization.
+    """
+
+    def __init__(self, l2_reg: float = 1.0, max_iter: int = 300, learning_rate: float = 0.1):
+        """
+        Initialize logit head calibrator.
+
+        Args:
+            l2_reg: L2 regularization strength (intercept not regularized).
+            max_iter: Max optimizer iterations.
+            learning_rate: Learning rate for Adam.
+        """
+        self.l2_reg = float(l2_reg)
+        self.max_iter = int(max_iter)
+        self.learning_rate = float(learning_rate)
+        pass
+
+    def _build_features(
+        self,
+        simulator: Simulation,
+        start_idx: int,
+        end_idx: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Build logistic regression feature matrix and labels from observed micro transitions.
+
+        Features per agent at time t:
+            [1, prev_state, share_f, share_w, share_c, risk, mem_t, age_oh..., occ_oh...]
+
+        Args:
+            simulator: Simulation instance with data loaded.
+            start_idx: Start day index for training.
+            end_idx: End day index (exclusive) for training.
+
+        Returns:
+            Tuple (X, y)
+        """
+        wearing = simulator.obs_wearing_train
+        received = simulator.obs_received_train
+        neighbors = simulator.neighbors
+        age_oh = simulator.age_oh
+        occ_oh = simulator.occ_oh
+        risk = simulator.risk
+        rho = simulator.param_registry.get("Info.rho_info_decay", 0.5)
+
+        T = wearing.shape[0]
+        N = wearing.shape[1]
+        mem = np.zeros_like(wearing)
+        for t in range(1, T):
+            mem[t, :] = rho * mem[t - 1, :] + (1.0 - rho) * received[t, :]
+
+        rows = []
+        labels = []
+        for t in range(max(1, start_idx), end_idx):
+            prev = wearing[t - 1, :]
+            share_f = compute_layer_share(prev, neighbors["family"])
+            share_w = compute_layer_share(prev, neighbors["work_school"])
+            share_c = compute_layer_share(prev, neighbors["community"])
+            mem_t = mem[t, :]
+            # Build feature vector per agent
+            base = np.stack([np.ones(N), prev, share_f, share_w, share_c, risk, mem_t], axis=1)
+            if age_oh is not None and age_oh.shape[1] > 0:
+                base = np.concatenate([base, age_oh], axis=1)
+            if occ_oh is not None and occ_oh.shape[1] > 0:
+                base = np.concatenate([base, occ_oh], axis=1)
+            rows.append(base)
+            labels.append(wearing[t, :])
+        X = np.vstack(rows)
+        y = np.concatenate(labels, axis=0)
+        return X, y
+        pass
+
+    def _fit_logistic(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """
+        Fit logistic regression with Adam optimizer and L2 regularization (excluding intercept).
+
+        Args:
+            X: Feature matrix (n_samples, n_features)
+            y: Labels (n_samples,)
+
+        Returns:
+            Weight vector (n_features,)
+        """
+        n_samples, n_features = X.shape
+        w = np.zeros(n_features, dtype=np.float64)
+        # Do not regularize intercept
+        reg_mask = np.ones(n_features, dtype=np.float64)
+        reg_mask[0] = 0.0
+        m = np.zeros_like(w)
+        v = np.zeros_like(w)
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
+
+        for it in range(1, self.max_iter + 1):
+            z = X @ w
+            p = sigmoid(z)
+            grad = X.T @ (p - y) / n_samples + self.l2_reg * reg_mask * w / n_samples
+            m = beta1 * m + (1 - beta1) * grad
+            v = beta2 * v + (1 - beta2) * (grad * grad)
+            m_hat = m / (1 - beta1 ** it)
+            v_hat = v / (1 - beta2 ** it)
+            w -= self.learning_rate * m_hat / (np.sqrt(v_hat) + eps)
+        return w
+        pass
+
+    def fit(
+        self,
+        bundle: Any,
+        simulator: Simulation,
+        evaluator: Callable[[Simulation, FittedParams, Tuple[int, int]], Dict[str, Any]],
+        train_window: Tuple[int, int],
+        seed: int,
+        budget: int = 100,
+        artifacts_dir: Optional[str] = None,
+        params_adapter: Optional[ParamsAdapter] = None,
+    ) -> FittedParams:
+        """
+        Fit the decision head logistic model on micro-transitions.
+
+        Args:
+            bundle: Unused; kept for interface compatibility.
+            simulator: Simulation engine.
+            evaluator: Evaluator callable.
+            train_window: (start_idx, end_idx).
+            seed: Seed.
+            budget: Not used here; one-shot fit.
+            artifacts_dir: Directory for calibration artifacts.
+            params_adapter: Adapter to apply parameters.
+
+        Returns:
+            FittedParams instance with estimated decision weights and default others.
+        """
+        set_global_seed(seed)
+        start_idx, end_idx = train_window
+
+        # Build features
+        X, y = self._build_features(simulator, start_idx, end_idx)
+        beta = self._fit_logistic(X, y)
+
+        # Map coefficients
+        n_base = 7
+        decision = {
+            "alpha": float(beta[0]),
+            "gamma": float(beta[1]),
+            "theta_f": float(beta[2]),
+            "theta_w": float(beta[3]),
+            "theta_c": float(beta[4]),
+            "beta_r": float(beta[5]),
+            "beta_i": float(beta[6]),
+            "tau": simulator.param_registry.get("Decision.tau", 1.0),
+        }
+        # Demographic weights
+        idx = n_base
+        age_effs = {}
+        occ_effs = {}
+        age_dim = simulator.age_oh.shape[1] if simulator.age_oh is not None else 0
+        occ_dim = simulator.occ_oh.shape[1] if simulator.occ_oh is not None else 0
+        for j in range(age_dim):
+            age_effs[str(j)] = float(beta[idx + j])
+        idx += age_dim
+        for j in range(occ_dim):
+            occ_effs[str(j)] = float(beta[idx + j])
+        decision["age_effects"] = age_effs
+        decision["occ_effects"] = occ_effs
+
+        layer = {
+            "family": simulator.param_registry.get("Layers.family_weight", 1.0),
+            "work_school": simulator.param_registry.get("Layers.work_weight", 1.0),
+            "community": simulator.param_registry.get("Layers.community_weight", 1.0),
+        }
+        info = {
+            "phi_family": simulator.param_registry.get("Info.phi_family", 0.1),
+            "phi_work": simulator.param_registry.get("Info.phi_work", 0.1),
+            "phi_community": simulator.param_registry.get("Info.phi_community", 0.1),
+            "lambda_broadcast_base": simulator.param_registry.get("Info.lambda_broadcast_base", 0.05),
+            "lambda_broadcast_factor_after": simulator.param_registry.get("Info.lambda_broadcast_factor_after", 1.5),
+            "rho_info_decay": simulator.param_registry.get("Info.rho_info_decay", 0.5),
+        }
+        noise = {"tau": simulator.param_registry.get("Decision.tau", 1.0)}
+        fitted = FittedParams(
+            decision_weights=decision,
+            layer_weights=layer,
+            info_params=info,
+            noise_params=noise,
+            module_params={
+                "Activity": {
+                    "base": simulator.param_registry.get("Activity.base", 0.6),
+                    "amplitude": simulator.param_registry.get("Activity.amplitude", 0.2),
+                    "phase": simulator.param_registry.get("Activity.phase", 0.0),
+                }
+            },
+            engine_type="calibrasim",
+            meta={"calibrator": "logit_head", "seed": seed}
+        )
+
+        if params_adapter is not None:
+            warnings = params_adapter.apply(simulator, fitted)
+            if warnings:
+                save_json(warnings, os.path.join(artifacts_dir or simulator.artifacts_dir, "logit_head_warnings.json"))
+
+        # Evaluate quickly for reporting
+        _ = evaluator(simulator, fitted, train_window)
+        return fitted
+        pass
+
+
+class RandomSearchCalibrator(Calibrator):
+    """
+    Black-box random search calibrator over selected parameters.
+
+    FIXED: Added robust error handling and artifact saving per trial.
+    """
+
+    def __init__(self, search_space: Optional[Dict[str, Tuple[float, float]]] = None):
+        """
+        Initialize random search calibrator.
+
+        Args:
+            search_space: Optional mapping param_name -> (low, high) for sampling.
+        """
+        self.search_space = search_space or {}
+        pass
+
+    def _default_search_space(self, simulator: Simulation) -> Dict[str, Tuple[float, float]]:
+        """
+        Build default search space from registry bounds.
+
+        Args:
+            simulator: Simulation instance.
+
+        Returns:
+            Dict param_name -> (low, high)
+        """
+        space: Dict[str, Tuple[float, float]] = {}
+        # Choose a subset for efficiency
+        keys = [
+            "Decision.alpha", "Decision.gamma",
+            "Decision.theta_f", "Decision.theta_w", "Decision.theta_c",
+            "Decision.beta_r", "Decision.beta_i", "Decision.tau",
+            "Info.phi_family", "Info.phi_work", "Info.phi_community",
+            "Info.lambda_broadcast_base", "Info.lambda_broadcast_factor_after", "Info.rho_info_decay",
+            "Layers.family_weight", "Layers.work_weight", "Layers.community_weight",
+            "Activity.base", "Activity.amplitude", "Activity.phase",
+        ]
+        for k in keys:
+            d = simulator.param_registry.definitions.get(k)
+            if d is not None:
+                low, high = d.bounds
+                space[k] = (float(low), float(high))
+        return space
+        pass
+
+    def _sample_params(self, space: Dict[str, Tuple[float, float]]) -> Dict[str, Any]:
+        """
+        Sample a parameter vector from the defined search space.
+
+        Args:
+            space: Mapping param_name -> (low, high)
+
+        Returns:
+            Dict param_name -> sampled value.
+        """
+        sample = {}
+        for k, (low, high) in space.items():
+            if "phase" in k:
+                sample[k] = random.uniform(low, high)
+            else:
+                sample[k] = random.uniform(low, high)
+        return sample
+        pass
+
+    def fit(
+        self,
+        bundle: Any,
+        simulator: Simulation,
+        evaluator: Callable[[Simulation, FittedParams, Tuple[int, int]], Dict[str, Any]],
+        train_window: Tuple[int, int],
+        seed: int,
+        budget: int = 100,
+        artifacts_dir: Optional[str] = None,
+        params_adapter: Optional[ParamsAdapter] = None,
+    ) -> FittedParams:
+        """
+        Run random search over parameter space to minimize RMSE_aggregate.
+
+        Args:
+            bundle: Unused.
+            simulator: Simulation instance.
+            evaluator: Evaluator callable.
+            train_window: (start_idx, end_idx).
+            seed: Random seed.
+            budget: Number of trials.
+            artifacts_dir: Directory for trial artifacts.
+            params_adapter: Adapter to apply parameters.
+
+        Returns:
+            Best FittedParams found.
+        """
+        set_global_seed(seed)
+        art_dir = artifacts_dir or os.path.join(simulator.artifacts_dir, "calibration_random_search")
+        ensure_dir(art_dir)
+
+        space = self.search_space or self._default_search_space(simulator)
+        best_score = float("inf")
+        best_params: Optional[Dict[str, Any]] = None
+        best_metrics: Optional[Dict[str, Any]] = None
+
+        # Start from current parameters
+        base_vals = simulator.get_params()
+
+        for i in range(budget):
+            trial_dir = os.path.join(art_dir, f"trial_{i}")
+            ensure_dir(trial_dir)
+
+            cand = base_vals.copy()
+            cand.update(self._sample_params(space))
+            # Apply to simulator
+            warnings = simulator.set_params(cand)
+
+            # Build FittedParams snapshot for this trial (capture)
+            adapter = params_adapter or ParamsAdapter(simulator.param_registry, simulator.params_used_path)
+            fitted = adapter.capture(simulator)
+
+            # Evaluate
+            metrics = evaluator(simulator, fitted, train_window)
+            score = metrics.get("RMSE_aggregate", float("inf"))
+
+            # Save artifacts
+            save_json(adapter.capture(simulator).to_dict(), os.path.join(trial_dir, "params_applied.json"))
+            save_json(metrics, os.path.join(trial_dir, "metrics.json"))
+            if warnings:
+                save_json(warnings, os.path.join(trial_dir, "warnings.json"))
+
+            # Update best
+            if score < best_score:
+                best_score = score
+                best_params = cand.copy()
+                best_metrics = metrics
+
+        # Apply best and capture
+        if best_params is None:
+            best_params = base_vals.copy()
+        simulator.set_params(best_params)
+        adapter = params_adapter or ParamsAdapter(simulator.param_registry, simulator.params_used_path)
+        best_fitted = adapter.capture(simulator)
+        ensure_dir(os.path.join(art_dir, "best"))
+        save_json(best_fitted.to_dict(), os.path.join(art_dir, "best", "fitted_params.json"))
+        if best_metrics is not None:
+            save_json(best_metrics, os.path.join(art_dir, "best", "metrics.json"))
+        report = {
+            "budget": budget,
+            "best_rmse": best_score,
+        }
+        save_json(report, os.path.join(art_dir, "calibration_report.json"))
+        return best_fitted
+        pass
+
+
+class SNPECalibrator(Calibrator:
+    """
+    Simulation-Based Inference calibrator using SNPE from sbi library with graceful fallback.
+
+    FIXED: Added fallback to RandomSearch if torch/sbi unavailable, and created prior from registry bounds.
+    """
+):
+    def __init__(self, n_simulations: int = 500, max_epochs: int = 50, batch_size: int = 128):
+        """
+        Initialize SNPE calibrator.
+
+        Args:
+            n_simulations: Number of parameter-trajectory pairs.
+            max_epochs: Neural training epochs.
+            batch_size: Batch size for training.
+        """
+        self.n_simulations = int(n_simulations)
+        self.max_epochs = int(max_epochs)
+        self.batch_size = int(batch_size)
+        pass
+
+    def _try_imports(self):
+        """
+        Try to import torch and sbi; return modules or None.
+
+        Returns:
+            Tuple (torch, sbi_utils, NPE) or (None, None, None)
+        """
+        try:
+            import torch
+            from sbi import utils as sbi_utils  # type: ignore
+            from sbi.inference import SNPE as NPE  # type: ignore
+            return torch, sbi_utils, NPE
+        except Exception:
+            return None, None, None
+        pass
+
+    def _build_prior(self, simulator: Simulation, sbi_utils) -> Any:
+        """
+        Build uniform prior from registry bounds.
+
+        Args:
+            simulator: Simulation instance.
+            sbi_utils: sbi.utils module.
+
+        Returns:
+            prior object compatible with sbi.
+        """
+        import torch  # local import after checking
+        keys = [
+            "Decision.alpha", "Decision.gamma",
+            "Decision.theta_f", "Decision.theta_w", "Decision.theta_c",
+            "Decision.beta_r", "Decision.beta_i",
+            "Info.phi_family", "Info.phi_work", "Info.phi_community",
+            "Info.lambda_broadcast_base", "Info.lambda_broadcast_factor_after", "Info.rho_info_decay",
+            "Decision.tau",
+        ]
+        mins = []
+        maxs = []
+        self._theta_keys = []
+        for k in keys:
+            d = simulator.param_registry.definitions.get(k)
+            if d is None:
+                continue
+            low, high = d.bounds
+            mins.append(float(low))
+            maxs.append(float(high))
+            self._theta_keys.append(k)
+        low_t = torch.tensor(mins, dtype=torch.float32)
+        high_t = torch.tensor(maxs, dtype=torch.float32)
+        prior = sbi_utils.BoxUniform(low=low_t, high=high_t)
+        return prior
+        pass
+
+    def _theta_to_params(self, theta: np.ndarray, simulator: Simulation) -> Dict[str, Any]:
+        """
+        Convert theta vector to parameter mapping.
+
+        Args:
+            theta: Parameter vector.
+            simulator: Simulation for context.
+
+        Returns:
+            Dict param_name -> value
+        """
+        mapping = {}
+        for i, k in enumerate(self._theta_keys):
+            mapping[k] = float(theta[i])
+        return mapping
+        pass
+
+    def fit(
+        self,
+        bundle: Any,
+        simulator: Simulation,
+        evaluator: Callable[[Simulation, FittedParams, Tuple[int, int]], Dict[str, Any]],
+        train_window: Tuple[int, int],
+        seed: int,
+        budget: int = 100,
+        artifacts_dir: Optional[str] = None,
+        params_adapter: Optional[ParamsAdapter] = None,
+    ) -> FittedParams:
+        """
+        Fit parameters using SNPE; fallback to random search if dependencies missing.
+
+        Args:
+            bundle: Unused.
+            simulator: Simulation instance.
+            evaluator: Evaluator callable.
+            train_window: (start_idx, end_idx) window.
+            seed: Seed.
+            budget: Max trials for fallback.
+            artifacts_dir: Output directory.
+            params_adapter: Adapter.
+
+        Returns:
+            FittedParams from posterior mean or fallback search.
+        """
+        set_global_seed(seed)
+        torch, sbi_utils, NPE = self._try_imports()
+        art_dir = artifacts_dir or os.path.join(simulator.artifacts_dir, "calibration_snpe")
+        ensure_dir(art_dir)
+
+        # Fallback if imports missing
+        if torch is None or sbi_utils is None or NPE is None:
+            rs = RandomSearchCalibrator()
+            return rs.fit(bundle, simulator, evaluator, train_window, seed, budget, art_dir, params_adapter)
+
+        # Build prior and simulate datasets
+        prior = self._build_prior(simulator, sbi_utils)
+
+        # Generate samples from prior and corresponding trajectories (summary: daily rates)
+        thetas = []
+        xs = []
+        for i in range(self.n_simulations):
+            theta = prior.sample((1,)).squeeze(0).detach().cpu().numpy()
+            thetas.append(theta)
+            mapping = self._theta_to_params(theta, simulator)
+            simulator.set_params(mapping)
+            # Run sim on training window
+            start_idx, end_idx = train_window
+            init_prev = simulator.obs_wearing_train[start_idx - 1, :] if start_idx > 0 else np.zeros_like(simulator.obs_wearing_train[0, :])
+            simulator.run(start_idx, end_idx, init_prev_states=init_prev)
+            # Summary statistic: daily mean rates over window
+            sim_states = simulator.outputs["states"]
+            xs.append(sim_states.mean(axis=1))
+
+        thetas_np = np.array(thetas, dtype=np.float32)
+        xs_np = np.array(xs, dtype=np.float32)
+        # Convert to tensors
+        theta_tensor = torch.tensor(thetas_np, dtype=torch.float32)
+        x_tensor = torch.tensor(xs_np, dtype=torch.float32)
+
+        # Train SNPE
+        inference = NPE(prior=prior, device='cpu')
+        inference = inference.append_simulations(theta_tensor, x_tensor)
+        density_estimator = inference.train(training_batch_size=self.batch_size, max_num_epochs=self.max_epochs, show_train_summary=False)
+        posterior = inference.build_posterior(density_estimator)
+
+        # Mock observation: use observed daily mean rates on training window
+        obs = simulator.obs_wearing_train[train_window[0]:train_window[1], :].mean(axis=1)
+        obs_tensor = torch.tensor(obs.reshape(1, -1), dtype=torch.float32)
+        posterior_samples = posterior.sample((200,), x=obs_tensor).detach().cpu().numpy()
+
+        # Evaluate posterior mean
+        theta_mean = posterior_samples.mean(axis=0)
+        mapping = self._theta_to_params(theta_mean, simulator)
+        simulator.set_params(mapping)
+        adapter = params_adapter or ParamsAdapter(simulator.param_registry, simulator.params_used_path)
+        fitted = adapter.capture(simulator)
+        save_json(fitted.to_dict(), os.path.join(art_dir, "fitted_params.json"))
+        return fitted
+        pass
+
+
+CALIBRATOR_REGISTRY = {
+    "logit_head": LogitHeadCalibrator,
+    "random_search": RandomSearchCalibrator,
+    "snpe": SNPECalibrator,
+}
+
+
+def get_calibrator(name: str, config_path: Optional[str] = None, **kwargs) -> Calibrator:
+    """
+    Get calibrator by name, optionally loading configuration from JSON.
+
+    Args:
+        name: Calibrator key in registry.
+        config_path: Optional JSON file path with constructor kwargs.
+        kwargs: Additional constructor kwargs.
+
+    Returns:
+        Calibrator instance.
+
+    Raises:
+        ValueError: If name unknown or config invalid.
+    """
+    if name not in CALIBRATOR_REGISTRY:
+        raise ValueError(f"Unknown calibrator: {name}")
+    ctor_kwargs = {}
+    if config_path and os.path.exists(config_path):
+        try:
+            cfg = load_json(config_path)
+            if isinstance(cfg, dict):
+                ctor_kwargs.update(cfg)
+        except Exception:
+            pass
+    ctor_kwargs.update(kwargs)
+    return CALIBRATOR_REGISTRY[name](**ctor_kwargs)
+    pass
+
+
+def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:
+    """
+    Apply parameters, run simulation on window, and return metrics.
+
+    Args:
+        simulator: Simulation instance.
+        params: Fitted parameters to apply.
+        window: (start_idx, end_idx) days to simulate.
+
+    Returns:
+        Metrics dict containing at least:
+            'RMSE_aggregate', 'MAE_aggregate', 'Brier', 'TransitionFit' (dict)
+    """
+    # Apply parameters using adapter
+    adapter = ParamsAdapter(simulator.param_registry, simulator.params_used_path)
+    _ = adapter.apply(simulator, params)
+
+    # Run simulation
+    start_idx, end_idx = window
+    init_prev = simulator.obs_wearing_train[start_idx - 1, :] if start_idx > 0 else np.zeros_like(simulator.obs_wearing_train[0, :])
+    simulator.run(start_idx, end_idx, init_prev_states=init_prev)
+
+    # Evaluate using training data window
+    metrics = simulator.evaluate(simulator.obs_wearing_train, start_idx, end_idx)
+    # Save to artifacts
+    ensure_dir(os.path.join(simulator.artifacts_dir, "results"))
+    save_json(metrics, os.path.join(simulator.artifacts_dir, "results", f"metrics_{start_idx}_{end_idx}.json"))
+    return metrics
+    pass
+
+
+def temporal_holdout_split(days: List[int], ratio: float = 0.8) -> Tuple[List[int], List[int]]:
+    """
+    Split a list of days into training and validation subsets.
+
+    Args:
+        days: Sorted list of unique day indices.
+        ratio: Fraction for training.
+
+    Returns:
+        Tuple (days_train, days_val)
+
+    Raises:
+        ValueError: If no validation days remain.
+    """
+    if not days:
+        raise ValueError("Empty days list for temporal split.")
+    split_idx = max(1, int(math.floor(ratio * len(days))))
+    days_train = days[:split_idx]
+    days_val = days[split_idx:]
+    if not days_val:
+        raise ValueError("No validation days available after temporal split.")
+    return days_train, days_val
+    pass
+
+
+def parse_cli(argv: List[str]) -> argparse.Namespace:
+    """
+    Parse command-line arguments.
+
+    Args:
+        argv: List of CLI arguments.
+
+    Returns:
+        Namespace with parsed values.
+    """
+    p = argparse.ArgumentParser(description="Mask Adoption Simulator with Calibration")
+    p.add_argument("--param-file", type=str, default=None, help="JSON file with parameter overrides")
+    p.add_argument("--set", action="append", default=[], help="Parameter override key=value (repeatable)")
+    p.add_argument("--calibrator", type=str, default="random_search", choices=list(CALIBRATOR_REGISTRY.keys()), help="Calibrator to use")
+    p.add_argument("--budget", type=int, default=50, help="Calibration budget (iterations)")
+    p.add_argument("--calib-window", type=str, default=None, help="Training window 'start:end' indices")
+    p.add_argument("--seed", type=int, default=42, help="Random seed")
+    p.add_argument("--artifacts-dir", type=str, default=None, help="Artifacts output directory")
+    p.add_argument("--calibrator-config", type=str, default=None, help="Path to calibrator config JSON")
+    return p.parse_args(argv)
+    pass
+
+
+def main() -> None:
+    """
+    Orchestrate the simulation workflow:
+        - Load data
+        - Build modules
+        - Apply parameters from file and CLI overrides
+        - Temporal holdout split (strict)
+        - Calibrate with selected calibrator
+        - Evaluate on validation and test windows
+        - Save artifacts and visualization
+
+    FIXED:
+        - Implemented temporal split strictly by days.
+        - Improved agent behavior via utility-based decision-making.
+        - Added detailed validation metrics (Wasserstein, transitions).
+        - Enhanced error handling for missing files and edge cases.
+        - Introduced time-dependent activity module to match real data peaks.
+    """
+    args = parse_cli(sys.argv[1:])
+    cfg = SimulationConfig(seed=args.seed)
+    set_global_seed(cfg.seed)
+
+    # Prepare artifacts directory
+    artifacts_dir = args.artifacts_dir or os.path.join(PROJECT_ROOT, "artifacts")
+    ensure_dir(artifacts_dir)
+
+    # Initialize simulation
+    sim = Simulation(data_dir=DATA_DIR, cfg=cfg, artifacts_dir=artifacts_dir)
+    try:
+        sim.load_data()
+    except Exception as e:
+        print(f"Error during data loading: {e}")
+        return
+
+    # Build modules
+    sim.build_modules()
+
+    # Apply parameter file overrides
+    param_overrides: Dict[str, Any] = {}
+    if args.param_file and os.path.exists(args.param_file):
+        try:
+            param_overrides.update(load_json(args.param_file))
+        except Exception as e:
+            print(f"Warning: Failed to load param file '{args.param_file}': {e}")
+
+    # Apply CLI --set overrides
+    for s in args._get_kwargs():
+        pass  # placeholder for future args processing if needed
+    overrides_from_cli: Dict[str, Any] = {}
+    for s in args.__dict__.get("set", []) or []:
+        try:
+            k, v = parse_kv_override(s)
+            # Attempt numeric cast
+            if v.replace(".", "", 1).isdigit() or (v.startswith("-") and v[1:].replace(".", "", 1).isdigit()):
+                if "." in v:
+                    overrides_from_cli[k] = float(v)
+                else:
+                    overrides_from_cli[k] = int(v)
+            else:
+                if v.lower() in ("true", "false"):
+                    overrides_from_cli[k] = (v.lower() == "true")
+                else:
+                    overrides_from_cli[k] = v
+        except Exception as e:
+            print(f"Warning: ignoring override '{s}': {e}")
+
+    all_overrides = {}
+    all_overrides.update(param_overrides)
+    all_overrides.update(overrides_from_cli)
+    warnings = sim.set_params(all_overrides)
+    if warnings:
+        save_json(warnings, os.path.join(artifacts_dir, "override_warnings.json"))
+
+    # Determine training and validation windows strictly by days
+    days_all = sim.obs_days_train
+    days_train, days_val = temporal_holdout_split(days_all, ratio=0.8)
+    train_start = days_all.index(days_train[0])
+    train_end = days_all.index(days_train[-1]) + 1
+    # Validation window indices relative to train arrays
+    val_start = days_all.index(days_val[0])
+    val_end = days_all.index(days_val[-1]) + 1
+
+    if args.calib_window:
+        try:
+            s, e = args.calib_window.split(":")
+            train_start = int(s)
+            train_end = int(e)
+        except Exception:
+            print("Warning: invalid --calib-window, using default 80/20 split.")
+
+    # Prepare calibrator
+    calibrator = get_calibrator(args.calibrator, config_path=args.calibrator_config)
+    params_adapter = ParamsAdapter(sim.param_registry, sim.params_used_path)
+
+    # Bundle for calibrator (if needed)
+    bundle = {
+        "obs_wearing_train": sim.obs_wearing_train,
+        "obs_received_train": sim.obs_received_train,
+        "neighbors": sim.neighbors,
+        "risk": sim.risk,
+        "age_oh": sim.age_oh,
+        "occ_oh": sim.occ_oh,
+        "cfg": asdict(cfg),
+    }
+
+    # Calibrate
+    fitted_params = calibrator.fit(
+        bundle=bundle,
+        simulator=sim,
+        evaluator=evaluate_params,
+        train_window=(train_start, train_end),
+        seed=cfg.seed,
+        budget=args.budget,
+        artifacts_dir=os.path.join(artifacts_dir, f"calibration_{args.calibrator}"),
+        params_adapter=params_adapter,
+    )
+
+    # Evaluate on validation window
+    init_prev_val = sim.obs_wearing_train[val_start - 1, :] if val_start > 0 else np.zeros_like(sim.obs_wearing_train[0, :])
+    sim.run(val_start, val_end, init_prev_states=init_prev_val)
+    metrics_val = sim.evaluate(sim.obs_wearing_train, val_start, val_end)
+    ensure_dir(os.path.join(artifacts_dir, "results"))
+    save_json(metrics_val, os.path.join(artifacts_dir, "results", "metrics_validation.json"))
+
+    # Evaluate on test data if available
+    if sim.obs_wearing_test is not None:
+        # Use first day as init
+        sim.run(0, sim.obs_wearing_test.shape[0], init_prev_states=sim.obs_wearing_test[0, :])
+        metrics_test = sim.evaluate(sim.obs_wearing_test, 0, sim.obs_wearing_test.shape[0])
+        save_json(metrics_test, os.path.join(artifacts_dir, "results", "metrics_test.json"))
+
+    # Save final fitted params and simulation outputs
+    save_json(fitted_params.to_dict(), os.path.join(artifacts_dir, "fitted_params.json"))
+    sim.save_all_io(os.path.join(artifacts_dir, "io"))
+    # Visualization
+    sim.visualize(os.path.join(artifacts_dir, "figs", "validation_plot.png"), observed=sim.obs_wearing_train, start_idx=val_start, end_idx=val_end)
+
+    # Persist final parameters used
+    save_json(sim.param_registry.to_json(), os.path.join(artifacts_dir, "parameters_used.json"))
+
+    # Print summary
+    print("Calibration and evaluation complete.")
+    print(f"Validation RMSE: {metrics_val.get('RMSE_aggregate'):.4f}, MAE: {metrics_val.get('MAE_aggregate'):.4f}")
+    pass
+
+
+# Execute main for both direct execution and sandbox wrapper invocation
+main()

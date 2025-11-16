@@ -1,0 +1,196 @@
+{
+  "summary": "The simulation runs end-to-end and produces basic metrics, but key issues reduce fidelity and hinder evaluation. The most critical problems are: (1) evaluation is not aligned with the prediction window (days 30\u201339); (2) early convergence stopping can truncate the forecast period; (3) behavioral validation metrics (Rb, churn) are not compared against observed data even though train_data.csv contains microstates; and (4) new adopters are counted via first_adoption_day, which misses re-adoptions after dropouts. Addressing these will substantially improve correctness, interpretability, and alignment with the task specification.",
+  "critical_issues": [
+    {
+      "issue": "Evaluation window mismatch with task (predictions should be evaluated over days 30\u201339, but RMSE is computed over whatever overlap exists with train_data.csv)",
+      "impact": "Misleading accuracy assessment; RMSE of ~0.31 likely reflects in-sample training window (days 0\u201329) rather than the holdout forecast window (days 30\u201339).",
+      "solution": "Store observed adoption by explicit day index; evaluate RMSE/TimeTo50 strictly within [prediction_start_day, prediction_end_day] when observed data exists; otherwise skip or report that holdout observations are missing. Also export the forecast series for days 30\u201339.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Early termination before completing the prediction window due to convergence check",
+      "impact": "Forecast horizon may be cut short, producing incomplete or biased forecasts for days 30\u201339.",
+      "solution": "Gate convergence termination so it cannot trigger before the prediction_end_day has been simulated.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Behavioral validation metrics Rb and churn are NaN because observed counterparts are not computed from microdata",
+      "impact": "Lack of validation on contagion strength and retention dynamics; reduces confidence in model mechanisms.",
+      "solution": "Compute observed Rb and churn directly from train_data.csv by differencing per-agent wearing_mask between consecutive days; then compare with simulated series over the overlapping window.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "New adopters are counted via first_adoption_day only",
+      "impact": "Re-adoptions after dropouts are not counted as new adoptions; Rb and churn metrics are distorted.",
+      "solution": "Return and aggregate adopted_today events from the adoption module (including scheduled activations and immediate adoptions) rather than relying on first_adoption_day.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Observed series stored as an unlabeled list loses explicit day indices",
+      "impact": "Fragile alignment between observed and simulated days; breaks if the observed days do not start at 0 or are not contiguous.",
+      "solution": "Store observed adoption as a dict day->rate to align precisely by day; use these day keys for evaluation.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Prediction/evaluation alignment",
+      "current_approach": "Evaluate RMSE over the overlapping length of observed and simulated series without enforcing [30\u201339].",
+      "suggested_approach": "Respect MODEL_PLAN prediction_start_day and prediction_end_day; compute RMSE and timing error within this window only if observed data for those days exist; else notify and just export predictions.",
+      "expected_benefit": "Correct evaluation against the task\u2019s forecast window; avoids leakage from training period."
+    },
+    {
+      "aspect": "Early-stop convergence",
+      "current_approach": "Terminate when adoption rate stabilizes even if the forecast window is not reached.",
+      "suggested_approach": "Disable convergence-based early stopping until after prediction_end_day.",
+      "expected_benefit": "Ensures full prediction horizon is simulated; avoids truncated outputs."
+    },
+    {
+      "aspect": "Behavior contagion and churn validation",
+      "current_approach": "Rb_MAE and Churn_MAE return NaN.",
+      "suggested_approach": "Compute observed Rb and churn from train_data.csv using per-agent day-to-day transitions; compare to simulated series with MAE over overlapping days.",
+      "expected_benefit": "Improved mechanistic validation and calibration of complex contagion and retention dynamics."
+    },
+    {
+      "aspect": "Counting new adoptions",
+      "current_approach": "Use first_adoption_day to count new adopters, missing re-adoptions.",
+      "suggested_approach": "Track adopted_today events and pass them to the aggregator for accurate new adopter counts.",
+      "expected_benefit": "More accurate Rb and churn metrics; better reflection of dynamics with drop/re-adopt."
+    },
+    {
+      "aspect": "Assortativity and inequality diagnostics",
+      "current_approach": "Only difference across groups; gini_coefficient unused.",
+      "suggested_approach": "Compute both difference and Gini for group inequality; report both for richer diagnostics.",
+      "expected_benefit": "Better understanding of heterogeneity in adoption by group."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py (Simulation.evaluate and initialize)",
+      "modification": "Store observed adoption as day->rate dict; evaluate only over [prediction_start_day, prediction_end_day]; compute observed Rb/churn from train_data and compare to simulated series.",
+      "reason": "Aligns evaluation with the forecast window and adds key behavioral validation metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (Simulation.run)",
+      "modification": "Gate convergence-based early termination so it cannot fire before prediction_end_day is simulated.",
+      "reason": "Prevents premature termination that would truncate the forecast period.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (SocialInfluenceAdoption.step, Simulation.step, AdoptionAggregator.step)",
+      "modification": "Return adopted_today events from the adoption module and pass them to the aggregator; count new adopters from events rather than first_adoption_day.",
+      "reason": "Correctly counts re-adoptions and supports accurate Rb/churn computation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (Simulation.save_results)",
+      "modification": "Also export a filtered CSV for predictions in days 30\u201339 (or configured window).",
+      "reason": "Provides direct artifact for the prediction period and downstream scoring.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py (AdoptionAggregator.results_dataframe/finalize)",
+      "modification": "Add Gini inequality alongside difference; include policy_effect_size in results for diagnostics.",
+      "reason": "Richer diagnostics to calibrate subgroup and policy effects.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "RMSE (days 30\u201339)",
+      "current_gap": "RMSE computed over training days rather than forecast window.",
+      "suggestion": "Evaluate strictly on [prediction_start_day, prediction_end_day]; if no observed data available for that window, clearly indicate and focus on exporting predictions."
+    },
+    {
+      "metric": "Rb (behavior reproduction number)",
+      "current_gap": "NaN; no observed benchmark.",
+      "suggestion": "Compute observed Rb from train_data by differencing per-agent mask states; calibrate b1/b2 (neighbors and quadratic terms) to match early Rb."
+    },
+    {
+      "metric": "Churn rate",
+      "current_gap": "NaN; no observed benchmark.",
+      "suggestion": "Compute observed dropouts via (mask_t=0 & mask_{t-1}=1); calibrate drop_logit_intercept and betas to match observed churn levels."
+    },
+    {
+      "metric": "Policy effect size",
+      "current_gap": "Computed internally but not reported for validation.",
+      "suggestion": "Export policy_effect_size and compare pre/post slopes around Day 10 to observed trend change in train_data."
+    }
+  ],
+  "prioritized_actions": [
+    "Align evaluation with the prediction window (days 30\u201339) and gate early termination until after day 39.",
+    "Compute observed Rb and churn from train_data and compare to simulated series (MAE).",
+    "Track adopted_today events and use them for Rb and churn computation; stop relying on first_adoption_day for event counts.",
+    "Export a separate predictions CSV for the forecast window; include adoption_rate and Rb/churn slices.",
+    "Add Gini inequality and policy_effect_size to results for diagnostics; calibrate parameters to reduce RMSE and timing error."
+  ],
+  "additional_comments": "Overall design and modularization are solid. The multiplex network, policy/messaging, and logistic adoption with quadratic terms provide a good base. Most remaining work is in evaluation alignment, event counting, and adding observed behavioral metrics for Rb and churn to calibrate model dynamics. Keep the main() call at the end for sandbox compatibility.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "        if ts is not None and not ts.empty:\n            # Compute mean wearing_mask per day across all agents in ts\n            series = ts.groupby(\"day\")[\"wearing_mask\"].mean().sort_index().tolist()\n            self.observed_adoption_series = series",
+      "after": "        if ts is not None and not ts.empty:\n            # Compute observed adoption by explicit day index\n            obs_series_by_day = ts.groupby(\"day\")[\"wearing_mask\"].mean().sort_index()\n            self.observed_adoption_series = obs_series_by_day.tolist()  # keep legacy\n            self.observed_adoption_series_by_day = obs_series_by_day.to_dict()  # robust day->rate map",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        for step_idx in range(max_steps):\n            self.step()\n            # Convergence check on recorded adoption rate series\n            if self.aggregator and self.environment.current_day % record_interval == 0:\n                if self.environment.terminate_if_converged(self.aggregator.adoption_rate_daily, delta_threshold, lookback):\n                    break",
+      "after": "        pred_end = int(self.params.get(\"prediction_end_day\", max_steps - 1))\n        for step_idx in range(max_steps):\n            self.step()\n            # Convergence check only after prediction window is fully simulated\n            if self.aggregator and (self.environment.current_day % record_interval == 0):\n                # environment.current_day was incremented at end of step; last simulated day = current_day - 1\n                last_simulated_day = self.environment.current_day - 1\n                if last_simulated_day >= pred_end:\n                    if self.environment.terminate_if_converged(self.aggregator.adoption_rate_daily, delta_threshold, lookback):\n                        break",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def evaluate(self) -> Dict[str, float]:\n        ...\n        for metric in metrics_list:\n            if metric == \"RMSE\":\n                if observed:\n                    # Use overlapping range\n                    L = min(len(observed), len(sim_adoption))\n                    y_true = observed[:L]\n                    y_pred = sim_adoption[:L]\n                    results[\"RMSE\"] = rmse(y_true, y_pred)\n                else:\n                    results[\"RMSE\"] = float(\"nan\")",
+      "after": "    def evaluate(self) -> Dict[str, float]:\n        ...\n        # Helper: compute observed Rb and churn from microdata if available\n        def compute_observed_rb_churn(ts: pd.DataFrame) -> Tuple[List[float], List[float]]:\n            if ts is None or ts.empty:\n                return [], []\n            days_sorted = sorted(ts[\"day\"].unique())\n            # Build wide table day x agent for wearing_mask\n            pivot = ts.pivot_table(index=\"day\", columns=\"agent_id\", values=\"wearing_mask\", aggfunc=\"max\").fillna(False).astype(bool)\n            rb_series_obs, churn_series_obs = [], []\n            for idx in range(1, len(days_sorted)):\n                d_prev, d_curr = days_sorted[idx-1], days_sorted[idx]\n                prev = pivot.loc[d_prev].values\n                curr = pivot.loc[d_curr].values\n                active_prev = int(prev.sum())\n                new_adopt = int(((~prev) & curr).sum())\n                drops = int((prev & (~curr)).sum())\n                rb = (new_adopt / active_prev) if active_prev > 0 else 0.0\n                churn = (drops / active_prev) if active_prev > 0 else 0.0\n                rb_series_obs.append(rb)\n                churn_series_obs.append(churn)\n            return rb_series_obs, churn_series_obs\n        rb_obs, churn_obs = compute_observed_rb_churn(self.timeseries_df)\n        # Build day-indexed observed adoption if available\n        obs_by_day = getattr(self, \"observed_adoption_series_by_day\", None)\n        start = int(self.params.get(\"prediction_start_day\", 30))\n        end = int(self.params.get(\"prediction_end_day\", 39))\n        for metric in metrics_list:\n            if metric == \"RMSE\":\n                if obs_by_day:\n                    days = [d for d in range(start, end + 1) if d < len(sim_adoption) and d in obs_by_day]\n                    if days:\n                        y_true = [obs_by_day[d] for d in days]\n                        y_pred = [sim_adoption[d] for d in days]\n                        results[\"RMSE\"] = rmse(y_true, y_pred)\n                    else:\n                        results[\"RMSE\"] = float(\"nan\")\n                else:\n                    results[\"RMSE\"] = float(\"nan\")\n            elif metric == \"TimeTo50Error\":\n                if obs_by_day:\n                    t_obs = next((d for d in range(start, end + 1) if obs_by_day.get(d, -1) >= 0.5), None)\n                    t_sim = next((d for d, v in enumerate(sim_adoption) if v >= 0.5), None)\n                    results[\"TimeTo50Error\"] = abs(int(t_obs) - int(t_sim)) if (t_obs is not None and t_sim is not None) else float(\"nan\")\n                else:\n                    results[\"TimeTo50Error\"] = float(\"nan\")\n            elif metric == \"Rb_MAE\":\n                # Compare over overlapping internal window length\n                if rb_obs and self.aggregator and self.aggregator.Rb_series:\n                    L = min(len(rb_obs), len(self.aggregator.Rb_series)-1)  # sim Rb starts after w window; be conservative\n                    results[\"Rb_MAE\"] = mae(rb_obs[:L], self.aggregator.Rb_series[1:1+L]) if L > 0 else float(\"nan\")\n                else:\n                    results[\"Rb_MAE\"] = float(\"nan\")\n            elif metric == \"Churn_MAE\":\n                if churn_obs and self.aggregator and self.aggregator.churn_rate_daily:\n                    L = min(len(churn_obs), len(self.aggregator.churn_rate_daily)-1)\n                    results[\"Churn_MAE\"] = mae(churn_obs[:L], self.aggregator.churn_rate_daily[1:1+L]) if L > 0 else float(\"nan\")\n                else:\n                    results[\"Churn_MAE\"] = float(\"nan\")\n            else:\n                results[metric] = float(\"nan\")",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def step(self, frac_overall: Dict[int, float], frac_by_layer: Dict[int, Dict[str, float]],\n             policy_active: bool, policy_odds_multiplier: float,\n             exposures_weighted_adopting: Dict[int, float], current_day: int) -> Dict[int, bool]:\n        ...\n        return adoption_flags",
+      "after": "    def step(self, frac_overall: Dict[int, float], frac_by_layer: Dict[int, Dict[str, float]],\n             policy_active: bool, policy_odds_multiplier: float,\n             exposures_weighted_adopting: Dict[int, float], current_day: int) -> Tuple[Dict[int, bool], List[int]]:\n        ...\n        adopted_today: List[int] = []\n        ...\n        for aid in to_activate:\n            agent = self.agents.get(aid)\n            if agent and not agent.adoption_state:\n                agent.wear_mask()\n                agent.first_adoption_day = current_day\n                adopted_today.append(aid)\n            self.scheduled.pop(aid, None)\n        ...\n            if self.adoption_function == \"logistic\":\n                p_adopt = sigmoid(logit)\n                if self.rng.random() < p_adopt:\n                    delay = lognormal_delay(self.delay_mu, self.delay_sigma, self.rng)\n                    if delay <= 0:\n                        agent.wear_mask()\n                        agent.first_adoption_day = current_day\n                        adopted_today.append(i)\n                    else:\n                        self.scheduled[i] = delay\n            else:\n                ...\n                    if delay <= 0:\n                        agent.wear_mask()\n                        agent.first_adoption_day = current_day\n                        adopted_today.append(i)\n                    else:\n                        self.scheduled[i] = delay\n        ...\n        return adoption_flags, adopted_today",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        adoption_flags = self.adoption_module.step(frac_overall, frac_by_layer, policy_active, policy_odds_multiplier,\n                                                   exposures_weighted_adopting, current_day)\n        \n        # Dropout\n        dropout_flags = self.dropout_module.step(frac_overall, policy_active, float(self.params.get(\"mandate_enforcement_strength\", 0.6)))\n        \n        # Rewiring\n        self.network_engine.rewire_step()\n        \n        # Aggregation\n        self.aggregator.step(current_day, dropout_flags)",
+      "after": "        adoption_flags, adopted_today = self.adoption_module.step(\n            frac_overall, frac_by_layer, policy_active, policy_odds_multiplier,\n            exposures_weighted_adopting, current_day)\n        \n        # Dropout\n        dropout_flags = self.dropout_module.step(frac_overall, policy_active, float(self.params.get(\"mandate_enforcement_strength\", 0.6)))\n        \n        # Rewiring\n        self.network_engine.rewire_step()\n        \n        # Aggregation (pass adopted_today count)\n        self.aggregator.step(current_day, dropout_flags, adopted_today_count=len(adopted_today))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def step(self, current_day: int, dropout_flags: Dict[int, bool]):\n        ...\n        # New adopters today\n        new_adopters = sum(1 for a in self.agents.values() if a.first_adoption_day == current_day)\n        self.new_adopters_history.append(new_adopters)",
+      "after": "    def step(self, current_day: int, dropout_flags: Dict[int, bool], adopted_today_count: int = 0):\n        ...\n        # New adopters today (event-based to capture re-adoptions)\n        new_adopters = int(adopted_today_count)\n        self.new_adopters_history.append(new_adopters)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def save_results(self, filename: str):\n        ...\n        df = self.aggregator.results_dataframe()\n        try:\n            df.to_csv(filename, index=False)\n            print(f\"Results saved to {filename}\")",
+      "after": "    def save_results(self, filename: str):\n        ...\n        df = self.aggregator.results_dataframe()\n        try:\n            df.to_csv(filename, index=False)\n            print(f\"Results saved to {filename}\")\n            # Also save predictions for configured forecast window\n            start = int(self.params.get(\"prediction_start_day\", 30))\n            end = int(self.params.get(\"prediction_end_day\", 39))\n            df_pred = df[(df[\"day\"] >= start) & (df[\"day\"] <= end)].copy()\n            pred_path = os.path.join(PROJECT_ROOT, f\"predictions_{start}_{end}.csv\")\n            df_pred.to_csv(pred_path, index=False)\n            print(f\"Predictions [{start}-{end}] saved to {pred_path}\")",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        self.inequality_daily.append(inequality)",
+      "after": "        self.inequality_daily.append(inequality)\n        # Optional: Gini inequality by group for richer diagnostics\n        try:\n            group_adopters = [sum(vals) for vals in groups.values()]\n            group_sizes = [len(vals) for vals in groups.values()]\n            group_rates_for_gini = [a / s if s > 0 else 0.0 for a, s in zip(group_adopters, group_sizes)]\n            self.inequality_gini_daily = getattr(self, 'inequality_gini_daily', [])\n            self.inequality_gini_daily.append(gini_coefficient(group_rates_for_gini))\n        except Exception:\n            pass",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "No recent code changes were recorded in the diff. The current issues stem from initial implementation choices around evaluation scope, event counting, and validation metrics.",
+    "positive_impacts": [
+      "Stable end-to-end execution with multiplex network, policy/messaging, and adoption/dropout modules.",
+      "Reasonable modular structure enabling targeted improvements."
+    ],
+    "negative_impacts": [
+      "Evaluation not aligned with forecast window; can misrepresent performance.",
+      "NaN for key behavioral validation metrics (Rb, churn).",
+      "New adopters counted via first_adoption_day, missing re-adoptions."
+    ],
+    "suggestions": [
+      "Anchor evaluation to the prediction window explicitly and export forecast artifacts.",
+      "Leverage train_data microstates to compute observed Rb and churn for better calibration.",
+      "Adopt event-based counting (adopted_today) to drive Rb and churn metrics."
+    ]
+  }
+}

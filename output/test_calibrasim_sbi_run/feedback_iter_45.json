@@ -1,0 +1,240 @@
+{
+  "summary": "The simulation has substantially improved structure (media, disease, location attendance, enforcement metrics), but it diverges from the provided specification in key areas. The most critical gaps are the lack of policy scheduling (mandates never end), missing evaluation metrics (and an absent evaluate() and runnable main()), ignoring several spec parameters (simulation_duration_days, risk signals, peer/media/authority weighting), and no adoption-by-group metrics. There are also reproducibility issues due to inconsistent RNG usage and performance issues from O(n) location lookups. Addressing policy scheduling, restoring evaluation/main, wiring risk signals and scheduled media campaigns, and completing required metrics should be the immediate focus.",
+  "critical_issues": [
+    {
+      "issue": "No policy schedule; mandates become active permanently once the day threshold is reached",
+      "impact": "Prevents modeling mandate end effects, sustained adoption post-policy, and realistic enforcement dynamics; biases adoption upward and invalidates several required metrics.",
+      "solution": "Implement PolicyAuthority.policy_schedule supporting multiple windows with start_day, end_day, level; in step(t), compute mandate_active and return enforcement_probability and penalty based on active window.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing evaluation pipeline and metrics (evaluate() removed) and main() is a no-op",
+      "impact": "No metrics are produced; the simulation cannot be run via the standard entrypoint, blocking automated verification and analysis.",
+      "solution": "Restore evaluate() to compute the required metrics and implement a runnable main() that parses cfg, runs the sim, calls evaluate(), and prints JSON; keep the direct call to main() at the file end as required.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Spec parameters are not honored (simulation_duration_days, time_step_days, homophily_strength, peer/media/authority influence weights, risk_signal_mode/time_series)",
+      "impact": "Model behavior cannot be configured to the spec, limiting validity and experiment reproducibility, and making results incomparable to expectations.",
+      "solution": "Normalize config keys in _normalize_config and use them in the logic: map simulation_duration_days/time_step_days to internal loop, incorporate peer_influence_strength/media_influence_strength/authority_influence_strength in Person.decide_wear_mask, and update risk_perception using risk_signal_time_series when risk_signal_mode is exogenous.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Adoption decision lacks perceived_mask_effectiveness and conformity threshold; no peer belief updates",
+      "impact": "Underrepresents mechanisms specified (perceived effectiveness, conformity), potentially mischaracterizing adoption dynamics and peer effects.",
+      "solution": "Extend Person with perceived_mask_effectiveness and trust_in_media; in decide_wear_mask include a conformity sigmoid around a configurable threshold and integrate perceived effectiveness. Add update_beliefs_from_peers that adjusts risk_perception and perceived effectiveness based on neighbor masks with tie weights.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Media campaigns not scheduled; misinformation intensity and targeting unused",
+      "impact": "Cannot assess campaign effects or compute campaign_lift; media effects are constant and not segment-targeted as specified.",
+      "solution": "Add campaign scheduling (start_day/end_day/intensity) to MediaOutlet, implement inactive vs. active phases, include misinformation_intensity, and optional targeting by ideology/age/income via audience filters.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Inconsistent RNG usage (global random used in multiple places)",
+      "impact": "Breaks reproducibility despite seeding; results vary across runs and embedded contexts.",
+      "solution": "Use the Simulation RNG consistently. Pass rng into methods (e.g., Person.decide_wear_mask) or store a shared rng on objects; replace random.random/choice/sample with rng-equivalents.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy scheduling and enforcement",
+      "current_approach": "Single mandate_day; once active, never ends; constant enforcement level.",
+      "suggested_approach": "Implement policy_schedule windows (start_day, end_day, level) and per-level enforcement_probability/penalty_cost; propagate to locations (mask_policy_enforced, enforcement_strictness).",
+      "expected_benefit": "Enables modeling of mandate lift effects, location-specific enforcement, and computation of sustained adoption post-policy and policy_compliance_rate."
+    },
+    {
+      "aspect": "Belief and decision dynamics",
+      "current_approach": "Decision based on social norm, risk, trust, habit, fatigue; no perceived_mask_effectiveness or conformity threshold; limited media updating.",
+      "suggested_approach": "Add perceived_mask_effectiveness; include a conformity sigmoid centered at a conformity_threshold; implement update_beliefs_from_peers and enhance media to adjust trust_in_media and perceived effectiveness.",
+      "expected_benefit": "More realistic adoption diffusion capturing thresholds and perceived utility; aligns with spec parameters."
+    },
+    {
+      "aspect": "Media campaigns and misinformation",
+      "current_approach": "Static MediaOutlet with constant bias/reach; no schedule; no targeting.",
+      "suggested_approach": "Add schedule and intensity; implement targeting by ideology/age/income; incorporate misinformation_intensity that reduces effect and can invert messages for susceptible segments.",
+      "expected_benefit": "Enables campaign_lift measurement and exploration of targeted messaging strategies/harm."
+    },
+    {
+      "aspect": "Risk signal integration",
+      "current_approach": "No use of risk_signal_mode/time_series.",
+      "suggested_approach": "When risk_signal_mode=='exogenous', update each person's risk_perception using risk_signal_to_perception_gain; optionally scale by trust_in_authority/trust_in_media.",
+      "expected_benefit": "Provides external driver for adoption; enables risk_correlation metric."
+    },
+    {
+      "aspect": "Network structure and homophily",
+      "current_approach": "BA or Watts-Strogatz without homophily; age/ideology not used to guide edges.",
+      "suggested_approach": "Post-process edges to increase within-group ties based on homophily_strength for ideology/education/age; or build assortative mixing blocks.",
+      "expected_benefit": "Better captures clustering/polarization and supports network_clustering_of_adoption metric."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Implement PolicyAuthority with policy_schedule and update Simulation to use it; set location mask_policy_enforced/enforcement_strictness during active windows.",
+      "reason": "Aligns with spec and enables key policy-related metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Restore evaluate() to compute required metrics: adoption_rate_by_group, time_to_50_percent, peak_adoption (value and day), sustained_adoption_post_policy, policy_compliance_rate, adoption_churn_rate, network_clustering_of_adoption, campaign_lift, risk_correlation.",
+      "reason": "Produces the outputs required by the specification.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement a runnable main() that reads config, runs Simulation, calls evaluate(), and prints JSON. Keep the direct main() call at end.",
+      "reason": "Restores end-to-end execution for automated pipelines.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Normalize config keys in _normalize_config: map simulation_duration_days, time_step_days, peer/media/authority influence strengths, risk_signal_* keys.",
+      "reason": "Ensures configuration parameters from spec are honored.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use the simulation RNG everywhere (replace random.random/choice/sample with rng). Pass rng into Person.decide_wear_mask and DiseaseProcess._rng_sample_without_replacement.",
+      "reason": "Ensures reproducibility.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add a location index map for O(1) lookups: self.loc_index[type][id] = Location; use it in _host_contacts_and_transmissions.",
+      "reason": "Improves performance and simplifies enforcement lookups.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add perceived_mask_effectiveness and trust_in_media to Person; include conformity_threshold and weights (peer/media/authority) in decide_wear_mask; add peer belief update.",
+      "reason": "Aligns decision process with spec and enables parameter experiments.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Wire exogenous risk signal updates in Simulation.run before decisions; compute risk_correlation in evaluate().",
+      "reason": "Enables risk-driven dynamics and required metric.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "campaign_lift",
+      "current_gap": "No schedule or counterfactual for media; lift cannot be computed.",
+      "suggestion": "Add media_campaigns with intensity and schedule; compute lift via difference-in-differences against pre-trend or via a shadow run with campaigns disabled (seed-controlled)."
+    },
+    {
+      "metric": "risk_correlation",
+      "current_gap": "Risk signal not used; correlation meaningless.",
+      "suggestion": "Integrate risk_signal_time_series to update risk_perception daily; compute Pearson/Spearman correlation with adoption_rate_over_time."
+    },
+    {
+      "metric": "network_clustering_of_adoption",
+      "current_gap": "No clustering metric; network homophily unused.",
+      "suggestion": "Compute modularity or assortativity of mask adoption on the graph; optionally enable homophily-based rewiring to reflect group clustering."
+    },
+    {
+      "metric": "adoption_rate_by_group",
+      "current_gap": "No ideology attribute; limited to income deciles gini.",
+      "suggestion": "Add ideology and education_level attributes; segment adoption by age buckets, income deciles, and ideology bins."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement policy_schedule in PolicyAuthority and use it in Simulation (mandate windows, enforcement, penalties).",
+    "Restore evaluate() to compute required metrics and implement a runnable main().",
+    "Normalize config keys from spec (simulation_duration_days, time_step_days, influence strengths, risk_signal_*).",
+    "Integrate exogenous risk signals and compute risk_correlation.",
+    "Ensure deterministic RNG usage by replacing global random calls with the seeded rng.",
+    "Add media campaign scheduling and compute campaign_lift.",
+    "Add adoption churn, peak adoption (value/day), sustained_adoption_post_policy metrics.",
+    "Index locations for O(1) lookups to improve performance.",
+    "Extend Person with perceived_mask_effectiveness and trust_in_media; use conformity threshold in decisions."
+  ],
+  "additional_comments": "The recent iteration adds valuable components (media, disease, per-location adoption), but it simultaneously removed the evaluation pipeline and runnable main(), preventing end-to-end operation. Prioritize restoring these while aligning the policy and media components with the spec. Also, consider unit tests for policy schedule evaluation and metric computations to avoid regressions.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "class PolicyAuthority:\n    ...\n    mandate_day: int = 9999\n    enforcement_level: float = 0.0\n    fine_amount: float = 0.0\n    ...\n    def step(self, t: int) -> Dict[str, Any]:\n        mandate_active = bool(t >= int(self.mandate_day))\n        return {\n            \"mandate_active\": mandate_active,\n            \"enforcement_level\": float(self.enforcement_level),\n            \"fine_amount\": float(self.fine_amount),\n        }\n",
+      "after": "class PolicyAuthority:\n    jurisdiction: str = \"default\"\n    policy_schedule: List[Dict[str, Any]] = field(default_factory=list)\n    default_enforcement_probability: float = 0.0\n    default_penalty_cost: float = 0.0\n\n    def step(self, t: int) -> Dict[str, Any]:\n        active = None\n        for w in self.policy_schedule:\n            if int(w.get(\"start_day\", 10**9)) <= t <= int(w.get(\"end_day\", -1)):\n                active = w\n                break\n        if active:\n            level = active.get(\"level\", \"advisory\")\n            return {\n                \"mandate_active\": (level == \"mandate\"),\n                \"enforcement_level\": float(active.get(\"enforcement_probability\", self.default_enforcement_probability)),\n                \"fine_amount\": float(active.get(\"penalty_cost\", self.default_penalty_cost)),\n                \"policy_level\": level,\n            }\n        return {\n            \"mandate_active\": False,\n            \"enforcement_level\": float(self.default_enforcement_probability),\n            \"fine_amount\": float(self.default_penalty_cost),\n            \"policy_level\": \"none\",\n        }\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass\n...\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n",
+      "after": "def main():\n    import sys, json\n    raw = sys.stdin.read().strip()\n    cfg = json.loads(raw) if raw else {}\n    sim = Simulation(cfg)\n    series = sim.run()\n    metrics = sim.evaluate()\n    print(json.dumps({\"series\": series, \"metrics\": metrics}))\n\n# Execute main for both direct execution and sandbox wrapper invocation\nmain()\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _normalize_config(self) -> None:\n    cfg = self.cfg\n    # Map if old keys provided\n    if \"n_agents\" in cfg and \"population_size\" not in cfg:\n        cfg[\"population_size\"] = cfg[\"n_agents\"]\n    ...\n",
+      "after": "def _normalize_config(self) -> None:\n    cfg = self.cfg\n    # Map legacy keys\n    if \"n_agents\" in cfg and \"population_size\" not in cfg:\n        cfg[\"population_size\"] = cfg[\"n_agents\"]\n    if \"network_type\" in cfg and \"network_topology\" not in cfg:\n        cfg[\"network_topology\"] = cfg[\"network_type\"]\n    if \"avg_degree\" in cfg and \"average_degree\" not in cfg:\n        cfg[\"average_degree\"] = cfg[\"avg_degree\"]\n    # Spec-compliant keys\n    if \"simulation_duration_days\" in cfg and \"simulation_days\" not in cfg:\n        cfg[\"simulation_days\"] = cfg[\"simulation_duration_days\"]\n    if \"time_step_days\" not in cfg:\n        cfg[\"time_step_days\"] = 1\n    # Influence strengths\n    cfg.setdefault(\"peer_influence_strength\", 0.5)\n    cfg.setdefault(\"media_influence_strength\", 0.3)\n    cfg.setdefault(\"authority_influence_strength\", 0.4)\n    # Risk signal defaults\n    cfg.setdefault(\"risk_signal_mode\", \"exogenous\")\n    cfg.setdefault(\"risk_signal_time_series\", [])\n    cfg.setdefault(\"risk_signal_to_perception_gain\", 0.6)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class MediaOutlet:\n    message_bias: float = 0.5\n    misinformation_rate: float = 0.1\n    reach: float = 0.5\n    credibility: float = 0.7\n\n    def broadcast(self, people: List[Person], media_effect_weight: float, rng: random.Random) -> None:\n        for p in people:\n            if rng.random() < self.reach:\n                delta_risk = media_effect_weight * self.credibility * (1.0 - self.misinformation_rate) * self.message_bias\n                delta_trust = 0.5 * media_effect_weight * self.credibility * (1.0 - 2.0 * self.misinformation_rate)\n                p.risk_perception = clip01(p.risk_perception + delta_risk)\n                p.trust_in_authority = clip01(p.trust_in_authority + delta_trust)\n",
+      "after": "class MediaOutlet:\n    id: int = 0\n    message_bias: float = 0.5\n    misinformation_rate: float = 0.1\n    reach: float = 0.5\n    credibility: float = 0.7\n    schedule: List[Dict[str, Any]] = field(default_factory=list)\n\n    def active_intensity(self, t: int) -> float:\n        for w in self.schedule:\n            if int(w.get(\"start_day\", 10**9)) <= t <= int(w.get(\"end_day\", -1)):\n                return float(w.get(\"intensity\", 1.0))\n        return 0.0\n\n    def broadcast(self, people: List[Person], media_effect_weight: float, rng: random.Random, t: int) -> None:\n        intensity = self.active_intensity(t)\n        if intensity <= 0.0:\n            return\n        for p in people:\n            if rng.random() < self.reach * intensity:\n                eff = media_effect_weight * self.credibility * intensity\n                delta_risk = eff * (1.0 - self.misinformation_rate) * self.message_bias\n                delta_trust = 0.5 * eff * (1.0 - 2.0 * self.misinformation_rate)\n                p.risk_perception = clip01(p.risk_perception + delta_risk)\n                p.trust_in_authority = clip01(p.trust_in_authority + delta_trust)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "for outlet in self.media_outlets:\n    outlet.broadcast(self.people, media_effect_weight=media_effect_weight, rng=self.rng)\n",
+      "after": "for outlet in self.media_outlets:\n    outlet.broadcast(self.people, media_effect_weight=media_effect_weight, rng=self.rng, t=t)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _host_contacts_and_transmissions(...):\n    ...\n    for loc_id, attendees in locs.items():\n        allowed = []\n        loc_enf = 0.0\n        if self.locations_by_type.get(ltype):\n            for loc in self.locations_by_type[ltype]:\n                if loc.id == loc_id:\n                    loc_enf = float(loc.enforcement_level)\n                    break\n        ...\n        b = random.choice(attendees)\n",
+      "after": "def _build_location_index(self) -> None:\n    self.loc_index = {t: {loc.id: loc for loc in locs} for t, locs in self.locations_by_type.items()}\n\n# Call in __init__ after _init_locations()\nself._build_location_index()\n\n# In _host_contacts_and_transmissions\nloc_enf = float(self.loc_index.get(ltype, {}).get(loc_id, Location()).enforcement_level)\n...\nb = self.rng.choice(attendees) if hasattr(self.rng, 'choice') else attendees[int(self.rng.random()*len(attendees))]\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def run(self) -> Dict[str, List[float]]:\n    days = int(self.cfg.get(\"simulation_days\", 120))\n    ...\n    for t in range(1, days + 1):\n        signals = self.policy.step(t)\n        ...\n",
+      "after": "def run(self) -> Dict[str, List[float]]:\n    days = int(self.cfg.get(\"simulation_days\", 120))\n    step_days = int(self.cfg.get(\"time_step_days\", 1))\n    ...\n    risk_series = list(self.cfg.get(\"risk_signal_time_series\", []))\n    risk_gain = float(self.cfg.get(\"risk_signal_to_perception_gain\", 0.6))\n    for t in range(1, days + 1, step_days):\n        # Exogenous risk signal update\n        if self.cfg.get(\"risk_signal_mode\", \"exogenous\") == \"exogenous\" and risk_series:\n            rs = risk_series[min(t-1, len(risk_series)-1)]\n            for p in self.people:\n                p.risk_perception = clip01(p.risk_perception + risk_gain * rs * (0.5 + 0.5*p.trust_in_authority))\n        signals = self.policy.step(t)\n        ...\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def run(self) -> Dict[str, List[float]]:\n    ...\n    for p in self.people:\n        sn = self._neighbor_mask_norm(p.id, prev_states)\n        hn = self._household_mask_norm(p.id, prev_states)\n        p.decide_wear_mask(\n            social_norm=sn,\n            mandate_active=mandate_active,\n            enforcement_level=enforcement_level,\n            household_norm=hn,\n            household_weight=household_weight,\n        )\n        if mandate_active and not p.is_wearing_mask:\n            if random.random() < enforcement_level:\n                ...\n",
+      "after": "def run(self) -> Dict[str, List[float]]:\n    ...\n    for p in self.people:\n        sn = self._neighbor_mask_norm(p.id, prev_states)\n        hn = self._household_mask_norm(p.id, prev_states)\n        p.decide_wear_mask(\n            social_norm=sn,\n            mandate_active=mandate_active,\n            enforcement_level=enforcement_level,\n            household_norm=hn,\n            household_weight=household_weight,\n            rng=self.rng,\n            peer_w=float(self.cfg.get(\"peer_influence_strength\", 0.5)),\n            media_w=float(self.cfg.get(\"media_influence_strength\", 0.3)),\n            authority_w=float(self.cfg.get(\"authority_influence_strength\", 0.4)),\n            conformity_threshold=float(self.cfg.get(\"conformity_threshold\", 0.1)),\n        )\n        if mandate_active and not p.is_wearing_mask and self.rng.random() < enforcement_level:\n            ...\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def decide_wear_mask(self, social_norm: float, mandate_active: bool, enforcement_level: float, household_norm: float, household_weight: float) -> None:\n    ...\n    p = min(0.7, logistic(logit)) if self.stubborn else logistic(logit)\n    self.is_wearing_mask = (self.mask_owned_count > 0) and (random.random() < p)\n",
+      "after": "def decide_wear_mask(self, social_norm: float, mandate_active: bool, enforcement_level: float, household_norm: float, household_weight: float, rng: random.Random, peer_w: float, media_w: float, authority_w: float, conformity_threshold: float) -> None:\n    base = -2.0\n    combined_social = (1.0 - household_weight) * social_norm + household_weight * household_norm\n    conformity = 2.0 * (combined_social - conformity_threshold)\n    logit = (\n        base\n        + 2.0 * peer_w * self.social_influence_susceptibility * conformity\n        + 1.0 * media_w * self.risk_perception\n        + 0.6 * authority_w * self.trust_in_authority\n        + 0.8 * self.perceived_mask_effectiveness\n        + 1.2 * self.habit_strength\n        - 2.0 * self.fatigue_level\n        - (0.8 if self.stubborn else 0.0)\n    )\n    if mandate_active:\n        logit += 1.5 * self.compliance_propensity + 2.0 * enforcement_level\n    p = min(0.7, logistic(logit)) if self.stubborn else logistic(logit)\n    self.is_wearing_mask = (self.mask_owned_count > 0) and (rng.random() < p)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate(self) -> Dict[str, Any]:\n    # Removed in current version\n",
+      "after": "def evaluate(self) -> Dict[str, Any]:\n    out: Dict[str, Any] = {}\n    ar = self.series.get(\"adoption_rate_over_time\", [])\n    out[\"adoption_rate_over_time\"] = ar\n    # time_to_50_percent\n    out[\"time_to_50_percent\"] = next((i for i, v in enumerate(ar) if v >= 0.5), -1)\n    # peak_adoption and day\n    if ar:\n        peak_val = max(ar)\n        peak_day = int(ar.index(peak_val))\n    else:\n        peak_val, peak_day = 0.0, -1\n    out[\"peak_adoption\"] = {\"value\": peak_val, \"day\": peak_day}\n    # sustained_adoption_post_policy: 30 days after last mandate ends\n    last_end = -1\n    if hasattr(self, 'policy') and getattr(self.policy, 'policy_schedule', []):\n        last_end = max(int(w.get('end_day', -1)) for w in self.policy.policy_schedule)\n    window = ar[last_end+1:last_end+31] if last_end >= 0 else []\n    out[\"sustained_adoption_post_policy\"] = float(np.mean(window)) if window else 0.0\n    # policy_compliance_rate: mean adoption during mandate windows\n    mandates = []\n    if hasattr(self, 'policy') and getattr(self.policy, 'policy_schedule', []):\n        windows = [(int(w['start_day']), int(w['end_day'])) for w in self.policy.policy_schedule if w.get('level')=='mandate']\n        for s,e in windows:\n            mandates.extend(list(range(s, min(e+1, len(ar)))))\n    out[\"policy_compliance_rate\"] = float(np.mean([ar[i] for i in mandates])) if mandates else 0.0\n    # adoption_churn_rate\n    if len(ar) > 1:\n        states_list = getattr(self, '_states_history', None)\n        if states_list:\n            churn = []\n            for d in range(1, len(states_list)):\n                prev, cur = states_list[d-1], states_list[d]\n                flips = sum(1 for i in range(len(cur)) if cur[i] != prev[i]) / float(len(cur))\n                churn.append(flips)\n            out[\"adoption_churn_rate\"] = float(np.mean(churn)) if churn else 0.0\n        else:\n            out[\"adoption_churn_rate\"] = 0.0\n    # adoption_rate_by_group (age and income deciles)\n    out[\"adoption_rate_by_group\"] = {\n        \"age\": self._adoption_by_age(),\n        \"income_decile\": self._adoption_by_income_decile()\n    }\n    # network_clustering_of_adoption (assortativity by adoption)\n    try:\n        nx.set_node_attributes(self.G, {i: int(self.people[i].is_wearing_mask) for i in range(len(self.people))}, 'adopt')\n        out[\"network_clustering_of_adoption\"] = float(nx.attribute_assortativity_coefficient(self.G, 'adopt'))\n    except Exception:\n        out[\"network_clustering_of_adoption\"] = 0.0\n    # campaign_lift (simple pre/post on active media days)\n    out[\"campaign_lift\"] = self._compute_campaign_lift(ar)\n    # risk_correlation\n    rs = self.cfg.get('risk_signal_time_series', [])\n    out[\"risk_correlation\"] = float(np.corrcoef(ar[:len(rs)], rs[:len(ar)])[0,1]) if rs and len(rs) >= 3 and len(ar) >= 3 else 0.0\n    return out\n",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent changes add substantive capabilities (media, disease process, attendance by location, neighbor caching, enforcement tracking), but they simultaneously remove the evaluation pipeline and runnable main(), increasing divergence from the spec. Some randomness remains non-deterministic, and policy scheduling is still absent.",
+    "positive_impacts": [
+      "Introduced MediaOutlet and hooked it into the daily loop.",
+      "Added DiseaseProcess with mask-modulated transmission and recorded disease metrics.",
+      "Implemented location attendance and per-location adoption rates.",
+      "Cached neighbor lists for performance and added household influence."
+    ],
+    "negative_impacts": [
+      "Removed evaluate(), visualize(), save_results(), and a runnable main(), blocking end-to-end execution and metrics.",
+      "PolicyAuthority still lacks schedule support, so mandates never end.",
+      "Randomness is still inconsistent (uses global random in several places).",
+      "Spec parameters (duration, risk signal, influence strengths) remain unused."
+    ],
+    "suggestions": [
+      "Restore and extend evaluate() to match the spec metrics; implement a runnable main().",
+      "Implement policy_schedule in PolicyAuthority and propagate enforcement and penalties to locations.",
+      "Normalize and honor key parameters (simulation_duration_days, time_step_days, risk_signal_*).",
+      "Standardize on the seeded RNG throughout; add unit tests for policy scheduling and metrics."
+    ]
+  }
+}

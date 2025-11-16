@@ -1,0 +1,1297 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based, network-embedded simulation of mask-wearing behavior under social influence, information dynamics, and policy interventions. People interact via a small-world social network and co-location at abstract location types (home, work, public). Perceived risk evolves from an environment prevalence signal with feedback from aggregate mask use. Public health policy and media messaging influence attitudes, compliance, and behavior over time.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age",
+        "household_id",
+        "income",
+        "education_level",
+        "risk_aversion",
+        "trust_in_authorities",
+        "misinformation_susceptibility",
+        "social_influence_susceptibility",
+        "perceived_risk",
+        "mask_attitude",
+        "mask_usage_state",
+        "compliance_propensity",
+        "fatigue_level",
+        "mask_inventory",
+        "network_neighbors"
+      ],
+      "behaviors": [
+        "move_to_location",
+        "interact_with_people",
+        "update_perceived_risk",
+        "update_attitude_via_social_influence",
+        "decide_mask_use",
+        "comply_with_mandate",
+        "purchase_masks",
+        "share_information",
+        "experience_fatigue_recovery"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "age_distribution": "truncated_normal(mean=40, sd=15, min=18, max=85)",
+          "household_size_distribution": "Poisson(lambda=2.5) clipped to [1,8]",
+          "income_distribution": "lognormal(mu=10.5, sigma=0.5) in USD per year",
+          "education_level_categories": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "risk_aversion": "Beta(a=2, b=3)",
+          "trust_in_authorities": "Beta(a=2.5, b=2.5)",
+          "misinformation_susceptibility": "Beta(a=2, b=4)",
+          "social_influence_susceptibility": "Beta(a=2.5, b=3)",
+          "perceived_risk_initial": "Environment.base_infection_prevalence * 0.8 + Normal(0, 0.01) clipped to [0,1]",
+          "mask_attitude_initial": "Normal(mu=0.0, sd=0.5) clipped to [-1,1]",
+          "mask_usage_state_initial": "Bernoulli(p=initial_adoption_rate)",
+          "compliance_propensity": "Beta(a=3, b=2)",
+          "fatigue_level_initial": 0.0,
+          "mask_inventory_initial": 5
+        }
+      }
+    },
+    {
+      "name": "Location",
+      "attributes": [
+        "id",
+        "type",
+        "capacity",
+        "contact_rate",
+        "mandate_policy",
+        "enforcement_level",
+        "mask_required"
+      ],
+      "behaviors": [
+        "admit_person",
+        "host_interaction",
+        "enforce_policy",
+        "display_guidance"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "types": [
+            "home",
+            "work",
+            "public"
+          ],
+          "counts": {
+            "home": "num_households",
+            "work": "population_size/3",
+            "public": "population_size/5"
+          },
+          "capacity_by_type": {
+            "home": 8,
+            "work": 50,
+            "public": 100
+          },
+          "base_contact_rate_by_type": {
+            "home": 4,
+            "work": 8,
+            "public": 10
+          },
+          "mandate_policy_initial": {
+            "home": false,
+            "work": false,
+            "public": false
+          },
+          "enforcement_level_initial": {
+            "home": 0.0,
+            "work": 0.5,
+            "public": 0.5
+          }
+        }
+      }
+    },
+    {
+      "name": "PublicHealthAuthority",
+      "attributes": [
+        "policy_state",
+        "mandate_active",
+        "enforcement_strength",
+        "campaign_intensity",
+        "message_frequency"
+      ],
+      "behaviors": [
+        "set_or_update_policy",
+        "broadcast_guidance",
+        "allocate_enforcement",
+        "targeted_campaigns"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "mandate_active": "mandate_active_initially",
+          "enforcement_strength": "enforcement_strength",
+          "campaign_intensity": "information_campaign_intensity",
+          "message_frequency": "information_message_frequency_per_day"
+        }
+      }
+    },
+    {
+      "name": "MediaOutlet",
+      "attributes": [
+        "reach",
+        "misinformation_rate",
+        "information_reliability",
+        "broadcast_frequency"
+      ],
+      "behaviors": [
+        "broadcast_information",
+        "broadcast_misinformation",
+        "amplify_trending_content"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "outlets": [
+            {
+              "name": "Mainstream",
+              "reach": 0.7,
+              "misinformation_rate": 0.01,
+              "information_reliability": 0.95,
+              "broadcast_frequency": 1
+            },
+            {
+              "name": "AltMedia",
+              "reach": "misinformation_reach",
+              "misinformation_rate": "misinformation_rate",
+              "information_reliability": 0.6,
+              "broadcast_frequency": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Environment",
+      "attributes": [
+        "base_infection_prevalence",
+        "observed_prevalence_signal",
+        "mask_availability"
+      ],
+      "behaviors": [
+        "update_prevalence_signal",
+        "update_supply_levels"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "base_infection_prevalence": "base_infection_prevalence",
+          "observed_prevalence_signal": "base_infection_prevalence",
+          "mask_availability": "mask_availability"
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "EnvironmentSignal",
+      "description": "Updates the environment's prevalence signal with noise and feedback from mask adoption; updates mask supply availability.",
+      "inputs": [
+        "observable.adoption_rate_daily[t-1]"
+      ],
+      "outputs": [
+        "signal.prevalence",
+        "signal.mask_availability"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "prev = state.Environment.base_infection_prevalence\nadopt = obs.adoption_rate_daily[t-1] if t>0 else initial_adoption_rate\n// feedback reduces prevalence proportional to mask effectiveness and adoption\nfeedback = - prevalence_feedback_beta * adopt * DecisionAndBehavior.mask_effectiveness\nnoise = Normal(0, prevalence_process_noise_std)\nstate.Environment.observed_prevalence_signal = clip(prev + feedback + noise, 0, 1)\n// supply replenishment and depletion by mask usage\nused_today = obs.masked_count_daily[t-1] if t>0 else round(initial_adoption_rate * population_size)\nstate.Environment.mask_availability = clip(state.Environment.mask_availability + supply_replenishment_rate - used_today/(population_size * purchase_pack_size), 0, 1)\noutputs.signal.prevalence = state.Environment.observed_prevalence_signal\noutputs.signal.mask_availability = state.Environment.mask_availability",
+        "notes": [
+          "Feedback strength is adjusted by prevalence_feedback_beta.",
+          "Mask effectiveness from DecisionAndBehavior is referenced; module reads it as a global parameter.",
+          "Supply is a simple scalar availability in [0,1]."
+        ]
+      },
+      "requirements": [
+        "random.normal",
+        "observables from AdoptionAggregator"
+      ],
+      "module_parameters": [
+        "prevalence_process_noise_std",
+        "prevalence_feedback_beta",
+        "supply_replenishment_rate",
+        "mask_availability"
+      ]
+    },
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the static social network connecting Persons.",
+      "inputs": [],
+      "outputs": [
+        "graph.social_network"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "if network_type == 'small_world':\n    G = watts_strogatz_graph(n=population_size, k=average_degree, p=small_world_rewiring_prob, seed=seed)\nelif network_type == 'erdos_renyi':\n    p = average_degree/(population_size-1)\n    G = erdos_renyi_graph(n=population_size, p=p, seed=seed)\nelif network_type == 'scale_free':\n    m = max(1, average_degree//2)\n    G = barabasi_albert_graph(n=population_size, m=m, seed=seed)\nassign neighbors to each Person.network_neighbors from G\noutputs.graph.social_network = G",
+        "notes": [
+          "Executed once at t=0.",
+          "Household edges can be added by connecting household members with higher weight if desired."
+        ]
+      },
+      "requirements": [
+        "networkx"
+      ],
+      "module_parameters": [
+        "average_degree",
+        "network_type",
+        "small_world_rewiring_prob"
+      ]
+    },
+    {
+      "name": "PolicyBroadcast",
+      "description": "Sets or updates mask mandate policy, enforcement strength, and conducts information campaigns.",
+      "inputs": [
+        "signal.prevalence"
+      ],
+      "outputs": [
+        "policy.mandate_active",
+        "policy.enforcement_strength",
+        "policy.campaign_intensity"
+      ],
+      "dependencies": [
+        "EnvironmentSignal"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "mandate = state.PHA.mandate_active\nif !mandate and Bernoulli(mandate_probability_per_day * (signal.prevalence > 0.02 ? 2 : 1)):\n    mandate = True\nelif mandate and Bernoulli(lift_probability_per_day * (signal.prevalence < 0.01 ? 2 : 1)):\n    mandate = False\nstate.PHA.mandate_active = mandate\nstate.PHA.enforcement_strength = enforcement_strength\nstate.PHA.campaign_intensity = information_campaign_intensity\n// message frequency affects how often guidance impacts individuals; stored for Decision module\nstate.PHA.message_frequency = information_message_frequency_per_day\noutputs.policy.mandate_active = mandate\noutputs.policy.enforcement_strength = state.PHA.enforcement_strength\noutputs.policy.campaign_intensity = state.PHA.campaign_intensity",
+        "notes": [
+          "Mandate activation probability can depend on prevalence.",
+          "Information campaigns intensity is constant unless tuned."
+        ]
+      },
+      "requirements": [
+        "random.bernoulli"
+      ],
+      "module_parameters": [
+        "mandate_active_initially",
+        "mandate_probability_per_day",
+        "lift_probability_per_day",
+        "enforcement_strength",
+        "information_campaign_intensity",
+        "information_message_frequency_per_day",
+        "targeted_campaign_fraction"
+      ]
+    },
+    {
+      "name": "MediaBroadcast",
+      "description": "Broadcasts information and misinformation affecting attitudes and perceived risk.",
+      "inputs": [],
+      "outputs": [
+        "events.misinformation",
+        "events.debunking"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "misinfo_event = Bernoulli(misinformation_rate)\ndebunk_event = Bernoulli((1 - misinformation_rate) * 0.2)\nif misinfo_event:\n    targeted = sample_fraction_of_people(misinformation_reach)\n    for i in targeted:\n        delta = misinformation_effect_size_on_attitude * Person[i].misinformation_susceptibility\n        Person[i].mask_attitude = clip(Person[i].mask_attitude - delta, -1, 1)\n        Person[i].perceived_risk = clip(Person[i].perceived_risk - 0.1*delta, 0, 1)\nif debunk_event:\n    targeted = sample_fraction_of_people(min(0.5, targeted_campaign_fraction))\n    for i in targeted:\n        delta = debunking_effectiveness * Person[i].trust_in_authorities\n        Person[i].mask_attitude = clip(Person[i].mask_attitude + 0.5*delta, -1, 1)\n        Person[i].perceived_risk = clip(Person[i].perceived_risk + 0.2*delta, 0, 1)\noutputs.events.misinformation = misinfo_event\noutputs.events.debunking = debunk_event",
+        "notes": [
+          "Attitude is on [-1,1]; positive is pro-mask.",
+          "Reach is fraction of population sampled uniformly; could be stratified by demographics if data available."
+        ]
+      },
+      "requirements": [
+        "random.bernoulli",
+        "random.sample"
+      ],
+      "module_parameters": [
+        "misinformation_rate",
+        "misinformation_reach",
+        "information_reliability",
+        "broadcast_frequency",
+        "misinformation_effect_size_on_attitude",
+        "debunking_effectiveness"
+      ]
+    },
+    {
+      "name": "MobilityAndContact",
+      "description": "Determines daily co-location, contacts by location type, observed mask usage, and enforcement events.",
+      "inputs": [
+        "policy.mandate_active",
+        "policy.enforcement_strength"
+      ],
+      "outputs": [
+        "observation.mask_fraction_seen",
+        "events.enforcement_count"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "PolicyBroadcast"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "// Allocate time across locations: home 12h, work 8h (if employed), public 4h\nfor each Person i:\n    contacts = []\n    observed_masked = 0\n    total_contacts = 0\n    // home\n    ch = round(base_contact_rate_per_person * contact_rate_multiplier_home)\n    for k in 1..ch:\n        j = random_household_member(i)\n        contacts.append(j)\n    // work\n    cw = round(base_contact_rate_per_person * contact_rate_multiplier_work)\n    for k in 1..cw:\n        j = random_work_contact(i)\n        contacts.append(j)\n    // public\n    cp = round(base_contact_rate_per_person * contact_rate_multiplier_public)\n    for k in 1..cp:\n        j = random_public_contact(i)\n        contacts.append(j)\n    for j in contacts:\n        total_contacts += 1\n        if Person[j].mask_usage_state == 1: observed_masked += 1\n        // enforcement when mandate active and i unmasked in work/public\n        if policy.mandate_active and Person[i].mask_usage_state == 0 and Bernoulli(policy.enforcement_strength * 0.5):\n            Person[i].compliance_propensity = clip(Person[i].compliance_propensity + 0.05, 0, 1)\n            enforcement_events += 1\n    obs_mask_fraction[i] = (observed_masked / max(1, total_contacts))\noutputs.observation.mask_fraction_seen = obs_mask_fraction\noutputs.events.enforcement_count = enforcement_events",
+        "notes": [
+          "Contact sampling can be implemented via indexed pools for home/work/public.",
+          "Enforcement increases compliance propensity modestly on each event."
+        ]
+      },
+      "requirements": [
+        "household roster",
+        "employment assignment",
+        "random draws"
+      ],
+      "module_parameters": [
+        "contact_rate_multiplier_public",
+        "contact_rate_multiplier_work",
+        "contact_rate_multiplier_home",
+        "base_contact_rate_per_person",
+        "location_capacity_factor"
+      ]
+    },
+    {
+      "name": "DecisionAndBehavior",
+      "description": "Updates perceived risk, attitude via social influence, decides mask use, handles compliance, fatigue, and mask purchasing.",
+      "inputs": [
+        "signal.prevalence",
+        "observation.mask_fraction_seen",
+        "policy.mandate_active",
+        "policy.enforcement_strength",
+        "policy.campaign_intensity"
+      ],
+      "outputs": [
+        "state.person_updates"
+      ],
+      "dependencies": [
+        "EnvironmentSignal",
+        "MobilityAndContact",
+        "PolicyBroadcast",
+        "MediaBroadcast"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each Person i:\n    // Update perceived risk from environment and observations\n    env_term = perceived_risk_sensitivity_to_prevalence * signal.prevalence\n    obs_term = 0.5 * (1 - observation.mask_fraction_seen[i])\n    info_term = 0.2 * policy.campaign_intensity * Person[i].trust_in_authorities\n    Person[i].perceived_risk = clip(risk_perception_weight * (env_term + obs_term + info_term), 0, 1)\n    // Social influence (DeGroot) blending neighbors' attitudes\n    neigh_att = mean(Person[j].mask_attitude for j in Person[i].network_neighbors)\n    lambda_i = clip(social_influence_strength * Person[i].social_influence_susceptibility, 0, 1)\n    Person[i].mask_attitude = clip((1 - lambda_i) * Person[i].mask_attitude + lambda_i * neigh_att, -1, 1)\n    // Intention score and compliance probability\n    S = 2.0*Person[i].perceived_risk + 1.5*Person[i].mask_attitude + (policy.mandate_active ? (policy.enforcement_strength + Person[i].trust_in_authorities) : 0) - 1.0*Person[i].fatigue_level - 0.3*(mask_price / max(1, Person[i].income/365.0))\n    p_wear = sigmoid(S)\n    // If mandate active, boost effective compliance\n    if policy.mandate_active:\n        p_wear = 1 - (1 - p_wear) * (1 - Person[i].compliance_propensity)\n    // Check inventory and purchase if needed\n    if Person[i].mask_inventory <= 0 and p_wear > 0.5:\n        p_buy = max_daily_purchase_prob * signal.mask_availability * (Person[i].income > 0 ? 1.0 : 0.5)\n        if Bernoulli(p_buy):\n            Person[i].mask_inventory += purchase_pack_size\n    // Decide and update mask use\n    will_wear = Bernoulli(p_wear) and Person[i].mask_inventory > 0\n    Person[i].mask_usage_state = 1 if will_wear else 0\n    if will_wear: Person[i].mask_inventory -= 1\n    // Fatigue dynamics\n    if Person[i].mask_usage_state == 1:\n        Person[i].fatigue_level = clip(Person[i].fatigue_level + fatigue_rate, 0, 1)\n    else:\n        Person[i].fatigue_level = clip(Person[i].fatigue_level - recovery_from_fatigue_rate, 0, 1)\noutputs.state.person_updates = all updated fields",
+        "notes": [
+          "Perceived risk blends environment and social observation.",
+          "Attitudes updated via a bounded DeGroot model.",
+          "Sigmoid(x) = 1/(1+exp(-x)); parameters scale terms to reasonable ranges.",
+          "Purchases constrained by environment mask availability."
+        ]
+      },
+      "requirements": [
+        "random.bernoulli",
+        "neighbor lists",
+        "sigmoid function"
+      ],
+      "module_parameters": [
+        "social_influence_strength",
+        "risk_perception_weight",
+        "perceived_risk_sensitivity_to_prevalence",
+        "adoption_threshold",
+        "fatigue_rate",
+        "recovery_from_fatigue_rate",
+        "mask_effectiveness",
+        "compliance_base_rate",
+        "purchase_pack_size",
+        "mask_price",
+        "max_daily_purchase_prob",
+        "info_sharing_probability",
+        "home_bias_influence_weight"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily observables and computes intermediate statistics used by metrics.",
+      "inputs": [
+        "state.person_updates",
+        "policy.mandate_active",
+        "events.misinformation"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.masked_count_daily",
+        "observable.compliance_rate_when_mandate",
+        "observable.adoption_by_income_quintile_daily",
+        "observable.misinformation_event_days",
+        "observable.cumulative_person_days_masked"
+      ],
+      "dependencies": [
+        "DecisionAndBehavior",
+        "PolicyBroadcast",
+        "MediaBroadcast"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "masked = sum(Person[i].mask_usage_state for i in Persons)\nadoption_rate = masked / population_size\nobservable.adoption_rate_daily[t] = adoption_rate\nobservable.masked_count_daily[t] = masked\nif policy.mandate_active:\n    eligible = count(Persons in work or public contexts)\n    compliant = count(Persons with mask_usage_state == 1 in those contexts)\n    observable.compliance_rate_when_mandate[t] = (compliant / max(1, eligible))\nelse:\n    observable.compliance_rate_when_mandate[t] = NaN\n// group by income quintile\nquintiles = compute_income_quintiles(Persons)\nfor q in 1..5:\n    members = [i for i in Persons if income_quintile(i) == q]\n    observable.adoption_by_income_quintile_daily[q][t] = mean(Person[i].mask_usage_state for i in members)\n// misinformation events tracking\nobservable.misinformation_event_days[t] = 1 if events.misinformation else 0\n// cumulative\nobservable.cumulative_person_days_masked[t] = (observable.cumulative_person_days_masked[t-1] if t>0 else 0) + masked",
+        "notes": [
+          "Compliance is computed only when mandate is active; resulting NaNs should be ignored in time averages.",
+          "Group stratification can be extended to education or network degree as needed."
+        ]
+      },
+      "requirements": [
+        "groupby utilities",
+        "NaN-safe averaging"
+      ],
+      "module_parameters": [
+        "window_days_for_misinformation_impact"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 1000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of Person agents in the simulation.",
+      "frozen": "true"
+    },
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 180,
+      "bounds": {
+        "low": 30,
+        "high": 1000
+      },
+      "owner_module": "global",
+      "description": "Number of simulated days.",
+      "frozen": "true"
+    },
+    {
+      "key": "timestep_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Simulation step size in days.",
+      "frozen": "true"
+    },
+    {
+      "key": "seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Random seed for replicability.",
+      "frozen": "true"
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of people wearing masks.",
+      "frozen": "false"
+    },
+    {
+      "key": "average_degree",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 1,
+        "high": 100
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Average social network degree.",
+      "frozen": "false"
+    },
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "small_world",
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Type of network: small_world | erdos_renyi | scale_free.",
+      "frozen": "false"
+    },
+    {
+      "key": "small_world_rewiring_prob",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Watts\u2013Strogatz rewiring probability for small-world networks.",
+      "frozen": "false"
+    },
+    {
+      "key": "base_infection_prevalence",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "EnvironmentSignal",
+      "description": "Base prevalence level driving perceived risk.",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_availability",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "EnvironmentSignal",
+      "description": "Initial normalized availability of masks in the environment.",
+      "frozen": "false"
+    },
+    {
+      "key": "prevalence_process_noise_std",
+      "dtype": "float",
+      "default": 0.002,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "EnvironmentSignal",
+      "description": "Std dev of daily prevalence signal noise.",
+      "frozen": "false"
+    },
+    {
+      "key": "prevalence_feedback_beta",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "EnvironmentSignal",
+      "description": "Strength of feedback from adoption to prevalence signal.",
+      "frozen": "false"
+    },
+    {
+      "key": "supply_replenishment_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "EnvironmentSignal",
+      "description": "Daily replenishment fraction for mask availability.",
+      "frozen": "false"
+    },
+    {
+      "key": "contact_rate_multiplier_public",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "MobilityAndContact",
+      "description": "Multiplier for public contacts.",
+      "frozen": "false"
+    },
+    {
+      "key": "contact_rate_multiplier_work",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "MobilityAndContact",
+      "description": "Multiplier for workplace contacts.",
+      "frozen": "false"
+    },
+    {
+      "key": "contact_rate_multiplier_home",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "MobilityAndContact",
+      "description": "Multiplier for home contacts.",
+      "frozen": "false"
+    },
+    {
+      "key": "base_contact_rate_per_person",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 50
+      },
+      "owner_module": "MobilityAndContact",
+      "description": "Baseline daily contacts per person across contexts before multipliers.",
+      "frozen": "false"
+    },
+    {
+      "key": "location_capacity_factor",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 5.0
+      },
+      "owner_module": "MobilityAndContact",
+      "description": "Scales effective capacity and hence feasible contacts in locations.",
+      "frozen": "false"
+    },
+    {
+      "key": "social_influence_strength",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Weight on neighbors' attitudes in DeGroot update.",
+      "frozen": "false"
+    },
+    {
+      "key": "risk_perception_weight",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Weight applied to combined risk terms in perceived risk update.",
+      "frozen": "false"
+    },
+    {
+      "key": "perceived_risk_sensitivity_to_prevalence",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Scaling from prevalence signal to perceived risk.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_threshold",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Threshold used in metrics and optional decision heuristics.",
+      "frozen": "false"
+    },
+    {
+      "key": "fatigue_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Daily increase in fatigue if masked.",
+      "frozen": "false"
+    },
+    {
+      "key": "recovery_from_fatigue_rate",
+      "dtype": "float",
+      "default": 0.005,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Daily fatigue reduction if unmasked.",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_effectiveness",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Protective effect of masks; influences feedback to prevalence.",
+      "frozen": "false"
+    },
+    {
+      "key": "compliance_base_rate",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Baseline compliance propensity used to initialize or bound behavior.",
+      "frozen": "false"
+    },
+    {
+      "key": "purchase_pack_size",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 1,
+        "high": 100
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Number of masks per purchase event.",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_price",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Unit price per mask (relative units).",
+      "frozen": "false"
+    },
+    {
+      "key": "max_daily_purchase_prob",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Cap on daily probability of purchasing masks when needed.",
+      "frozen": "false"
+    },
+    {
+      "key": "info_sharing_probability",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Probability of sharing information with neighbors (used if modeling peer info spread).",
+      "frozen": "false"
+    },
+    {
+      "key": "home_bias_influence_weight",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "DecisionAndBehavior",
+      "description": "Extra weight given to household members' attitudes if included in influence.",
+      "frozen": "false"
+    },
+    {
+      "key": "mandate_active_initially",
+      "dtype": "bool",
+      "default": false,
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Initial state of mask mandate.",
+      "frozen": "false"
+    },
+    {
+      "key": "mandate_probability_per_day",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Daily probability of activating a mandate when inactive.",
+      "frozen": "false"
+    },
+    {
+      "key": "lift_probability_per_day",
+      "dtype": "float",
+      "default": 0.005,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Daily probability of lifting a mandate when active.",
+      "frozen": "false"
+    },
+    {
+      "key": "enforcement_strength",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Strength of enforcement applied at locations when mandate is active.",
+      "frozen": "false"
+    },
+    {
+      "key": "information_campaign_intensity",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Intensity of pro-mask public health messaging.",
+      "frozen": "false"
+    },
+    {
+      "key": "information_message_frequency_per_day",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 0,
+        "high": 24
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Frequency of official messages per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "targeted_campaign_fraction",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Fraction of population targeted in focused campaigns (if applicable).",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaBroadcast",
+      "description": "Daily probability of a misinformation broadcast event.",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation_reach",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaBroadcast",
+      "description": "Fraction of population reached when misinformation occurs.",
+      "frozen": "false"
+    },
+    {
+      "key": "information_reliability",
+      "dtype": "float",
+      "default": 0.9,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaBroadcast",
+      "description": "Reliability of information from trusted outlets.",
+      "frozen": "false"
+    },
+    {
+      "key": "broadcast_frequency",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 0,
+        "high": 24
+      },
+      "owner_module": "MediaBroadcast",
+      "description": "Number of broadcast cycles per day (simplified to 1).",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation_effect_size_on_attitude",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaBroadcast",
+      "description": "Magnitude of attitude decrement per exposure event scaled by susceptibility.",
+      "frozen": "false"
+    },
+    {
+      "key": "debunking_effectiveness",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MediaBroadcast",
+      "description": "Effectiveness of debunking messages in increasing attitude and perceived risk.",
+      "frozen": "false"
+    },
+    {
+      "key": "window_days_for_misinformation_impact",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 1,
+        "high": 30
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Window length to assess adoption change after misinformation events.",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.mask_usage_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "Delphi_CTIS:mask_always_rate"
+    },
+    {
+      "id": "observable.masked_count_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "sum(Person.mask_usage_state)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "YouGov_Covid19_Behaviour:estimated_masked_count (derived)"
+    },
+    {
+      "id": "observable.compliance_rate_when_mandate",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.mask_usage_state | mandate_active=true in work/public)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "YouGov_Covid19_Behaviour:mask_mandate_compliance_rate"
+    },
+    {
+      "id": "observable.adoption_by_income_quintile_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "by_group(income_quintile, mean(Person.mask_usage_state))",
+      "frequency": "daily",
+      "aggregation": "by_group(income_quintile)",
+      "target_data_field": "Delphi_CTIS:mask_always_rate_by_income_quintile"
+    },
+    {
+      "id": "observable.misinformation_event_days",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "1 if misinformation event occurred else 0",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "GDELT_news_events:misinformation_flag (mapped)"
+    },
+    {
+      "id": "observable.cumulative_person_days_masked",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "cumulative_sum(sum(Person.mask_usage_state))",
+      "frequency": "daily",
+      "aggregation": "cumulative_sum",
+      "target_data_field": "not_applicable"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "average_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeAverage",
+        "config": {
+          "ignore_nans": true
+        }
+      }
+    },
+    {
+      "name": "time_to_reach_threshold",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "FirstPassageTime",
+        "config": {
+          "threshold_param": "adoption_threshold"
+        }
+      }
+    },
+    {
+      "name": "sustained_adoption_days",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "SustainedRunLength",
+        "config": {
+          "threshold_param": "adoption_threshold",
+          "min_run": 2
+        }
+      }
+    },
+    {
+      "name": "policy_compliance_rate",
+      "inputs": [
+        "observable.compliance_rate_when_mandate"
+      ],
+      "definition": {
+        "type": "TimeAverage",
+        "config": {
+          "ignore_nans": true
+        }
+      }
+    },
+    {
+      "name": "adoption_variance",
+      "inputs": [
+        "observable.adoption_by_income_quintile_daily"
+      ],
+      "definition": {
+        "type": "AverageVarianceAcrossGroups",
+        "config": {
+          "group_field": "income_quintile"
+        }
+      }
+    },
+    {
+      "name": "misinformation_impact",
+      "inputs": [
+        "observable.adoption_rate_daily",
+        "observable.misinformation_event_days"
+      ],
+      "definition": {
+        "type": "EventWindowDifference",
+        "config": {
+          "window_days": "window_days_for_misinformation_impact",
+          "stat": "mean_drop"
+        }
+      }
+    },
+    {
+      "name": "cumulative_person_days_masked",
+      "inputs": [
+        "observable.cumulative_person_days_masked"
+      ],
+      "definition": {
+        "type": "FinalValue",
+        "config": {}
+      }
+    }
+  ],
+  "environment": {
+    "type": "network_with_abstract_locations",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 1000,
+    "random_seed": 42,
+    "network": {
+      "type": "small_world",
+      "average_degree": 10,
+      "small_world_rewiring_prob": 0.1
+    },
+    "attributes_assignment": {
+      "use_distributions": true,
+      "initial_adoption_rate": 0.2
+    },
+    "locations": {
+      "types": [
+        "home",
+        "work",
+        "public"
+      ],
+      "capacities": {
+        "home": 8,
+        "work": 50,
+        "public": 100
+      }
+    },
+    "policy": {
+      "mandate_active_initially": false,
+      "enforcement_strength": 0.5,
+      "information_campaign_intensity": 0.3,
+      "information_message_frequency_per_day": 1
+    },
+    "media": {
+      "misinformation_rate": 0.05,
+      "misinformation_reach": 0.3
+    },
+    "environment": {
+      "base_infection_prevalence": 0.01,
+      "mask_availability": 1.0
+    }
+  },
+  "algorithms": {
+    "SmallWorldNetwork": "Watts\u2013Strogatz graph with k=average_degree, p=small_world_rewiring_prob.",
+    "DeGrootInfluence": "Attitude_i(t+1) = (1-\u03bb_i) Attitude_i(t) + \u03bb_i mean(Attitude_neighbors).",
+    "RiskUpdate": "Perceived risk combines prevalence, observed unmasked fraction, and campaign influence with weights.",
+    "LogitDecision": "P(wear) = sigmoid(w1*risk + w2*attitude + w3*mandate/enforcement - w4*fatigue - cost).",
+    "Enforcement": "If mandate active and unmasked in regulated contexts, enforcement occurs with probability proportional to enforcement_strength, raising compliance_propensity.",
+    "SupplyUpdate": "Mask availability increases by replenishment_rate and decreases with usage; clipped [0,1].",
+    "EventImpact": "Misinformation events reduce attitudes for exposed subpopulation proportionally to susceptibility."
+  },
+  "data_sources": [
+    {
+      "name": "Delphi_CTIS",
+      "purpose": "Calibration/validation of daily mask adoption rates and group stratification.",
+      "fields_used": [
+        "mask_always_rate",
+        "mask_always_rate_by_income_quintile"
+      ]
+    },
+    {
+      "name": "YouGov_Covid19_Behaviour",
+      "purpose": "Validation of mandate compliance and general mask usage trends.",
+      "fields_used": [
+        "mask_mandate_compliance_rate",
+        "mask_use_frequency"
+      ]
+    },
+    {
+      "name": "GDELT_News_Events",
+      "purpose": "Identification of misinformation event days for impact analysis.",
+      "fields_used": [
+        "misinformation_flag",
+        "event_date",
+        "reach_proxy"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: parses config, initializes simulation, runs loop, orchestrates modules, computes metrics."
+      },
+      {
+        "name": "entities.py",
+        "description": "Definitions of Person, Location, PublicHealthAuthority, MediaOutlet, Environment classes."
+      },
+      {
+        "name": "modules/environment_signal.py",
+        "description": "Implements EnvironmentSignal module."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder module using networkx."
+      },
+      {
+        "name": "modules/policy_broadcast.py",
+        "description": "Implements PolicyBroadcast module."
+      },
+      {
+        "name": "modules/media_broadcast.py",
+        "description": "Implements MediaBroadcast module."
+      },
+      {
+        "name": "modules/mobility_contact.py",
+        "description": "Implements MobilityAndContact module and contact sampling."
+      },
+      {
+        "name": "modules/decision_behavior.py",
+        "description": "Implements DecisionAndBehavior module."
+      },
+      {
+        "name": "modules/adoption_aggregator.py",
+        "description": "Implements AdoptionAggregator module and observable tracking."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Implements metric calculations based on observables."
+      },
+      {
+        "name": "utils/random_utils.py",
+        "description": "Random number utilities with seeding and reproducibility helpers."
+      },
+      {
+        "name": "utils/groups.py",
+        "description": "Income quintile and other group assignment utilities."
+      },
+      {
+        "name": "config/defaults.json",
+        "description": "Default configuration parameters."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "scipy",
+      "networkx",
+      "pandas",
+      "python-dateutil"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 150,
+    "end_day": 179
+  },
+  "evaluation_metrics": [
+    "average_adoption_rate",
+    "time_to_reach_threshold",
+    "sustained_adoption_days",
+    "policy_compliance_rate",
+    "adoption_variance",
+    "misinformation_impact",
+    "cumulative_person_days_masked"
+  ]
+}

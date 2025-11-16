@@ -1,0 +1,1012 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion of a technology (or behavior) on a dynamic social network with media campaigns and incentives. Individuals adopt based on peer influence, media exposure, and personal thresholds; the social network co-evolves via homophily-biased rewiring and triadic closure.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "group_id",
+        "degree_preference",
+        "susceptibility",
+        "stubborn",
+        "adopted",
+        "adoption_time",
+        "dropout_prob",
+        "attention_budget",
+        "media_trust",
+        "social_trust",
+        "threshold",
+        "utility_benefit",
+        "utility_cost",
+        "fatigue",
+        "memory_exposure_social",
+        "memory_exposure_media"
+      ],
+      "behaviors": [
+        "consume_media",
+        "observe_neighbors",
+        "update_exposure_memory",
+        "adoption_decision",
+        "churn_or_retain"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "population_size": 5000,
+          "initial_adoption_fraction": 0.03,
+          "stubborn_fraction": 0.1,
+          "group_count": 5
+        }
+      }
+    },
+    {
+      "name": "MediaOutlet",
+      "attributes": [
+        "id",
+        "base_intensity",
+        "daily_intensity"
+      ],
+      "behaviors": [
+        "broadcast"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "count": 1,
+          "base_intensity": 0.05
+        }
+      }
+    },
+    {
+      "name": "PolicyAuthority",
+      "attributes": [
+        "campaign_active",
+        "incentive_budget_per_capita",
+        "effective_incentive"
+      ],
+      "behaviors": [
+        "schedule_campaign",
+        "set_incentives",
+        "trigger_external_shock"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "campaign_start_day": 10,
+          "campaign_end_day": 60,
+          "incentive_budget_per_capita": 0.5
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "PolicyIntervention",
+      "description": "Computes daily media campaign intensity, per-agent incentive offers, and applies external shocks to media and perceived costs.",
+      "inputs": [],
+      "outputs": [
+        "signal.policy.media_intensity_daily",
+        "signal.policy.incentive_per_agent",
+        "signal.policy.cost_adjustment"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for day in t:\n  campaign_active = policy_toggle_media_campaign and (campaign_start_day <= day <= campaign_end_day)\n  base_intensity = campaign_media_intensity_base if campaign_active else 0.0\n  if day == external_shock_day:\n    base_intensity = max(0, base_intensity + external_shock_delta_media)\n    cost_adjustment = external_shock_delta_cost\n  else:\n    cost_adjustment = 0.0\n  media_intensity_daily = base_intensity\n  if policy_toggle_incentives:\n    incentive_pool = incentive_budget_per_capita\n    for agent i:\n      incentive_per_agent[i] = min(incentive_pool, incentive_effect_per_unit)\n  else:\n    for agent i:\n      incentive_per_agent[i] = 0.0\n  emit signal.policy.media_intensity_daily = media_intensity_daily\n  emit signal.policy.incentive_per_agent = incentive_per_agent\n  emit signal.policy.cost_adjustment = cost_adjustment",
+        "notes": [
+          "Incentives are modeled as a per-day per-capita cap; more complex budgeting could account for cumulative spend.",
+          "External shocks can increase media intensity or reduce perceived costs."
+        ]
+      },
+      "requirements": [
+        "random_seed",
+        "config:campaign_schedule"
+      ],
+      "module_parameters": [
+        "policy_toggle_incentives",
+        "policy_toggle_media_campaign",
+        "campaign_start_day",
+        "campaign_end_day",
+        "campaign_media_intensity_base",
+        "incentive_budget_per_capita",
+        "incentive_effect_per_unit",
+        "external_shock_day",
+        "external_shock_delta_media",
+        "external_shock_delta_cost"
+      ]
+    },
+    {
+      "name": "NetworkEvolution",
+      "description": "Initializes and updates the social network with homophily-biased rewiring and triadic closure to maintain target clustering.",
+      "inputs": [],
+      "outputs": [
+        "signal.network.graph",
+        "signal.network.stats"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  construct initial SBM with sbm_block_count blocks, block sizes ~ equal, expected degree ~ average_degree\n  assign group_id to agents by block\nelse:\n  for each existing edge (i,j):\n    with probability rewiring_rate_per_day:\n      if homophily_weight > 0 and group_id[i] != group_id[j]:\n        remove edge (i,j)\n        candidate k from same group as i (prefer friend-of-friend) to increase clustering\n        connect (i,k) if not already connected\n  apply triadic_closure: for each node i, with probability triadic_closure_prob, connect i to a friend-of-friend if clustering < clustering_target\n  compute stats: avg_degree, clustering_coefficient\nemit updated graph and stats",
+        "notes": [
+          "Initial network uses stochastic block model to induce community structure and homophily.",
+          "Dynamic rewiring maintains realistic clustering."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy"
+      ],
+      "module_parameters": [
+        "network_type",
+        "average_degree",
+        "sbm_block_count",
+        "homophily_weight",
+        "rewiring_rate_per_day",
+        "triadic_closure_prob",
+        "degree_preference_dispersion",
+        "clustering_target"
+      ]
+    },
+    {
+      "name": "InfluenceExposure",
+      "description": "Computes daily social and media exposures for each agent with memory and decay, limited by attention budgets and trust.",
+      "inputs": [
+        "signal.network.graph",
+        "signal.policy.media_intensity_daily"
+      ],
+      "outputs": [
+        "signal.exposure.social",
+        "signal.exposure.media"
+      ],
+      "dependencies": [
+        "NetworkEvolution",
+        "PolicyIntervention"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for agent i:\n  social_signal_raw = sum over neighbors j of 1{adopted_j} weighted by recency (recent adoptions get peer_exposure_weight_recent)\n  # attention limit\n  social_signal = min(social_signal_raw, attention_budget[i])\n  media_hits = Poisson(media_intensity_daily * media_trust[i])\n  media_signal = min(media_hits, max_daily_media_exposures)\n  # update memory with exponential decay\n  memory_exposure_social[i] = memory_exposure_social[i] * exp(-1/exposure_decay_days) + influence_weight_social * social_signal\n  memory_exposure_media[i] = memory_exposure_media[i] * exp(-1/exposure_decay_days) + influence_weight_media * media_signal\nemit vectors signal.exposure.social = memory_exposure_social and signal.exposure.media = memory_exposure_media",
+        "notes": [
+          "Exposures are carried forward via memory with exponential decay.",
+          "Trust modulates the effect of media vs social channels."
+        ]
+      },
+      "requirements": [
+        "numpy.random",
+        "agent_attributes"
+      ],
+      "module_parameters": [
+        "influence_weight_social",
+        "influence_weight_media",
+        "exposure_decay_days",
+        "attention_budget_mean",
+        "max_daily_media_exposures",
+        "peer_exposure_weight_recent",
+        "memory_window_days",
+        "media_trust_mean",
+        "social_trust_mean"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Updates each agent's adoption state based on exposures, incentives, personal thresholds, and stochastic noise.",
+      "inputs": [
+        "signal.exposure.social",
+        "signal.exposure.media",
+        "signal.policy.incentive_per_agent",
+        "signal.policy.cost_adjustment"
+      ],
+      "outputs": [
+        "signal.state.adoption"
+      ],
+      "dependencies": [
+        "InfluenceExposure",
+        "PolicyIntervention"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for agent i if not adopted:\n  effective_cost = utility_cost[i] - signal.policy.cost_adjustment\n  latent_score = (memory_exposure_social[i] + memory_exposure_media[i]) + utility_benefit[i] + incentive_per_agent[i] - effective_cost - threshold[i]\n  noise = Normal(0, noise_level_decision)\n  propensity = latent_score + noise\n  compliance = 1 - Beta(compliance_variability, 1)\n  adopt_now = (propensity * compliance) > 0 and not stubborn[i]\n  if adopt_now:\n    adopted[i] = True\n    adoption_time[i] = t\nemit signal.state.adoption = adopted",
+        "notes": [
+          "Thresholds and benefits are heterogeneous across agents.",
+          "Stubborn agents never adopt."
+        ]
+      },
+      "requirements": [
+        "random_normal",
+        "agent_thresholds"
+      ],
+      "module_parameters": [
+        "adoption_threshold_base_mean",
+        "adoption_threshold_std",
+        "utility_benefit_mean",
+        "utility_cost_mean",
+        "noise_level_decision",
+        "compliance_variability"
+      ]
+    },
+    {
+      "name": "RetentionAndChurn",
+      "description": "Models post-adoption dropout via a fatigue-driven hazard; also updates fatigue.",
+      "inputs": [
+        "signal.state.adoption"
+      ],
+      "outputs": [
+        "signal.state.adoption_final"
+      ],
+      "dependencies": [
+        "AdoptionDecision"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for agent i:\n  if adopted[i]:\n    fatigue[i] = fatigue[i] + 1/fatigue_half_life_days\n    hazard = dropout_rate_base * exp(fatigue[i])\n    if Uniform(0,1) < hazard:\n      adopted[i] = False\nemit signal.state.adoption_final = adopted",
+        "notes": [
+          "Churn is rare for durable technology adoption; hazard is kept low by default.",
+          "Set dropout_rate_base near 0 for essentially irreversible adoption."
+        ]
+      },
+      "requirements": [
+        "random_uniform"
+      ],
+      "module_parameters": [
+        "dropout_rate_base",
+        "fatigue_half_life_days"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Computes observables and attaches optional observation noise for model-data comparison.",
+      "inputs": [
+        "signal.state.adoption_final",
+        "signal.network.stats",
+        "signal.policy.media_intensity_daily",
+        "signal.policy.incentive_per_agent"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.cumulative_adoption",
+        "observable.average_degree_daily",
+        "observable.clustering_coefficient_daily",
+        "observable.media_intensity_daily",
+        "observable.incentive_level_daily"
+      ],
+      "dependencies": [
+        "RetentionAndChurn",
+        "NetworkEvolution",
+        "PolicyIntervention"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate = mean(adopted)\nif observation_noise_std > 0:\n  adoption_rate_obs = clip(adoption_rate + Normal(0, observation_noise_std), 0, 1)\nelse:\n  adoption_rate_obs = adoption_rate\ncumulative_adoption = cumulative_adoption_previous + sum(new_adoptions_today)\navg_degree = signal.network.stats.avg_degree\nclustering = signal.network.stats.clustering\nmedia_intensity_obs = signal.policy.media_intensity_daily\nincentive_level = mean(signal.policy.incentive_per_agent)\nemit all observables",
+        "notes": [
+          "Cumulative adoption counts unique adopters over time.",
+          "Observation noise can be disabled by setting observation_noise_std to 0."
+        ]
+      },
+      "requirements": [
+        "storage:time_series_buffers"
+      ],
+      "module_parameters": [
+        "observation_noise_std"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "SBM",
+      "bounds": null,
+      "owner_module": "NetworkEvolution",
+      "description": "Type of network generator for initialization.",
+      "frozen": "true"
+    },
+    {
+      "key": "average_degree",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 50.0
+      },
+      "owner_module": "NetworkEvolution",
+      "description": "Target average degree for the initial network.",
+      "frozen": "false"
+    },
+    {
+      "key": "sbm_block_count",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 2,
+        "high": 10
+      },
+      "owner_module": "NetworkEvolution",
+      "description": "Number of communities (blocks) in the stochastic block model.",
+      "frozen": "false"
+    },
+    {
+      "key": "homophily_weight",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkEvolution",
+      "description": "Weight on same-group preference during rewiring.",
+      "frozen": "false"
+    },
+    {
+      "key": "rewiring_rate_per_day",
+      "dtype": "float",
+      "default": 0.001,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.02
+      },
+      "owner_module": "NetworkEvolution",
+      "description": "Probability per edge per day of rewiring.",
+      "frozen": "false"
+    },
+    {
+      "key": "triadic_closure_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkEvolution",
+      "description": "Probability per node per day to close a triangle if clustering is below target.",
+      "frozen": "false"
+    },
+    {
+      "key": "degree_preference_dispersion",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "NetworkEvolution",
+      "description": "Dispersion of desired degrees across agents.",
+      "frozen": "false"
+    },
+    {
+      "key": "clustering_target",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.6
+      },
+      "owner_module": "NetworkEvolution",
+      "description": "Target global clustering coefficient.",
+      "frozen": "false"
+    },
+    {
+      "key": "influence_weight_social",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceExposure",
+      "description": "Weight of social exposure in memory accumulation.",
+      "frozen": "false"
+    },
+    {
+      "key": "influence_weight_media",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceExposure",
+      "description": "Weight of media exposure in memory accumulation.",
+      "frozen": "false"
+    },
+    {
+      "key": "exposure_decay_days",
+      "dtype": "float",
+      "default": 7.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 30.0
+      },
+      "owner_module": "InfluenceExposure",
+      "description": "Time constant for exponential decay of exposure memory (days).",
+      "frozen": "false"
+    },
+    {
+      "key": "attention_budget_mean",
+      "dtype": "float",
+      "default": 5.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 20.0
+      },
+      "owner_module": "InfluenceExposure",
+      "description": "Average maximum social exposures processed per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "max_daily_media_exposures",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 0,
+        "high": 10
+      },
+      "owner_module": "InfluenceExposure",
+      "description": "Cap on daily media exposures per agent.",
+      "frozen": "false"
+    },
+    {
+      "key": "peer_exposure_weight_recent",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceExposure",
+      "description": "Weight advantage for recently adopted neighbors in social signal.",
+      "frozen": "false"
+    },
+    {
+      "key": "memory_window_days",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 1,
+        "high": 60
+      },
+      "owner_module": "InfluenceExposure",
+      "description": "Approximate window length of salient exposure memory (used in diagnostics).",
+      "frozen": "false"
+    },
+    {
+      "key": "media_trust_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceExposure",
+      "description": "Mean trust parameter toward media across agents.",
+      "frozen": "false"
+    },
+    {
+      "key": "social_trust_mean",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceExposure",
+      "description": "Mean trust parameter toward peers across agents.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_threshold_base_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean of the distribution of personal adoption thresholds.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_threshold_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std-dev of personal adoption thresholds.",
+      "frozen": "false"
+    },
+    {
+      "key": "utility_benefit_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean perceived utility benefit from adoption.",
+      "frozen": "false"
+    },
+    {
+      "key": "utility_cost_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean perceived cost from adoption (pre-shock).",
+      "frozen": "false"
+    },
+    {
+      "key": "noise_level_decision",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std-dev of decision noise in propensity.",
+      "frozen": "false"
+    },
+    {
+      "key": "compliance_variability",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Controls variability in how exposure translates to behavior (Beta distribution).",
+      "frozen": "false"
+    },
+    {
+      "key": "dropout_rate_base",
+      "dtype": "float",
+      "default": 0.002,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "RetentionAndChurn",
+      "description": "Baseline daily hazard of dropping the technology.",
+      "frozen": "false"
+    },
+    {
+      "key": "fatigue_half_life_days",
+      "dtype": "float",
+      "default": 30.0,
+      "bounds": {
+        "low": 5.0,
+        "high": 180.0
+      },
+      "owner_module": "RetentionAndChurn",
+      "description": "Rate at which fatigue accumulates; larger means slower fatigue growth.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_toggle_incentives",
+      "dtype": "bool",
+      "default": true,
+      "bounds": null,
+      "owner_module": "PolicyIntervention",
+      "description": "Enable incentive policy.",
+      "frozen": "true"
+    },
+    {
+      "key": "policy_toggle_media_campaign",
+      "dtype": "bool",
+      "default": true,
+      "bounds": null,
+      "owner_module": "PolicyIntervention",
+      "description": "Enable media campaign.",
+      "frozen": "true"
+    },
+    {
+      "key": "campaign_start_day",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Campaign start day.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign_end_day",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Campaign end day.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign_media_intensity_base",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Baseline daily media intensity when campaign is active.",
+      "frozen": "false"
+    },
+    {
+      "key": "incentive_budget_per_capita",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Per-capita incentive budget available each day.",
+      "frozen": "false"
+    },
+    {
+      "key": "incentive_effect_per_unit",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Additive increase in propensity per unit incentive.",
+      "frozen": "false"
+    },
+    {
+      "key": "external_shock_day",
+      "dtype": "int",
+      "default": 40,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Day an external shock occurs.",
+      "frozen": "false"
+    },
+    {
+      "key": "external_shock_delta_media",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Change in media intensity at shock.",
+      "frozen": "false"
+    },
+    {
+      "key": "external_shock_delta_cost",
+      "dtype": "float",
+      "default": -0.1,
+      "bounds": {
+        "low": -2.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Change in perceived cost at shock (negative reduces cost).",
+      "frozen": "false"
+    },
+    {
+      "key": "observation_noise_std",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Std-dev of Gaussian noise added to adoption_rate observable.",
+      "frozen": "false"
+    },
+    {
+      "key": "initial_adoption_fraction",
+      "dtype": "float",
+      "default": 0.03,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of adopters at t=0.",
+      "frozen": "false"
+    },
+    {
+      "key": "stubborn_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Fraction of agents who will never adopt.",
+      "frozen": "false"
+    },
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 90,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Number of simulation days.",
+      "frozen": "false"
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG for reproducibility.",
+      "frozen": "true"
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 500,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of Person agents.",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.cumulative_adoption",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "cumulative_sum(new_adoptions)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:cumulative_adoption"
+    },
+    {
+      "id": "observable.average_degree_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(network.degree)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "network_stats.csv:avg_degree"
+    },
+    {
+      "id": "observable.clustering_coefficient_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "network.global_clustering",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "network_stats.csv:clustering"
+    },
+    {
+      "id": "observable.media_intensity_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "signal.policy.media_intensity_daily",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:media_intensity"
+    },
+    {
+      "id": "observable.incentive_level_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(signal.policy.incentive_per_agent)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:incentive_level"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE",
+      "inputs": [
+        "observable.cumulative_adoption"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeak",
+        "config": {
+          "window": 7
+        }
+      }
+    },
+    {
+      "name": "R2",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "R2",
+        "config": {}
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "assign_groups": "uniform over sbm_block_count",
+    "initial_adoption_fraction": 0.03,
+    "stubborn_fraction": 0.1,
+    "attribute_distributions": {
+      "age_group": "categorical: {18-29,30-44,45-64,65+}",
+      "degree_preference": "lognormal with mean=average_degree, dispersion=degree_preference_dispersion",
+      "attention_budget": "Poisson with mean=attention_budget_mean",
+      "media_trust": "Beta(mean=media_trust_mean, var=0.05)",
+      "social_trust": "Beta(mean=social_trust_mean, var=0.05)",
+      "threshold": "TruncatedNormal(mean=adoption_threshold_base_mean, std=adoption_threshold_std, bounds=[0,1])",
+      "utility_benefit": "Normal(mean=utility_benefit_mean, std=0.2)",
+      "utility_cost": "Normal(mean=utility_cost_mean, std=0.2)"
+    }
+  },
+  "algorithms": {
+    "SBM_initialization": "Stochastic Block Model to generate community-based network with target average degree.",
+    "Homophily_biased_rewiring": "Probabilistic rewiring preferring same-group and friend-of-friend to increase clustering.",
+    "Exposure_memory_decay": "Exponential decay memory with time constant exposure_decay_days.",
+    "Adoption_propensity": "Latent score from exposures, incentives, costs, thresholds with Gaussian noise and compliance scaling.",
+    "Fatigue_hazard": "Dropout hazard h = dropout_rate_base * exp(fatigue) with fatigue increment 1/fatigue_half_life_days per day."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Fit and evaluate adoption dynamics against observed adoption rates and interventions.",
+      "fields_used": [
+        "day",
+        "adoption_rate",
+        "cumulative_adoption",
+        "media_intensity",
+        "incentive_level"
+      ]
+    },
+    {
+      "name": "network_stats.csv",
+      "purpose": "Calibrate network structural properties.",
+      "fields_used": [
+        "day",
+        "avg_degree",
+        "clustering"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: parses config, initializes simulation, runs scheduler, outputs results."
+      },
+      {
+        "name": "agents.py",
+        "description": "Defines Person, MediaOutlet, PolicyAuthority classes and attribute initialization helpers."
+      },
+      {
+        "name": "network_module.py",
+        "description": "Implements NetworkEvolution module."
+      },
+      {
+        "name": "policy_module.py",
+        "description": "Implements PolicyIntervention module."
+      },
+      {
+        "name": "exposure_module.py",
+        "description": "Implements InfluenceExposure module."
+      },
+      {
+        "name": "adoption_module.py",
+        "description": "Implements AdoptionDecision module."
+      },
+      {
+        "name": "retention_module.py",
+        "description": "Implements RetentionAndChurn module."
+      },
+      {
+        "name": "aggregation_module.py",
+        "description": "Implements AdoptionAggregator module and metrics bindings."
+      },
+      {
+        "name": "scheduler.py",
+        "description": "Discrete-event scheduler coordinating module tick rates and dependencies."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Implements RMSE, MAE, TimeToPeak, and R2 metrics over observables."
+      },
+      {
+        "name": "io.py",
+        "description": "Data I/O, target data loaders, config management, and results export."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "scipy",
+      "networkx",
+      "pandas",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 60,
+    "end_day": 89
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "MAE",
+    "TimeToPeak",
+    "R2"
+  ]
+}

@@ -1,0 +1,232 @@
+{
+  "summary": "The simulation code compiles and runs but is missing several core components required by the Mask Adoption Dynamics Simulation specification. Recent changes improved behavioral realism (fatigue, mandate compliance, media/misinformation, supply model switches), but they also removed the evaluation pipeline, epi coupling, and a functional main()\u2014reducing overall functionality. Key missing pieces include epidemiological dynamics, full metrics computation, location/mandate scope integration, retailer rationing/price controls, and media reach/bias. There are also performance risks with per-day O(E) social calculations for large populations. The next iteration should prioritize reintroducing evaluation, adding a minimal infection model, computing required metrics, and aligning mandates and supply logic with the spec.",
+  "critical_issues": [
+    {
+      "issue": "No epidemiological dynamics (infection, recovery), despite spec requiring disease_transmission, effective reproduction number, and cases_averted.",
+      "impact": "Cannot estimate infection-related outcomes (attack rate, Rt, cases averted) or tie mask adoption to disease dynamics, undermining policy relevance.",
+      "solution": "Add a minimal SIR/SEIR layer. Extend Individual with health_state and vaccination_status; simulate exposure during location visits using location transmission_modifier and mask efficacy (inward/outward). Track infection state transitions and recoveries; compute infection_attack_rate and Rt. Provide importation events based on importation_rate.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Evaluation and metrics pipeline removed (evaluate, epi coupling, save/visualize) and main() is now a no-op.",
+      "impact": "No metrics are produced; downstream evaluation fails and the simulation has no usable outputs via main().",
+      "solution": "Reintroduce evaluate() and finalize_metrics() to compute required metrics (adoption-related, compliance_by_location_type, equity_gap, inventory_outage_days, enforcement_actions_count, misinformation_prevalence, cost_per_additional_adopter). Restore a functional main() that runs the sim, prints/returns metrics, and optionally saves series.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Mandate scope is not implemented; global mandate is applied uniformly regardless of location types.",
+      "impact": "Misrepresents policy effects and compliance differences across location types (e.g., indoor public vs. all locations).",
+      "solution": "Implement mandate_scope handling (e.g., indoor_public applies to stores, transit, public_venues) and use it when determining requirement_active and enforcement.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Supply/retailer logic lacks rationing and price controls; stockout metrics are inconsistently tracked.",
+      "impact": "Cannot analyze rationing/policy effects; inventory outage days counters are never incremented; any_stockout is logged but not summarized.",
+      "solution": "Implement retailer rationing_limit_per_purchase in purchase logic; add Government.set_price_controls to cap price_per_mask; update stockout_days counters daily and summarize in finalize_metrics().",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Media/information flow is not aligned with spec (no Media.bias/trustworthiness/reach; no broadcast_misinformation to a reachable subset).",
+      "impact": "Overly homogeneous information effects; cannot model heterogeneous misinformation exposure or trust dynamics realistically.",
+      "solution": "Extend MediaChannel with bias, trustworthiness, reach. Implement broadcast_information and broadcast_misinformation to sample a fraction of the population and update their risk_perception and trust based on media properties.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Performance risk for large N due to per-day O(E) loops (neighbor_corr and social info sharing).",
+      "impact": "For population_size ~ 10k and average_degree ~ 10, daily O(100k) or more operations can cause slowdowns in multi-day sims.",
+      "solution": "Compute neighbor_corr weekly (or sample), and gate social-sharing intensity by config or compute on a sampled subset. Consider optional NumPy vectorization or a diagnostics flag.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Epidemiological coupling",
+      "current_approach": "Risk perception is influenced by a synthetic prevalence signal; no explicit infection process.",
+      "suggested_approach": "Add SIR/SEIR states to each person. During location visits, simulate contacts based on contact_rate; infection probability depends on both agents\u2019 mask use and location transmission_modifier. Include importation events. Track recoveries.",
+      "expected_benefit": "Enables computation of infection_attack_rate, effective_reproduction_number, cases_averted, and links mask adoption to epidemiological outcomes."
+    },
+    {
+      "aspect": "Mandate scope and enforcement",
+      "current_approach": "Global mandate_status and local mask_required are checked; scope is ignored.",
+      "suggested_approach": "Use mandate_scope to apply mandates to relevant location types. Deny entry or apply fines based on enforcement_level and scope.",
+      "expected_benefit": "Policy realism and accurate compliance_by_location_type, enforcement_actions_count."
+    },
+    {
+      "aspect": "Supply, rationing, and price controls",
+      "current_approach": "Retailers restock via allocate_supply; purchase is for one unit; no rationing or price caps; stockout counters unused.",
+      "suggested_approach": "Add rationing_limit_per_purchase to purchase logic; implement Government.set_price_controls (cap and subsidies). Track stockout days and summarize.",
+      "expected_benefit": "Captures supply constraints and policy levers' effects on adoption; enables inventory_outage_days and cost metrics."
+    },
+    {
+      "aspect": "Media and misinformation",
+      "current_approach": "Aggregate deltas from broadcast(); uniform application with a per-day shock.",
+      "suggested_approach": "Add reach to sample a fraction of agents per broadcast; adjust impacts by trustworthiness and bias; maintain explicit misinformation_prevalence time series.",
+      "expected_benefit": "Heterogeneous information exposure and more realistic misinformation dynamics; enables misinformation_prevalence metric."
+    },
+    {
+      "aspect": "Metrics and evaluation",
+      "current_approach": "Only time series are tracked; no evaluation or final metrics computation.",
+      "suggested_approach": "Finalize metrics after run: adoption thresholds, peaks, sustained durations, compliance_by_location_type, equity gaps, enforcement counts, inventory outages, campaign cost per additional adopter, Rt and infections (if epi enabled).",
+      "expected_benefit": "Alignment with spec and supports decision-making and validation."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Reintroduce evaluate() and finalize_metrics(), and a functional main() that runs the simulation, evaluates metrics, and prints/saves outputs.",
+      "reason": "Restores essential functionality removed in the latest changes and enables verification and downstream usage.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add minimal infection model (SIR) with health_state and vaccination_status. Implement location-based infection probability using mask_efficacy_outward/inward, transmission_probability_per_contact, and location-specific modifiers.",
+      "reason": "Satisfies disease_transmission and enables epi metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement mandate_scope in step(): requirement_active should consider scope and location types (e.g., indoor_public applies to stores, transit, public_venues).",
+      "reason": "Accurate policy modeling and location-specific compliance metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Extend Individual.purchase_masks_from_retailer to support rationing_limit_per_purchase and probabilistic multi-unit demand; enforce rationing in Retailer or Government.set_price_controls.",
+      "reason": "Aligns with spec and allows testing rationing policies.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Track stockout_days and retailer_stockout_days in step() using any_stockout; compute inventory_outage_days in finalize_metrics().",
+      "reason": "Fixes inconsistent inventory outage tracking and enables required metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Throttle neighbor_corr and social info-sharing to weekly or sample-based; guard with a diagnostics flag.",
+      "reason": "Prevents performance bottlenecks for large population sizes.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Extend MediaChannel with bias, trustworthiness, reach; implement broadcast_information and broadcast_misinformation to affect a subset of agents each day.",
+      "reason": "Improves realism and enables misinformation_prevalence metric.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement compliance_by_location_type and equity_gap_in_adoption metrics using visits_* counters and precomputed deciles; compute at end of run.",
+      "reason": "Satisfies spec metrics using existing counters.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "effective_reproduction_number",
+      "current_gap": "Not computed; no epi layer.",
+      "suggestion": "Compute Rt as R0 * (1 - adoption * combined_mask_efficacy) adjusted by contact rates and location modifiers; calibrate to observed case data if available."
+    },
+    {
+      "metric": "equity_gap_in_adoption",
+      "current_gap": "Not computed; only income deciles precomputed.",
+      "suggestion": "Track adoption by income decile, age group, and essential worker status; compute differences and Gini across groups."
+    },
+    {
+      "metric": "compliance_by_location_type",
+      "current_gap": "Counters exist but metrics not derived.",
+      "suggestion": "At finalize, compute share compliant per location_type from visits_compliant_by_type / visits_total_by_type."
+    },
+    {
+      "metric": "misinformation_prevalence",
+      "current_gap": "No explicit prevalence series.",
+      "suggestion": "Track daily share of agents experiencing a misinformation event or above a misinformation_exposure threshold; output series and aggregates."
+    },
+    {
+      "metric": "cost_per_additional_adopter",
+      "current_gap": "Campaign spending accumulated but not related to adoption gains.",
+      "suggestion": "Compute (policy_cost_total) / (sum of daily adopters above baseline or incremental adoption_area under curve)."
+    }
+  ],
+  "prioritized_actions": [
+    "Reintroduce evaluate() and finalize_metrics(), plus a functional main() that runs and reports metrics.",
+    "Implement a minimal infection process and compute infection-related metrics (attack rate, Rt, cases averted).",
+    "Add mandate_scope logic and compute compliance_by_location_type.",
+    "Implement retailer rationing and Government.set_price_controls; track stockout days consistently.",
+    "Throttle performance-heavy diagnostics (neighbor_corr, social info-sharing) and add a diagnostics flag.",
+    "Enhance MediaChannel with reach, trustworthiness, and bias; track misinformation_prevalence.",
+    "Add equity metrics across subgroups (income, age, essential worker)."
+  ],
+  "additional_comments": "The new fatigue and mandate compliance logic are solid improvements. The supply model switch and location field normalization reduce confusion. However, removing evaluation and epi coupling significantly reduced functionality. Focus on restoring outputs and adding minimal epi dynamics. Keep the direct main() call per sandbox requirement, but it should do useful work (run+print metrics).",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass\n",
+      "after": "def main():\n    cfg = DEFAULT_CONFIG.copy()\n    sim = Simulation(cfg)\n    series = sim.run()\n    metrics = sim.evaluate([\n        \"adoption_rate_over_time\",\n        \"time_to_50_percent_adoption\",\n        \"peak_adoption\",\n        \"sustained_adoption_duration\",\n        \"compliance_by_location_type\",\n        \"equity_gap_in_adoption\",\n        \"inventory_outage_days\",\n        \"enforcement_actions_count\",\n        \"misinformation_prevalence\",\n        \"cost_per_additional_adopter\",\n        \"effective_reproduction_number\",\n        \"infection_attack_rate\",\n        \"cases_averted\",\n    ])\n    print(json.dumps({\"series_keys\": list(series.keys()), \"metrics\": metrics}))\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Individual:\n    ...\n    current_mask_use: bool = False\n    mask_inventory: int = 0\n    ...\n",
+      "after": "class Individual:\n    ...\n    health_state: str = \"S\"  # S, E, I, R\n    days_in_state: int = 0\n    vaccination_status: str = \"unvaccinated\"\n    current_mask_use: bool = False\n    mask_inventory: int = 0\n    ...\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def step(self, day: int) -> None:\n    ...\n    # Track compliance and per-visit enforcement\n    for vid in visits:\n        loc = self.locations[vid]\n        self.visits_total_by_type[loc.loc_type] = self.visits_total_by_type.get(loc.loc_type, 0) + 1\n        if use_today:\n            self.visits_compliant_by_type[loc.loc_type] = self.visits_compliant_by_type.get(loc.loc_type, 0) + 1\n        requirement_active = mandate_active or loc.mask_required\n        if requirement_active:\n            ...\n",
+      "after": "def step(self, day: int) -> None:\n    ...\n    scope = str(self.cfg.get(\"mandate_scope\", \"indoor_public\"))\n    def scope_applies(loc_type: str) -> bool:\n        if scope == \"indoor_public\":\n            return loc_type in {\"stores\", \"transit\", \"public_venues\"}\n        if scope == \"all_public\":\n            return loc_type in {\"stores\", \"transit\", \"public_venues\", \"leisure\"}\n        return False\n    # Track compliance and per-visit enforcement\n    for vid in visits:\n        loc = self.locations[vid]\n        self.visits_total_by_type[loc.loc_type] = self.visits_total_by_type.get(loc.loc_type, 0) + 1\n        if use_today:\n            self.visits_compliant_by_type[loc.loc_type] = self.visits_compliant_by_type.get(loc.loc_type, 0) + 1\n        requirement_active = (mandate_active and scope_applies(loc.loc_type)) or loc.mask_required\n        if requirement_active:\n            ...\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def purchase_masks_from_retailer(self, price: float, inventory: Dict[str, Any], rng: random.Random, affordability_threshold: float = 0.05, price_elasticity: float = -0.8) -> int:\n    ...\n    desired_qty = 1 if rng.random() < buy_prob else 0\n    qty = min(desired_qty, inventory.get(\"stock\", 0))\n    inventory[\"stock\"] -= qty\n    self.mask_inventory += qty\n    self.cumulative_spend += qty * price\n    return qty\n",
+      "after": "def purchase_masks_from_retailer(self, price: float, inventory: Dict[str, Any], rng: random.Random, affordability_threshold: float = 0.05, price_elasticity: float = -0.8, rationing_limit: int = 5) -> int:\n    ...\n    expected_qty = max(1, int(1 + (1.0 - self.cost_sensitivity) * 2))\n    desired_qty = 0\n    for _ in range(min(expected_qty, rationing_limit)):\n        if rng.random() < buy_prob:\n            desired_qty += 1\n    qty = min(desired_qty, inventory.get(\"stock\", 0), rationing_limit)\n    inventory[\"stock\"] -= qty\n    self.mask_inventory += qty\n    self.cumulative_spend += qty * price\n    return qty\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Government:\n    ...\n    def allocate_supply_to_retailers(self, retailers: List[Retailer], amount_total: int) -> None:\n        ...\n",
+      "after": "class Government:\n    ...\n    price_cap: Optional[float] = None\n    subsidy_per_mask: float = 0.0\n    def set_price_controls(self, cap: Optional[float], subsidy: float = 0.0) -> None:\n        self.price_cap = cap\n        self.subsidy_per_mask = max(0.0, subsidy)\n    def allocate_supply_to_retailers(self, retailers: List[Retailer], amount_total: int) -> None:\n        ...\n        # Apply price controls\n        for r in retailers:\n            if self.price_cap is not None:\n                r.price = min(r.price, self.price_cap)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.series.setdefault(\"any_stockout\", []).append(any_out_today_flagged)\n",
+      "after": "self.series.setdefault(\"any_stockout\", []).append(any_out_today_flagged)\nif any_out_today_flagged:\n    self.retailer_stockout_days += 1\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _neighbor_influence_corr(self) -> float:\n    ...\n",
+      "after": "def _neighbor_influence_corr(self, sample_fraction: float = 0.2) -> float:\n    if self.N <= 0:\n        return 0.0\n    sample_size = max(1, int(self.N * sample_fraction))\n    indices = self.rng.sample(range(self.N), sample_size) if sample_size < self.N else range(self.N)\n    xs, ys = [], []\n    for idx in indices:\n        p = self.people[idx]\n        neigh = p.network_neighbors\n        neigh_adopt = sum(1 for j in neigh if self.people[j].current_mask_use) / max(1, len(neigh))\n        xs.append(neigh_adopt)\n        ys.append(1.0 if p.current_mask_use else 0.0)\n    return _pearson_correlation(xs, ys)\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "# No evaluate method\n",
+      "after": "def evaluate(self, evaluation_metrics: Optional[List[str]] = None) -> Dict[str, Any]:\n    metrics = evaluation_metrics if evaluation_metrics is not None else self.cfg.get(\"evaluation_metrics\", [])\n    results: Dict[str, Any] = {}\n    adop = self.series.get(\"adoption_rate\", [])\n    if not adop:\n        return results\n    # adoption metrics\n    results[\"adoption_rate_over_time\"] = adop if \"adoption_rate_over_time\" in metrics else None\n    # time to thresholds, peak, sustained\n    # compliance_by_location_type\n    if \"compliance_by_location_type\" in metrics:\n        out = {}\n        for k, tot in self.visits_total_by_type.items():\n            comp = self.visits_compliant_by_type.get(k, 0)\n            out[k] = comp / tot if tot > 0 else None\n        results[\"compliance_by_location_type\"] = out\n    # equity gap by income decile (top-bottom)\n    if \"equity_gap_in_adoption\" in metrics:\n        decs = self._precomputed_deciles or self._income_deciles()\n        if len(decs) >= 2:\n            def mean_adopt(idx_list):\n                return sum(1.0 if self.people[i].current_mask_use else 0.0 for i in idx_list) / len(idx_list)\n            results[\"equity_gap_in_adoption\"] = mean_adopt(decs[-1]) - mean_adopt(decs[0])\n        else:\n            results[\"equity_gap_in_adoption\"] = None\n    # inventory outage days\n    if \"inventory_outage_days\" in metrics:\n        results[\"inventory_outage_days\"] = sum(self.series.get(\"any_stockout\", []))\n    # enforcement actions\n    if \"enforcement_actions_count\" in metrics:\n        results[\"enforcement_actions_count\"] = self.enforcement_actions\n    # misinformation prevalence\n    if \"misinformation_prevalence\" in metrics:\n        results[\"misinformation_prevalence\"] = len(self._misinfo_events) / max(1, len(self.series.get(\"adoption_rate\", [])))\n    # cost per additional adopter\n    if \"cost_per_additional_adopter\" in metrics:\n        delta = max(0.0, adop[-1] - adop[0])\n        results[\"cost_per_additional_adopter\"] = (self.policy_cost_total / delta) if delta > 1e-6 else None\n    # epi metrics placeholders if no epi\n    if \"effective_reproduction_number\" in metrics:\n        results[\"effective_reproduction_number\"] = None\n    if \"infection_attack_rate\" in metrics:\n        results[\"infection_attack_rate\"] = None\n    if \"cases_averted\" in metrics:\n        results[\"cases_averted\"] = None\n    return results\n",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes improved behavioral realism (fatigue, risk weighting, mandate compliance overrides), normalized location fields, and cleaned supply flow logic. However, they also removed previously implemented evaluation, epi coupling, visualization, and a functional main(), leaving the simulation without outputs. Performance risk increased due to added per-day O(E) social-sharing pass.",
+    "positive_impacts": [
+      "Added fatigue and recovery dynamics into adoption decisions.",
+      "Introduced per-day stochastic mandate activation and compliance override logic.",
+      "Normalized Location field names and fixed enforcement checks.",
+      "Improved social and media influence integration with susceptibility parameters.",
+      "Supply any_stockout tracking is now appended consistently each day."
+    ],
+    "negative_impacts": [
+      "Removed evaluate(), epidemiological coupling, save/visualize utilities, and functional main().",
+      "Increased daily computational load by adding a full network social-sharing pass.",
+      "Mandate scope still not applied; location type scoping remains missing.",
+      "Stockout counters exist but remain unused (no aggregation)."
+    ],
+    "suggestions": [
+      "Restore evaluate() and a useful main() in this iteration to provide outputs.",
+      "Gate heavy diagnostics (neighbor_corr, social-sharing) and compute less frequently.",
+      "Implement mandate scope and rationing/price-control features to align with spec.",
+      "Add a minimal infection model to enable epidemiological metrics."
+    ]
+  }
+}

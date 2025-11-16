@@ -1,0 +1,262 @@
+{
+  "summary": "The simulation is now a complete, runnable ABM with modular structure, calibration hooks, and artifact outputs. However, several critical logic and implementation issues undermine correctness and fidelity: supply cannot recover from stockout, household norms are effectively disabled due to an indexing bug, purchase allocations can lose inventory when budgets are insufficient, fines are never applied, and exogenous risk is ignored. There is also a window-slicing bug in the evaluation pipeline that can invalidate calibration metrics. Addressing these issues will substantially improve stability, realism, and alignment with the specification.",
+  "critical_issues": [
+    {
+      "issue": "Retailer restocking depends on current stock (restock_rate * current_stock), preventing recovery from zero stock.",
+      "impact": "Once stock hits zero, restock_amount remains zero, causing permanent stockout and depressing adoption irrespective of policy or demand. Violates nonnegative_stock_constraint intent and undermines stockout_rate metric.",
+      "solution": "Restock towards a target independent of current_stock, e.g., proportional to population size or a target-per-1000 basis. Example: restock_amount = int(pop_size * base_restock_rate * stochastic_factor).",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Household norm signal indexing uses today's index (t) from mask_use_history before it's appended.",
+      "impact": "Falls back to zero signals every day, effectively disabling household influence despite parameters, thereby biasing adoption dynamics and social contagion.",
+      "solution": "Use previous day decisions if available: idx = t - 1; last_decisions = mask_use_history[idx] if idx >= 0 else zeros.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Purchase allocation reduces retailer stock before budget feasibility; on commit, partial purchases do not return unpurchased stock to retailer.",
+      "impact": "Inventory disappears when agents cannot afford allocated quantities, violating conservation, distorting stockout_rate and price formation.",
+      "solution": "Either move affordability checks into the supply module before decrementing stock or add the unpurchased remainder back to retailer.stock in _commit_buffers.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Evaluation window handling double-applies the window offset.",
+      "impact": "Metrics for calibration can be based on empty or misaligned series (NaNs or nonsensical RMSE/MAE), hurting calibration validity and downstream results.",
+      "solution": "When evaluating a sim that was already run only on the window, call evaluate(window=None); or run from t=0 and then apply window slicing in evaluate().",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Enforcement fines are not applied; fine_amount and enforcement_probability exist but no budget deduction occurs.",
+      "impact": "Removes an important compliance cost channel; policy_monotonicity_check and enforcement_incidents_rate become less meaningful; underestimates policy effects.",
+      "solution": "Emit per-person enforcement events and deduct fines during commit without allowing negative budgets (track fines), e.g., buffers['events']['enforcement_events'] = [{'pid': i, 'venue_id': v.id}].",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Exogenous risk series (exogenous_risk_series) is ignored in risk perception.",
+      "impact": "Risk_response_sanity validation may fail; adoption may not respond to exogenous risk surges (e.g., case waves) as expected.",
+      "solution": "In MessagingAndRiskModule, add a term using exogenous_risk_series[t] with a tunable weight.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Affordability threshold interpreted inversely.",
+      "impact": "Agents overly restrict purchases, misrepresenting budget constraints and depressing adoption even when masks are affordable.",
+      "solution": "If affordability_threshold_budget_share is the max share of budget to spend on a purchase, compare cost <= budget * affordability_share (not 1 - share).",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Supply dynamics and stockout recovery",
+      "current_approach": "Restock proportional to current stock; price adjusts by stock_ratio vs population.",
+      "suggested_approach": "Restock towards a target inventory proportional to population or demand, with variability; ensure recovery from zero. Optionally include lead times.",
+      "expected_benefit": "Stabilizes supply, realistic stockout waves, better policy-supply interplay; more meaningful stockout_rate."
+    },
+    {
+      "aspect": "Household norms and sharing",
+      "current_approach": "Household norm computed but effectively zero due to indexing; no intra-household sharing.",
+      "suggested_approach": "Fix indexing; implement simple pre-purchase redistribution within households from surplus to zero-inventory members.",
+      "expected_benefit": "Increases internal norm pressure and mitigates inequality; reduces unnecessary purchases and improves realism."
+    },
+    {
+      "aspect": "Policy enforcement and fines",
+      "current_approach": "Gatekeeping denies entry; no fines applied.",
+      "suggested_approach": "Emit per-person enforcement incidents and deduct fines probabilistically (or deterministically) based on enforcement_probability.",
+      "expected_benefit": "Improves policy channel strength, supports monotonicity checks, and can influence adoption via budget and compliance."
+    },
+    {
+      "aspect": "Risk perception drivers",
+      "current_approach": "Base perceived risk + local venue outbreak level + messaging; ignores exogenous series and media sources.",
+      "suggested_approach": "Add exogenous_risk_series influence, and optionally a MediaSource module affecting trust and perceived risk.",
+      "expected_benefit": "Allows scenario testing (waves), better fit to observed time series, supports risk_response_sanity."
+    },
+    {
+      "aspect": "Demographics",
+      "current_approach": "Ages are uniform 18\u201380, ignoring age_distribution.",
+      "suggested_approach": "Sample ages by bins according to params['age_distribution'].",
+      "expected_benefit": "Captures heterogeneity in adoption and risk by age (if later used), more realistic population structure."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py::RetailSupplyModule.forward",
+      "modification": "Restock based on population target instead of current stock; add a minimal floor to ensure recovery from zero.",
+      "reason": "Prevents permanent stockouts and allows realistic supply dynamics.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py::HouseholdModule.forward",
+      "modification": "Use previous day (t-1) mask decisions for household norm signal.",
+      "reason": "Fixes a logic bug that zeroes household norms, enabling intended social influence.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py::Simulation._commit_buffers",
+      "modification": "Return unpurchased allocated inventory to retailer stock when budgets are insufficient.",
+      "reason": "Avoids inventory loss, preserves conservation and stock correctness.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py::MobilityAndLocationModule.forward + Simulation._commit_buffers",
+      "modification": "Emit per-person enforcement events and apply fines during commit.",
+      "reason": "Implements policy costs and connects enforcement incidents to economic consequences.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py::MessagingAndRiskModule.forward",
+      "modification": "Incorporate exogenous_risk_series[t] into risk perception with a configurable weight.",
+      "reason": "Enables risk_response_sanity checks and scenario realism.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py::DecisionAndAdoptionModule.forward",
+      "modification": "Correct affordability threshold to budget * affordability_share.",
+      "reason": "Aligns with parameter semantics and realistic purchasing behavior.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py::PolicyAndEnforcementModule.forward",
+      "modification": "Use venue staff_enforcement_level when computing enforcement_strictness.",
+      "reason": "Reflects venue-level heterogeneity and improves enforcement modeling.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py::MobilityAndLocationModule.forward",
+      "modification": "Respect location_time_fraction dict if provided; fallback to individual keys.",
+      "reason": "Aligns with the task spec parameterization and improves configurability.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py::evaluate_params",
+      "modification": "Remove double-windowing by either running from day 0 and passing window, or calling evaluate(window=None) after running exactly the window.",
+      "reason": "Prevents metric misalignment and ensures valid calibration scoring.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py::Simulation._init_entities",
+      "modification": "Sample ages according to params['age_distribution'] instead of uniform random.",
+      "reason": "Improves demographic realism as specified.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "overall_adoption_rate and time_to_80_percent_adoption",
+      "current_gap": "Adoption may plateau low due to supply deadlocks and weak household norms.",
+      "suggestion": "Fix restocking and household indexing, calibrate social_influence_weight and message_effectiveness using observed adoption series (minimize MAE_vs_observed_adoption)."
+    },
+    {
+      "metric": "stockout_rate",
+      "current_gap": "Permanent stockout risk due to restock bug; price feedback may not reflect real availability waves.",
+      "suggestion": "Implement target-based restock and a small baseline restock floor; calibrate restock_rate_per_day and supply_variability to observed availability data."
+    },
+    {
+      "metric": "inequality_index_of_adoption",
+      "current_gap": "Overestimation if low-income agents cannot buy due to affordability misinterpretation and no household sharing.",
+      "suggestion": "Fix affordability threshold, add household sharing, and consider income-sensitive trust/risk parameters."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix restocking logic to recover from zero stock (RetailSupplyModule).",
+    "Fix household norm indexing (use t-1 decisions).",
+    "Reconcile purchase allocations with budgets and return unpurchased inventory.",
+    "Fix evaluation window bug in evaluate_params.",
+    "Apply enforcement fines on incidents.",
+    "Incorporate exogenous_risk_series into risk perception.",
+    "Correct affordability threshold to share of budget.",
+    "Respect location_time_fraction dict and staff_enforcement_level.",
+    "Sample ages using age_distribution.",
+    "Add minimal household mask sharing before purchases (optional but recommended)."
+  ],
+  "additional_comments": "- The module outputs declarations contain keys that do not exactly match written buffers (e.g., RetailSupplyModule.outputs lists 'state_updates.retailer.stock_price' but code writes 'state_updates.retailer' dict). Consider aligning these for traceability.\n- Add unit tests for validation_criteria (convergence_stability, policy_monotonicity_check, nonnegative_stock_constraint, budget_feasibility, risk_response_sanity) to automatically guard regressions.\n- Consider adding a lightweight MediaSource module later; short-term, document that messaging effects are folded into the authority module.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "restock_amount = int(max(0.0, retailer.stock * base_restock_rate * stochastic_factor))\nretailer.stock = max(0, retailer.stock + restock_amount)",
+      "after": "target_per_person = float(params.get(\"target_stock_per_person\", 0.4))\nbase_target = int(max(0.0, target_per_person * pop_size))\nrestock_amount = int(max(1.0, (base_target - retailer.stock) * base_restock_rate * stochastic_factor))\nretailer.stock = max(0, retailer.stock + restock_amount)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "last_decisions = state[\"mask_use_history\"][t] if t < len(state[\"mask_use_history\"]) else [0] * len(persons)",
+      "after": "idx = t - 1\nlast_decisions = state[\"mask_use_history\"][idx] if idx >= 0 and idx < len(state[\"mask_use_history\"]) else [0] * len(persons)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "for pid, qty in allocations.items():\n    if 0 <= pid < N and qty > 0:\n        cost = qty * retailer_price\n        # Budget cannot go negative\n        if persons[pid].budget >= cost:\n            persons[pid].budget -= cost\n        else:\n            # Insufficient funds; partial purchase\n            affordable_qty = int(persons[pid].budget // max(0.1, retailer_price))\n            qty = max(0, min(qty, affordable_qty))\n            persons[pid].budget -= qty * retailer_price\n        persons[pid].mask_inventory += qty",
+      "after": "unspent_back_to_stock = 0\nfor pid, qty in allocations.items():\n    if 0 <= pid < N and qty > 0:\n        price = max(0.1, retailer_price)\n        affordable_qty = int(persons[pid].budget // price)\n        actual_qty = max(0, min(qty, affordable_qty))\n        spend = actual_qty * price\n        persons[pid].budget -= spend\n        persons[pid].mask_inventory += actual_qty\n        unspent_back_to_stock += (qty - actual_qty)\n# Return unpurchased quantity to retailer\nstate[\"retailer\"].stock = max(0, state[\"retailer\"].stock + unspent_back_to_stock)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "enforcement_incidents = 0\n...\nif v.mask_required and not wear:\n    if random.random() < v.enforcement_strictness:\n        enforcement_incidents += 1\n        continue",
+      "after": "enforcement_incidents = 0\nenforcement_events = []\n...\nif v.mask_required and not wear:\n    if random.random() < v.enforcement_strictness:\n        enforcement_incidents += 1\n        enforcement_events.append({\"pid\": i, \"venue_id\": v.id})\n        continue\n...\nbuffers.setdefault(\"events\", {})[\"enforcement_incidents\"] = enforcement_incidents\nbuffers[\"events\"][\"enforcement_events\"] = enforcement_events",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "# no fines applied in _commit_buffers",
+      "after": "authority = self.state[\"authority\"]\nfor ev in self.buffers.get(\"events\", {}).get(\"enforcement_events\", []):\n    pid = ev.get(\"pid\")\n    if pid is not None and 0 <= pid < N:\n        fine = float(getattr(authority, \"fine_amount\", 0.0))\n        if fine > 0.0:\n            persons[pid].budget = max(0.0, persons[pid].budget - fine)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "perceived_risk_base = float(params.get(\"perceived_risk_base\", 0.2))\nmessage_effectiveness = float(params.get(\"message_effectiveness\", 0.15))\nmisinformation_rate = float(params.get(\"misinformation_rate\", 0.05))\nrisk_decay_rate = float(params.get(\"risk_decay_rate_per_day\", 0.02))\n...\nrisk = perceived_risk_base + 0.5 * local_avg + msg_effect - misinformation",
+      "after": "perceived_risk_base = float(params.get(\"perceived_risk_base\", 0.2))\nmessage_effectiveness = float(params.get(\"message_effectiveness\", 0.15))\nmisinformation_rate = float(params.get(\"misinformation_rate\", 0.05))\nrisk_decay_rate = float(params.get(\"risk_decay_rate_per_day\", 0.02))\nexo = params.get(\"exogenous_risk_series\") or []\nexo_weight = float(params.get(\"exogenous_risk_weight\", 0.3))\n...\nexo_term = exo_weight * float(exo[t]) if isinstance(exo, list) and t < len(exo) else 0.0\nrisk = perceived_risk_base + 0.5 * local_avg + msg_effect - misinformation + exo_term",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "affordability_share = float(params.get(\"affordability_threshold_budget_share\", 0.05))\n...\nafford_limit = p.budget * (1.0 - affordability_share)\nif pack_cost <= afford_limit:\n    purchases.append((i, purchase_pack_size))\nelif min_price <= afford_limit:\n    purchases.append((i, 1))",
+      "after": "affordability_share = float(params.get(\"affordability_threshold_budget_share\", 0.05))\n...\nafford_limit = p.budget * affordability_share\nif pack_cost <= afford_limit:\n    purchases.append((i, purchase_pack_size))\nelif min_price <= afford_limit:\n    purchases.append((i, 1))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "v.enforcement_strictness = clip01(\n    staff_enforcement_level_mean * authority.enforcement_probability * gatekeeping_weight\n)",
+      "after": "v.enforcement_strictness = clip01(\n    v.staff_enforcement_level * authority.enforcement_probability * gatekeeping_weight\n)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "time_fraction = {\n    \"work\": float(params.get(\"time_fraction_work\", 0.25)),\n    \"retail\": float(params.get(\"time_fraction_retail\", 0.15)),\n    \"transport\": float(params.get(\"time_fraction_transport\", 0.1)),\n}",
+      "after": "lf = params.get(\"location_time_fraction\")\nif isinstance(lf, dict):\n    time_fraction = {\n        \"work\": float(lf.get(\"work\", params.get(\"time_fraction_work\", 0.25))),\n        \"retail\": float(lf.get(\"retail\", params.get(\"time_fraction_retail\", 0.15))),\n        \"transport\": float(lf.get(\"transport\", params.get(\"time_fraction_transport\", 0.1))),\n    }\nelse:\n    time_fraction = {\n        \"work\": float(params.get(\"time_fraction_work\", 0.25)),\n        \"retail\": float(params.get(\"time_fraction_retail\", 0.15)),\n        \"transport\": float(params.get(\"time_fraction_transport\", 0.1)),\n    }",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "sim = Simulation(simulator.get_params())\nsim.run(start_day=window[0], end_day=window[1])\n...\nmetrics = sim.evaluate(ground_truth=gt, window=window)",
+      "after": "sim = Simulation(simulator.get_params())\nsim.run(start_day=window[0], end_day=window[1])\n...\nmetrics = sim.evaluate(ground_truth=gt, window=None)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "ages = [random.randint(18, 80) for _ in range(N)]",
+      "after": "age_dist = params.get(\"age_distribution\", {\"0_17\": 0.2, \"18_64\": 0.65, \"65_plus\": 0.15})\nbins = [(0, 17, float(age_dist.get(\"0_17\", 0.2))), (18, 64, float(age_dist.get(\"18_64\", 0.65))), (65, 90, float(age_dist.get(\"65_plus\", 0.15)))]\n# Normalize and sample\ns = sum(b[2] for b in bins) or 1.0\nprobs = [b[2]/s for b in bins]\nages = []\nfor _ in range(N):\n    r = random.random()\n    acc = 0.0\n    for (lo, hi, pbin), pr in zip(bins, probs):\n        acc += pr\n        if r <= acc:\n            ages.append(random.randint(lo, hi))\n            break",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent update replaced a stub with a complete, runnable simulation featuring entities, modules, network, buffers\u2192commit pattern, calibration scaffolding, and artifact saving. This significantly enhances functionality and structure but introduced several logic bugs that affect correctness.",
+    "positive_impacts": [
+      "Complete modular ABM implementation with clear separation of concerns.",
+      "Fallbacks for numpy/networkx; reproducibility via seeding.",
+      "Calibration architecture and artifact outputs for experiments.",
+      "Visualization and JSON persistence for results and module IO."
+    ],
+    "negative_impacts": [
+      "Restock-from-zero deadlock due to proportional restocking to current stock.",
+      "Household norms effectively disabled due to t vs t-1 indexing.",
+      "Purchase allocation loses inventory when budgets are insufficient.",
+      "Evaluation window slicing bug undermines calibration metrics.",
+      "Fines and exogenous risk not applied, reducing fidelity to spec."
+    ],
+    "suggestions": [
+      "Implement the proposed code fixes for restock, household indexing, and purchase reconciliation.",
+      "Fix evaluation pipeline to avoid double slicing and ensure robust calibration.",
+      "Introduce per-person enforcement events and fines during commit.",
+      "Add exogenous risk integration and respect location_time_fraction and staff_enforcement_level.",
+      "Add small unit tests for validation criteria to catch regressions."
+    ]
+  }
+}

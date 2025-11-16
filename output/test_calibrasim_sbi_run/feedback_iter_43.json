@@ -1,0 +1,217 @@
+{
+  "summary": "The current codebase is a robust, generic information-driven adoption model, but it does not implement the Mask Adoption Dynamics Simulation specified. It lacks key entities (Retailer, PolicyAuthority, Location), daily mask-wearing decision-making, purchasing and inventory dynamics at the retailer level, and the required metrics and validations. Recent changes improved stability, reproducibility, and performance (deferred plotting, optional neighbor correlation, seeded Poisson, fatigue attenuation), but the fundamental domain mismatch remains. This feedback outlines a concrete refactor path, code-level changes, and prioritized steps to align the simulation with the spec.",
+  "critical_issues": [
+    {
+      "issue": "Domain mismatch: one-time adoption vs. daily mask-wearing behavior",
+      "impact": "All results are invalid relative to the mask adoption spec; the model cannot represent fatigue, replacement cycles, location-dependent requirements, or daily compliance dynamics.",
+      "solution": "Refactor Person to a mask-specific daily decision model (is_wearing_mask), add inventory of masks (mask_owned_count), fatigue dynamics, and implement decide_wear_mask, replace_mask, purchase_mask, and respond_to_policy behaviors executed daily.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing required entities and interactions (Retailer, PolicyAuthority, Location; mask_purchase, supply_coordination, location_attendance)",
+      "impact": "Cannot simulate price effects, stockouts, restocking, enforcement at locations, or policy coordination, preventing computation of masks_sold_over_time, shortage_frequency, compliance_under_mandate, and average_cost_per_person.",
+      "solution": "Implement Retailer with inventory/price/restock/alloc; PolicyAuthority with mandate/enforcement/fines/campaign/supply coordination; Location with mask_requirement and compliance checks; wire daily interactions: movement, purchase, enforcement.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Configuration schema misaligned with spec",
+      "impact": "Users cannot configure the simulation as specified (population_size, network_topology=small_world, average_degree, mandate parameters, supply constraints), leading to confusion and invalid experiments.",
+      "solution": "Map and accept spec keys with backward compatibility. Example: population_size -> n_agents, network_topology 'small_world' -> Watts\u2013Strogatz, mandate_day -> mandate_start_day, mandate_enforcement_level -> mandate_enforcement_prob, compliance_penalty -> noncompliance_penalty, price_per_mask, mask_replacement_interval_days, purchase_threshold.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing required metrics and validation criteria",
+      "impact": "Cannot evaluate model per spec. No adoption_rate_over_time (as defined for daily mask wearing), time_to_threshold (70%), compliance_under_mandate, masks_sold_over_time, shortage_frequency, adoption_inequality_gini (for mask wearing), policy_effect_lift, peak_adoption_rate, average_cost_per_person; no convergence_of_adoption or inventory validation.",
+      "solution": "Add series/metrics to Simulation.evaluate and AggregationAndMetrics: compute mask-specific adoption (is_wearing_mask) daily rate, final and peak adoption, time_to_threshold (0.7), compute compliance while mandate_active, track masks sold and shortage days, compute income-demographic Gini on is_wearing_mask, policy_effect_lift pre/post mandate, cumulative spending per person; implement validation checks for convergence and inventory non-negativity.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "retailer_stockout_share series length mismatch when supply disabled",
+      "impact": "Inconsistent series lengths can break plotting, CSV export alignment, or downstream analysis.",
+      "solution": "Append a daily 0.0 to retailer_stockout_share when supply is disabled to keep series aligned.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Performance overhead in sample_poisson due to new Generator per call",
+      "impact": "Unnecessary CPU overhead if Poisson sampling runs frequently (e.g., daily restocking across many retailers).",
+      "solution": "Cache a numpy Generator in SupplyChain (or Retailer) seeded from rng once and reuse it for Poisson sampling.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Output naming does not match spec",
+      "impact": "Automation expecting specified keys fails; misalignment complicates evaluation.",
+      "solution": "Export series keys per spec: adoption_rate_over_time, masks_sold_over_time; compute and report time_to_threshold, compliance_under_mandate, shortage_frequency, etc.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Agent decision process",
+      "current_approach": "One-time adoption (adoption_state=1) driven by information exposure and policy signals.",
+      "suggested_approach": "Daily mask-wearing decision decide_wear_mask combining social norms among contacts that day, policy enforcement/fines, trust in authority, perceived risk, fatigue, and mask availability; include replace_mask and purchase_mask behaviors and a mask_replacement_interval_days mechanism.",
+      "expected_benefit": "Captures temporal dynamics of mask usage and compliance under policy and supply constraints, enabling realistic adoption rate over time and policy lift estimation."
+    },
+    {
+      "aspect": "Supply and pricing",
+      "current_approach": "Centralized supply chain inventory without pricing or retailers.",
+      "suggested_approach": "Multiple Retailers with price_per_mask, inventory, restock_rate, allocation_policy (e.g., FIFO, prioritize low-income regions), and dynamic pricing under shortage; Persons purchase when mask_owned_count <= purchase_threshold subject to affordability.",
+      "expected_benefit": "Enables masks_sold_over_time, shortage_frequency, and average_cost_per_person metrics; supports policy supply coordination and subsidies."
+    },
+    {
+      "aspect": "Policy mechanics",
+      "current_approach": "Generic campaign and mandate enforcement probability applied to one-time adoption.",
+      "suggested_approach": "PolicyAuthority implements mandates on specific Location types (work, store, public transport), sets enforcement_level and fines; run_public_campaign affects trust_in_authority; coordinate_supply adjusts retailer restock or prices.",
+      "expected_benefit": "Allows estimation of compliance_under_mandate and policy_effect_lift; better alignment with real policy levers."
+    },
+    {
+      "aspect": "Network and mobility",
+      "current_approach": "Static social graph; no location attendance.",
+      "suggested_approach": "Daily movement between home/work/retail/public spaces (location_attendance), with mask_requirement and enforcement; compute observed norms per context and peer interactions (share_opinion).",
+      "expected_benefit": "Contextual mask usage and enforcement effects; more realistic social influence and contact patterns."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Refactor Person dataclass and add mask-specific behaviors (is_wearing_mask, mask_owned_count, fatigue_level, compliance_propensity, social_influence_susceptibility, decide_wear_mask, purchase_mask, replace_mask).",
+      "reason": "Enable daily mask-wearing dynamics required by the spec.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Introduce Retailer, PolicyAuthority, and Location classes with per-spec attributes and behaviors; wire interactions (mask_purchase, supply_coordination, policy_compliance, location_attendance).",
+      "reason": "Implement required entities and interactions to produce spec metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Align configuration keys with spec and add backward compatibility mapping for existing keys.",
+      "reason": "Allow users to supply the task specification parameters directly.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add masks_sold_over_time, retailer-level stockouts, and average_cost_per_person tracking; compute adoption_inequality_gini on daily mask wearing.",
+      "reason": "Support required metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add validation checks: convergence_of_adoption, no_negative_inventory, threshold_reached_if_configured; return a validation summary.",
+      "reason": "Enforce spec validation criteria and improve robustness.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Always append retailer_stockout_share (0.0 when supply disabled) each day.",
+      "reason": "Keep series lengths aligned to avoid downstream errors.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Cache a numpy Generator in SupplyChain (or Retailer) for Poisson sampling to remove per-call SeedSequence overhead.",
+      "reason": "Improve performance and maintain reproducibility.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Expose spec-aligned series keys (adoption_rate_over_time, masks_sold_over_time) and compute policy_effect_lift and compliance_under_mandate in evaluate().",
+      "reason": "Ensure output is usable by evaluation pipeline and comparable to spec.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "policy_effect_lift",
+      "current_gap": "No pre-/post-mandate comparison controlling for trend; mandate not tied to locations.",
+      "suggestion": "Compute pre/post mandate adoption rate while controlling for linear trend over the pre-period; mandate applies to specific Location types with observed compliance rates."
+    },
+    {
+      "metric": "shortage_frequency",
+      "current_gap": "Centralized inventory prevents retailer-level stockout measurement.",
+      "suggestion": "Track stockouts across multiple Retailers and compute the share of days with any retailer stockout; calibrate restock_rate using observed supply disruptions."
+    },
+    {
+      "metric": "adoption_inequality_gini",
+      "current_gap": "Computed on one-time adoption, not daily mask wearing nor by demographic groups.",
+      "suggestion": "Compute daily mask wearing rates by income and demographic groups; average the Gini across the simulation or report trajectory."
+    },
+    {
+      "metric": "average_cost_per_person",
+      "current_gap": "No tracking of mask purchases or prices.",
+      "suggestion": "Accumulate per-person spending based on purchases and price_per_mask; include subsidies or vouchers effects."
+    },
+    {
+      "metric": "time_to_threshold (70%)",
+      "current_gap": "Not computed for mask wearing; only a generic 50% time using adoption_state.",
+      "suggestion": "Compute days to 70% daily mask wearing rate; if not reached, return -1 and flag in validation."
+    }
+  ],
+  "prioritized_actions": [
+    "Introduce mask-specific daily behavior: add is_wearing_mask, mask_owned_count, fatigue dynamics, and decide_wear_mask/purchase_mask/replace_mask behaviors.",
+    "Implement Retailer, PolicyAuthority, and Location entities with interactions (mask_purchase, supply_coordination, policy_compliance, location_attendance).",
+    "Align configuration schema to accept spec keys and provide backward compatibility.",
+    "Compute required metrics and add validation checks; rename series to spec-compliant keys.",
+    "Fix retailer_stockout_share alignment and cache Poisson RNG for performance.",
+    "Add minimal unit tests for new behaviors and metrics (e.g., mandate effect, purchasing under shortage, convergence)."
+  ],
+  "additional_comments": "Recent refactors (deferred plotting, optional neighbor correlation, seeded Poisson, fatigue attenuation) are solid improvements. Retain these while pivoting the core to mask-specific daily dynamics. Keep the main() direct call as required. Consider stubbing new classes first (Retailer, PolicyAuthority, Location) and iteratively wire behaviors to maintain testability.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "@dataclass\nclass Person:\n    id: int = 0\n    age_group: str = \"18_34\"\n    trust_in_institutions: float = 0.5\n    risk_perception: float = 0.4\n    susceptibility_to_misinfo: float = 0.4\n    adoption_state: int = 0\n    stubborn: bool = False\n    info_true_level: float = 0.0\n    info_misinfo_level: float = 0.0\n    fatigue: float = 0.0\n    household_id: int = -1\n    income: float = 1.0\n",
+      "after": "@dataclass\nclass Person:\n    id: int = 0\n    age_group: str = \"18_34\"\n    income_level: str = \"medium\"\n    home_location_id: int = -1\n    work_location_id: int = -1\n    trust_in_authority: float = 0.5\n    risk_perception: float = 0.4\n    social_influence_susceptibility: float = 0.5\n    compliance_propensity: float = 0.6\n    mask_owned_count: int = 0\n    is_wearing_mask: bool = False\n    fatigue_level: float = 0.0\n    daily_contacts: int = 10\n    # retain info for campaigns\n    info_true_level: float = 0.0\n    info_misinfo_level: float = 0.0\n    stubborn: bool = False\n    household_id: int = -1\n    income: float = 1.0\n\n    def decide_wear_mask(self, social_norm: float, mandate_active: bool, enforcement_level: float) -> None:\n        base = -2.0\n        logit = (\n            base\n            + self.social_influence_susceptibility * social_norm\n            + 0.3 * self.risk_perception\n            + 0.3 * self.trust_in_authority\n            - 2.0 * self.fatigue_level\n        )\n        if mandate_active:\n            logit += 1.5 * self.compliance_propensity + 2.0 * enforcement_level\n        p = logistic(logit)\n        self.is_wearing_mask = (self.mask_owned_count > 0) and (random.random() < p)\n\n    def replace_mask(self, day: int, interval: int) -> None:\n        if interval > 0 and day % interval == 0 and self.mask_owned_count > 0:\n            # one mask used today\n            self.mask_owned_count -= 1\n\n    def purchase_mask(self, retailers: List[\"Retailer\"], price_weight: float, threshold: int, rng: random.Random) -> int:\n        if self.mask_owned_count > threshold:\n            return 0\n        # choose retailer with inventory and lowest price\n        choices = [r for r in retailers if r.inventory > 0]\n        if not choices:\n            return 0\n        r = min(choices, key=lambda x: x.price_per_mask)\n        can_afford = self.income >= r.price_per_mask\n        if not can_afford:\n            return 0\n        bought = r.sell_masks(1)\n        self.mask_owned_count += bought\n        return bought\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class SupplyChain:\n    def __init__(self, cfg: Dict[str, Any], rng: random.Random):\n        self.cfg = cfg\n        self.rng = rng\n        self.enabled: bool = bool(cfg.get(\"with_supply\", False))\n        self.inventory: int = int(cfg.get(\"initial_inventory\", 0))\n        self.daily_replenishment_mean: float = float(cfg.get(\"daily_replenishment_mean\", 0.0))\n        self.any_stockout_today: int = 0\n\n    def allocate_daily_supply(self) -> int:\n        arrivals = sample_poisson(self.daily_replenishment_mean, self.rng)\n        self.inventory += int(arrivals)\n        self.any_stockout_today = 1 if self.inventory <= 0 else 0\n        return self.inventory\n",
+      "after": "class SupplyChain:\n    def __init__(self, cfg: Dict[str, Any], rng: random.Random):\n        self.cfg = cfg\n        self.rng = rng\n        self.enabled: bool = bool(cfg.get(\"with_supply\", False))\n        self.inventory: int = int(cfg.get(\"initial_inventory\", 0))\n        self.daily_replenishment_mean: float = float(cfg.get(\"daily_replenishment_mean\", 0.0))\n        self.any_stockout_today: int = 0\n        # cache numpy generator for performance\n        ss = np.random.SeedSequence(self.rng.getrandbits(128))\n        self.rg = np.random.default_rng(ss)\n\n    def allocate_daily_supply(self) -> int:\n        if not self.enabled:\n            self.any_stockout_today = 0\n            return self.inventory\n        arrivals = int(self.rg.poisson(max(0.0, self.daily_replenishment_mean)))\n        self.inventory += arrivals\n        self.any_stockout_today = 1 if self.inventory <= 0 else 0\n        return self.inventory\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _default_config(self) -> Dict[str, Any]:\n    return {\n        \"simulation_days\": 60,\n        \"random_seed\": 42,\n        \"n_agents\": 2000,\n        \"network_type\": \"watts_strogatz\",\n        \"avg_degree\": 8.0,\n        # ...\n        \"misinformation_takedown_rate\": 0.1,\n        \"mandate_start_day\": 9999,\n        \"mandate_enforcement_prob\": 0.0,\n        \"noncompliance_penalty\": 0.0,\n        # ...\n    }\n",
+      "after": "def _default_config(self) -> Dict[str, Any]:\n    return {\n        # Core timeframe\n        \"simulation_days\": 120,\n        \"random_seed\": 42,\n        # Population and network (align to spec)\n        \"population_size\": 10000,\n        \"network_topology\": \"small_world\",  # mapped to Watts\u2013Strogatz\n        \"average_degree\": 10,\n        # Behavior and social weights\n        \"initial_adoption_rate\": 0.1,\n        \"social_influence_weight\": 0.5,\n        \"authority_trust_weight\": 0.3,\n        \"risk_perception_weight\": 0.2,\n        \"fatigue_rate\": 0.01,\n        # Policy and enforcement\n        \"mandate_day\": 30,\n        \"mandate_enforcement_level\": 0.7,\n        \"compliance_penalty\": 50,\n        \"campaign_intensity\": 0.6,\n        # Supply & pricing\n        \"initial_inventory_per_capita\": 2,\n        \"restock_rate\": 0.2,\n        \"price_per_mask\": 1.0,\n        \"mask_replacement_interval_days\": 7,\n        \"purchase_threshold\": 1,\n        # Validation and targets\n        \"target_adoption_threshold\": 0.7,\n        \"validation_window_days\": 7,\n    }\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def build(self) -> Tuple[nx.Graph, List[Person], Dict[int, List[int]]]:\n    N = int(self.cfg.get(\"n_agents\", 5000))\n    network_type = self.cfg.get(\"network_type\", \"watts_strogatz\")\n    avg_degree = max(2, int(round(float(self.cfg.get(\"avg_degree\", 8.0)))))\n    rewiring_prob = float(self.cfg.get(\"rewiring_prob\", 0.1))\n    # ...\n    if network_type == \"barabasi_albert\":\n        # ...\n    else:\n        k = max(2, min(avg_degree if avg_degree % 2 == 0 else avg_degree + 1, N - 1))\n        G = nx.watts_strogatz_graph(n=N, k=k, p=rewiring_prob, seed=rng_seed)\n",
+      "after": "def build(self) -> Tuple[nx.Graph, List[Person], Dict[int, List[int]]]:\n    N = int(self.cfg.get(\"population_size\", self.cfg.get(\"n_agents\", 5000)))\n    topology = str(self.cfg.get(\"network_topology\", self.cfg.get(\"network_type\", \"small_world\")))\n    avg_degree = max(2, int(round(float(self.cfg.get(\"average_degree\", self.cfg.get(\"avg_degree\", 8.0))))))\n    rewiring_prob = float(self.cfg.get(\"rewiring_prob\", 0.1))\n    rng_seed = int(self.cfg.get(\"random_seed\", 42))\n\n    if topology in (\"scale_free\", \"barabasi_albert\"):\n        m = max(1, min(int(self.cfg.get(\"m_ba\", 3)), N - 1))\n        G = nx.barabasi_albert_graph(n=N, m=m, seed=rng_seed)\n    else:  # small_world\n        k = max(2, min(avg_degree if avg_degree % 2 == 0 else avg_degree + 1, N - 1))\n        G = nx.watts_strogatz_graph(n=N, k=k, p=rewiring_prob, seed=rng_seed)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Update series for this step\nself.series[\"adoption_rate\"].append(self._adoption_rate())\n# ...\nif self.with_supply:\n    self.supply.allocate_daily_supply()\n    self.series[\"retailer_stockout_share\"].append(self.supply.stockout_share())\n    self.series[\"any_stockout\"].append(1 if self.supply.inventory <= 0 else 0)\n",
+      "after": "# Update series for this step\n# Mask-specific adoption rate (fraction wearing mask today)\nself.series[\"adoption_rate_over_time\"].append(\n    sum(1 for p in self.people if getattr(p, \"is_wearing_mask\", False)) / float(len(self.people) or 1)\n)\n# Retailer stockout share alignment\nif self.with_supply:\n    self.supply.allocate_daily_supply()\n    self.series[\"retailer_stockout_share\"].append(self.supply.stockout_share())\n    self.series[\"any_stockout\"].append(1 if self.supply.inventory <= 0 else 0)\nelse:\n    self.series[\"retailer_stockout_share\"].append(0.0)\n    self.series[\"any_stockout\"].append(0)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate(self) -> Dict[str, Any]:\n    metrics_out: Dict[str, Any] = {}\n    eval_list: List[str] = list(self.cfg.get(\"evaluation_metrics\", []))\n    # ... custom RMSE/MAPE etc.\n    return metrics_out\n",
+      "after": "def evaluate(self) -> Dict[str, Any]:\n    out: Dict[str, Any] = {}\n    ar = self.series.get(\"adoption_rate_over_time\", [])\n    out[\"adoption_rate_over_time\"] = ar\n    out[\"final_adoption_rate\"] = (ar[-1] if ar else 0.0)\n    # time_to_threshold at 70%\n    thr = float(self.cfg.get(\"target_adoption_threshold\", 0.7))\n    out[\"time_to_threshold\"] = next((i for i, v in enumerate(ar) if v >= thr), -1)\n    # compliance_under_mandate\n    mandates = self.series.get(\"mandate_active\", [])\n    if mandates and ar:\n        active_idx = [i for i, m in enumerate(mandates) if m == 1 and i < len(ar)]\n        out[\"compliance_under_mandate\"] = float(np.mean([ar[i] for i in active_idx])) if active_idx else 0.0\n    else:\n        out[\"compliance_under_mandate\"] = 0.0\n    # masks_sold_over_time and shortage_frequency\n    sold = self.series.get(\"masks_sold_over_time\", [])\n    out[\"masks_sold_over_time\"] = sold\n    any_stockout = self.series.get(\"any_stockout\", [])\n    out[\"shortage_frequency\"] = (sum(1 for x in any_stockout if x) / float(len(any_stockout) or 1))\n    # inequality\n    gini_series = self.series.get(\"daily_gini\", [])\n    out[\"adoption_inequality_gini\"] = float(np.mean(gini_series)) if gini_series else 0.0\n    # policy_effect_lift: post - pre around mandate_day, control for linear pre-trend\n    mday = int(self.cfg.get(\"mandate_day\", 9999))\n    if 0 < mday < len(ar):\n        pre = np.array(ar[:mday], dtype=float)\n        post = np.array(ar[mday:], dtype=float)\n        if len(pre) >= 5 and len(post) >= 5:\n            x = np.arange(len(pre))\n            A = np.vstack([x, np.ones_like(x)]).T\n            slope, intercept = np.linalg.lstsq(A, pre, rcond=None)[0]\n            expected_post = intercept + slope * np.arange(len(pre), len(pre) + len(post))\n            out[\"policy_effect_lift\"] = float(np.nanmean(post - expected_post))\n        else:\n            out[\"policy_effect_lift\"] = float(np.nanmean(post) - np.nanmean(pre))\n    else:\n        out[\"policy_effect_lift\"] = 0.0\n    out[\"peak_adoption_rate\"] = (max(ar) if ar else 0.0)\n    out[\"average_cost_per_person\"] = float(np.mean(self.series.get(\"cumulative_cost_per_person\", [0.0])))\n    # Validation\n    vw = int(self.cfg.get(\"validation_window_days\", 7))\n    valid: Dict[str, Any] = {}\n    if len(ar) >= vw + 1:\n        tail = np.array(ar[-(vw + 1):])\n        diffs = np.abs(np.diff(tail))\n        valid[\"convergence_of_adoption\"] = float(np.mean(diffs)) < 0.005\n    else:\n        valid[\"convergence_of_adoption\"] = False\n    valid[\"no_negative_inventory\"] = all(v >= 0 for v in self.series.get(\"retailer_inventory_min\", [0]))\n    valid[\"threshold_reached_if_configured\"] = out[\"time_to_threshold\"] != -1\n    out[\"validation\"] = valid\n    return out\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes improve stability and performance (deferred matplotlib import, optional neighbor correlation with configurable frequency, Poisson sampling reproducibility, fatigue attenuation on sharing, error routing to stderr). However, they do not address the specification gap. One minor performance regression was introduced: creating a new numpy Generator for every Poisson sample.",
+    "positive_impacts": [
+      "Matplotlib import deferred to visualize(), improving portability.",
+      "Neighbor correlation made optional and less frequent, reducing compute overhead.",
+      "Poisson sampling seeded from RNG for reproducibility.",
+      "Fatigue attenuation applied to information sharing probabilities.",
+      "Improved error handling and clean JSON output."
+    ],
+    "negative_impacts": [
+      "Poisson sampling now constructs a new numpy Generator each call (performance overhead).",
+      "Output series still misaligned with spec; retailer_stockout_share length mismatch persists when supply is disabled.",
+      "Core model remains one-time adoption, not daily mask wearing."
+    ],
+    "suggestions": [
+      "Cache and reuse a numpy Generator in SupplyChain/Retailer for Poisson sampling.",
+      "Append retailer_stockout_share daily zeros when supply disabled.",
+      "Refactor to mask-specific daily behavior and required entities; align config and metrics to spec."
+    ]
+  }
+}

@@ -1,0 +1,1581 @@
+{
+  "model_type": "agent_based",
+  "description": "A multiplex-network agent-based model of mask-wearing adoption with information diffusion, social influence, policy messaging/enforcement, and retail supply constraints, calibrated on the first 30 days and predicting days 30-39.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age",
+        "household_id",
+        "workplace_id",
+        "social_network_neighbors",
+        "risk_perception",
+        "trust_in_authorities",
+        "social_influence_susceptibility",
+        "compliance_propensity",
+        "mask_state",
+        "mask_type",
+        "adherence_level",
+        "perceived_cost",
+        "income",
+        "information_set",
+        "last_adoption_change_day"
+      ],
+      "behaviors": [
+        "decide_adoption",
+        "update_risk_perception",
+        "interact_with_people",
+        "receive_information",
+        "respond_to_policy",
+        "purchase_mask",
+        "update_adherence"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "source_files": [
+            "data_fitting/mask_adoption_data/agent_attributes.csv",
+            "data_fitting/mask_adoption_data/train_data.csv",
+            "data_fitting/mask_adoption_data/social_network.json"
+          ],
+          "day0_fields": {
+            "wearing_mask": "train_data.csv: wearing_mask at day==0",
+            "received_info": "train_data.csv: received_info at day==0"
+          },
+          "fall_back_initial_adoption_rate": 0.1
+        }
+      }
+    },
+    {
+      "name": "Household",
+      "attributes": [
+        "id",
+        "member_ids",
+        "socioeconomic_status",
+        "norm_strength"
+      ],
+      "behaviors": [
+        "share_norms",
+        "influence_members"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "derive_from_persons": true,
+          "norm_strength_default": 0.5
+        }
+      }
+    },
+    {
+      "name": "WorkplaceSchool",
+      "attributes": [
+        "id",
+        "size",
+        "mask_policy",
+        "enforcement_level",
+        "contact_rate"
+      ],
+      "behaviors": [
+        "enforce_policy",
+        "host_interactions"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "derive_from_persons": true,
+          "default_contact_rate": 0.8
+        }
+      }
+    },
+    {
+      "name": "PublicLocation",
+      "attributes": [
+        "id",
+        "type",
+        "density",
+        "mask_policy",
+        "enforcement_level",
+        "contact_rate"
+      ],
+      "behaviors": [
+        "host_interactions",
+        "enforce_policy"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "types": [
+            "retail",
+            "transit",
+            "leisure"
+          ],
+          "defaults": {
+            "retail": {
+              "density": 0.3,
+              "contact_rate": 0.3
+            },
+            "transit": {
+              "density": 0.5,
+              "contact_rate": 0.5
+            },
+            "leisure": {
+              "density": 0.4,
+              "contact_rate": 0.4
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "PolicyMaker",
+      "attributes": [
+        "id",
+        "policy_state",
+        "policy_start_day",
+        "enforcement_resources",
+        "messaging_intensity"
+      ],
+      "behaviors": [
+        "announce_policy",
+        "broadcast_message",
+        "conduct_enforcement"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_phase1_start_day": 10,
+          "policy_phase1_type": "recommendation",
+          "policy_phase2_start_day": 20,
+          "policy_phase2_type": "mandate"
+        }
+      }
+    },
+    {
+      "name": "MediaChannel",
+      "attributes": [
+        "id",
+        "reach",
+        "bias",
+        "message_frequency",
+        "message_strength"
+      ],
+      "behaviors": [
+        "broadcast_message"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "reach": 0.6,
+          "message_frequency": 1.0,
+          "message_strength": 0.15,
+          "bias": 0.0
+        }
+      }
+    },
+    {
+      "name": "Retailer",
+      "attributes": [
+        "id",
+        "inventory",
+        "restock_rate",
+        "price"
+      ],
+      "behaviors": [
+        "sell_masks",
+        "restock"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "inventory": 5000,
+          "restock_rate": 300,
+          "price": 2.0
+        }
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "receive_information",
+      "description": "Agents receive pro-mask information via social ties (layer-weighted masked neighbor exposure) and media/policy broadcasts, with daily decay.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "info_base_logit": -3.0,
+        "info_coef_family": 2.0,
+        "info_coef_work": 1.2,
+        "info_coef_comm": 0.8,
+        "info_decay_rate": 0.5,
+        "layer_contact_weight_family": 0.5,
+        "layer_contact_weight_work": 0.3,
+        "layer_contact_weight_comm": 0.2,
+        "media_reach": 0.6,
+        "messaging_effect_size": 0.15
+      },
+      "algorithm": "For each person: compute frac masked neighbors by layer. Effective exposure = sum(layer_weight * frac_masked) per layer. Compute logit(p_info) = info_base_logit + info_coef_family*family_exposure + info_coef_work*work_exposure + info_coef_comm*comm_exposure + media_reach*messaging_effect_size*current_policy_message. Sample received_info ~ Bernoulli(p_info). Existing info decays with probability info_decay_rate if not re-exposed."
+    },
+    {
+      "name": "decide_adoption",
+      "description": "Agents update mask_state via a persistence vs. adoption mechanism influenced by past state, info, risk perception, social influence, policy, enforcement, and affordability/supply.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "baseline_adoption_logit": -2.2,
+        "risk_perception_effect": 1.0,
+        "social_influence_strength": 0.3,
+        "p_stay_mask": 0.95,
+        "base_drop_prob": 0.02,
+        "fatigue_rate": 0.005,
+        "habit_strengthening_rate": 0.03,
+        "adherence_decay_rate": 0.02,
+        "compliance_fatigue_rate": 0.01,
+        "policy_effect_size_recommendation": 0.1,
+        "policy_effect_size_mandate": 0.35,
+        "enforcement_probability": 0.2
+      },
+      "algorithm": "If mask_state==1: Compute p_drop = base_drop_prob + compliance_fatigue_rate*t_since_policy - enforcement_probability*0.1 - habit_strengthening_rate*days_since_last_change. Bound to [0,1]. Drop with probability p_drop; else stay masked (p_stay_mask acts as floor on staying). If mask_state==0: Compute social_exposure = weighted frac masked neighbors (same as information) scaled by social_influence_strength. policy_effect = policy_effect_size_mandate or recommendation depending on current policy. logit(p_adopt) = baseline_adoption_logit + risk_perception_effect*risk_perception + 1.0*received_info + social_exposure + policy_effect. If can_purchase and affordable and retailer has inventory then adopt with probability p_adopt; upon adoption, decrement retailer inventory by 1 and set last_adoption_change_day=t."
+    },
+    {
+      "name": "respond_to_policy",
+      "description": "Agents adjust perceived benefits/costs and adherence in response to policy messaging/enforcement.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "policy_effect_size_recommendation": 0.1,
+        "policy_effect_size_mandate": 0.35,
+        "enforcement_probability": 0.2,
+        "enforcement_penalty": 50
+      },
+      "algorithm": "When policy is recommendation: add policy_effect_size_recommendation to adoption log-odds and reduce p_drop by 0.02. When mandate: add policy_effect_size_mandate to adoption log-odds and reduce p_drop by min(0.05, 0.25*enforcement_probability). Perceived_cost increases by enforcement_penalty if non-compliant in enforced locations."
+    },
+    {
+      "name": "purchase_mask",
+      "description": "Agents attempt to buy a mask when adopting or replenishing; constrained by inventory, price, and affordability threshold.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "mask_price": 2.0,
+        "affordability_threshold": 0.05
+      },
+      "algorithm": "can_afford = (mask_price / max(1.0, daily_income)) <= affordability_threshold. If adopting and retailer.inventory>0 and can_afford: purchase succeeds, inventory -=1, else adoption fails for supply reasons."
+    },
+    {
+      "name": "update_adherence",
+      "description": "Mask adherence drifts over time with decay and habit strengthening from continuous use.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "adherence_decay_rate": 0.02,
+        "habit_strengthening_rate": 0.03
+      },
+      "algorithm": "If masked: adherence = min(1.0, adherence*(1 - adherence_decay_rate) + habit_strengthening_rate). If unmasked: adherence = adherence*(1 - adherence_decay_rate)."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "social_influence",
+      "description": "Layer-weighted neighbor masking influences info receipt and adoption propensity.",
+      "entities_involved": [
+        "Person",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Increases received_info and adoption probability proportional to masked neighbor fraction by layer."
+    },
+    {
+      "name": "policy_influence",
+      "description": "Policy messaging and mandates shift adoption log-odds and drop probability.",
+      "entities_involved": [
+        "PolicyMaker",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Adds policy-specific effect sizes to adoption log-odds; reduces drop rates under mandates."
+    },
+    {
+      "name": "media_influence",
+      "description": "Media broadcasts increase information receipt via reach and message strength.",
+      "entities_involved": [
+        "MediaChannel",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Adds media_reach*message_strength to info log-odds."
+    },
+    {
+      "name": "enforcement",
+      "description": "Random checks enforce compliance; non-compliance incurs penalties and increases adoption.",
+      "entities_involved": [
+        "PolicyMaker",
+        "PublicLocation",
+        "WorkplaceSchool",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Effective enforcement_probability reduces drop and increases adoption via perceived penalty."
+    },
+    {
+      "name": "supply_constraint",
+      "description": "Retail inventory and prices constrain adoption attempts.",
+      "entities_involved": [
+        "Person",
+        "Retailer"
+      ],
+      "trigger": "state",
+      "effect": "Adoption fails if inventory=0 or affordability condition unmet."
+    },
+    {
+      "name": "location_contacts",
+      "description": "Layer-specific contacts drive exposure opportunities.",
+      "entities_involved": [
+        "Person",
+        "WorkplaceSchool",
+        "PublicLocation"
+      ],
+      "trigger": "time",
+      "effect": "Determines layer contact weights used in information and social influence."
+    }
+  ],
+  "modules": [
+    {
+      "name": "InfoDiffusion",
+      "description": "Computes per-agent information exposure probabilities from network neighbors and media/policy signals and updates received_info state.",
+      "inputs": [
+        "Person.mask_state_t-1",
+        "Network.multiplex_neighbors",
+        "Policy.current_message_strength"
+      ],
+      "outputs": [
+        "Person.received_info_t"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  fam_frac = mean(mask_state[j] for j in N_family(i))\n  work_frac = mean(mask_state[j] for j in N_work(i))\n  comm_frac = mean(mask_state[j] for j in N_comm(i))\n  fam_exp = layer_contact_weight_family * fam_frac\n  work_exp = layer_contact_weight_work * work_frac\n  comm_exp = layer_contact_weight_comm * comm_frac\n  logit_p = info_base_logit + info_coef_family*fam_exp + info_coef_work*work_exp + info_coef_comm*comm_exp + media_reach*messaging_effect_size*Policy.current_message_strength\n  p_info = sigmoid(logit_p)\n  if Bernoulli(p_info)==1 then received_info[i]=1 else received_info[i]=received_info[i]*(1-info_decay_rate)",
+        "notes": [
+          "Neighbor fractions computed on symmetrized multiplex network.",
+          "Decay operates only if no new info received that day."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily",
+        "train.received_info_rate_daily"
+      ],
+      "calibration_notes": "Primary signals: daily adoption indirectly; auxiliary signal: daily info receipt rate from train_data.",
+      "requirements": [
+        "networkx_graph_multiplex",
+        "day_t-1_mask_states"
+      ],
+      "module_parameters": [
+        "info_base_logit",
+        "info_coef_family",
+        "info_coef_work",
+        "info_coef_comm",
+        "info_decay_rate",
+        "layer_contact_weight_family",
+        "layer_contact_weight_work",
+        "layer_contact_weight_comm",
+        "media_reach",
+        "messaging_effect_size"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Updates per-agent mask adoption using persistence/adoption mechanics with social, info, risk, policy and supply constraints.",
+      "inputs": [
+        "Person.mask_state_t-1",
+        "Person.received_info_t",
+        "Person.risk_perception",
+        "InfoDiffusion.layer_exposures",
+        "Policy.current_policy_mode",
+        "RetailSupply.can_purchase_flags"
+      ],
+      "outputs": [
+        "Person.mask_state_t",
+        "Person.adherence_level_t",
+        "RetailSupply.purchase_requests"
+      ],
+      "dependencies": [
+        "InfoDiffusion",
+        "PolicyMessengerEnforcer",
+        "RetailSupply"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  if mask_state[i]==1:\n    p_drop = base_drop_prob + compliance_fatigue_rate*Policy.days_since_start - enforcement_probability*0.1 - habit_strengthening_rate*(t - last_adoption_change_day[i])\n    p_drop = clamp(p_drop, 0.0, 1.0)\n    if Bernoulli(p_drop)==1: mask_state[i]=0; last_adoption_change_day[i]=t\n    else if Bernoulli(1-p_stay_mask)==1: mask_state[i]=0; last_adoption_change_day[i]=t\n  else:\n    social_exposure = social_influence_strength*(layer_contact_weight_family*fam_frac_i + layer_contact_weight_work*work_frac_i + layer_contact_weight_comm*comm_frac_i)\n    policy_effect = (Policy.current_policy_mode=='mandate')? policy_effect_size_mandate : ((Policy.current_policy_mode=='recommendation')? policy_effect_size_recommendation : 0.0)\n    logit_p = baseline_adoption_logit + risk_perception_effect*risk_perception[i] + 1.0*received_info[i] + social_exposure + policy_effect\n    p_adopt = sigmoid(logit_p)\n    if RetailSupply.can_purchase[i] and Bernoulli(p_adopt)==1:\n       RetailSupply.purchase_requests.add(i)\n       mask_state[i]=1; last_adoption_change_day[i]=t\n  # adherence update\n  if mask_state[i]==1:\n    adherence[i] = min(1.0, adherence[i]*(1 - adherence_decay_rate) + habit_strengthening_rate)\n  else:\n    adherence[i] = adherence[i]*(1 - adherence_decay_rate)",
+        "notes": [
+          "Purchase may fail if inventory unavailable; RetailSupply resolves and may revert adoption for failed purchases.",
+          "Persistence asymmetry: p_stay_mask provides high inertia once masked."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily"
+      ],
+      "calibration_notes": "Tune baseline logit, social_influence_strength, and fatigue rates to fit adoption trajectory.",
+      "requirements": [
+        "neighbor_mask_fractions_by_layer",
+        "policy_mode_today",
+        "supply_can_purchase_flags"
+      ],
+      "module_parameters": [
+        "baseline_adoption_logit",
+        "risk_perception_effect",
+        "social_influence_strength",
+        "p_stay_mask",
+        "base_drop_prob",
+        "fatigue_rate",
+        "habit_strengthening_rate",
+        "adherence_decay_rate",
+        "compliance_fatigue_rate",
+        "policy_effect_size_recommendation",
+        "policy_effect_size_mandate",
+        "enforcement_probability",
+        "layer_contact_weight_family",
+        "layer_contact_weight_work",
+        "layer_contact_weight_comm"
+      ]
+    },
+    {
+      "name": "PolicyMessengerEnforcer",
+      "description": "Emits daily policy mode, messaging intensity, and enforcement intensity following specified schedule, and computes enforcement pressure.",
+      "inputs": [
+        "day_index"
+      ],
+      "outputs": [
+        "Policy.current_policy_mode",
+        "Policy.current_message_strength",
+        "Policy.enforcement_intensity",
+        "Policy.days_since_start"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day==policy_phase2_start_day: policy_mode='mandate'\nelse if day==policy_phase1_start_day: policy_mode='recommendation'\nelse if day>policy_phase2_start_day: policy_mode='mandate'\nelse if day>policy_phase1_start_day: policy_mode='recommendation'\nelse: policy_mode='none'\nmessage_strength = (policy_mode=='mandate')? 1.0 : ((policy_mode=='recommendation')? 0.6 : 0.0)\nenforcement_intensity = enforcement_probability * (inspection_rate_per_1000_per_day/1000.0)\ndays_since_start = max(0, day - policy_phase1_start_day)",
+        "notes": [
+          "Policy schedule fixed: recommendation starts day 10, mandate starts day 20.",
+          "enforcement_intensity is a global scalar used by AdoptionDecision."
+        ]
+      },
+      "sbi_calibration": "false",
+      "sbi_target_signals": [],
+      "calibration_notes": "Policy schedule is fixed by task; effect sizes can be tuned but schedule is frozen.",
+      "requirements": [
+        "calendar_day_index"
+      ],
+      "module_parameters": [
+        "policy_phase1_start_day",
+        "policy_phase1_type",
+        "policy_phase2_start_day",
+        "policy_phase2_type",
+        "policy_effect_size_recommendation",
+        "policy_effect_size_mandate",
+        "enforcement_probability",
+        "enforcement_penalty",
+        "inspection_rate_per_1000_per_day"
+      ]
+    },
+    {
+      "name": "RetailSupply",
+      "description": "Tracks inventory, restocks with lead time, prices, affordability checks, and fulfills purchase requests from AdoptionDecision.",
+      "inputs": [
+        "AdoptionDecision.purchase_requests",
+        "Person.income"
+      ],
+      "outputs": [
+        "RetailSupply.can_purchase_flags",
+        "RetailSupply.inventory",
+        "RetailSupply.outage_flag_daily"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day==0: inventory = supply_initial_inventory\n# restock pipeline\narrivals_today = restock_queue.pop(day, default=0)\ninventory += arrivals_today\n# affordability flags (pre-compute)\nfor i in agents:\n  daily_income = max(1.0, income[i]/30.0)\n  can_afford[i] = (mask_price/daily_income) <= affordability_threshold\n# fulfill purchase requests\nfulfilled = []\nfor i in purchase_requests:\n  if inventory>0 and can_afford[i]:\n     inventory -= 1; fulfilled.append(i)\n# update can_purchase flags for next step\nfor i in agents:\n  can_purchase[i] = (inventory>0) and can_afford[i]\n# place restock order\nrestock_queue[day+lead_time_days] += restock_rate\n# outage flag\noutage_flag_daily = 1 if inventory==0 else 0",
+        "notes": [
+          "Lead-time queue ensures delayed arrivals.",
+          "If adoption attempted but inventory=0, adoption fails (caller reverts state)."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily",
+        "observable.inventory_outage_days_cum"
+      ],
+      "calibration_notes": "Supply parameters affect ceiling and timing of adoption; tuned jointly with social parameters.",
+      "requirements": [
+        "restock_queue_data_structure"
+      ],
+      "module_parameters": [
+        "supply_initial_inventory",
+        "restock_rate",
+        "mask_price",
+        "affordability_threshold",
+        "lead_time_days",
+        "daily_consumption_per_masked_agent"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily adoption and ancillary observables; applies reporting noise for calibration to observed data.",
+      "inputs": [
+        "Person.mask_state_t",
+        "RetailSupply.outage_flag_daily"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.inventory_outage_days_cum"
+      ],
+      "dependencies": [
+        "AdoptionDecision",
+        "RetailSupply"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "true_rate = mean(mask_state)\nnoisy_rate = clamp(Normal(true_rate, reporting_noise_sd), 0, 1)\nadoption_rate_daily = noisy_rate\ninventory_outage_days_cum += outage_flag_daily",
+        "notes": [
+          "Reporting noise models measurement error when matching to observed aggregate adoption."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily"
+      ],
+      "calibration_notes": "Noise tuned to match variance in observed daily rates.",
+      "requirements": [
+        "random_number_generator"
+      ],
+      "module_parameters": [
+        "reporting_noise_sd"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 180,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 30,
+          "high": 365
+        }
+      },
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total simulation days.",
+      "frozen": "true"
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "int",
+      "default": 1,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            1
+          ],
+          "probs": [
+            1.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 1
+      },
+      "owner_module": "global",
+      "description": "Length of one simulation step in days.",
+      "frozen": "true"
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 1,
+          "high": 1000000
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Stochastic seed for reproducibility.",
+      "frozen": "true"
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 10000,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 1000,
+          "high": 200000
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Number of agents (read from agent_attributes.csv; default shown).",
+      "frozen": "true"
+    },
+    {
+      "key": "symmetrize_edges",
+      "dtype": "bool",
+      "default": true,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            true
+          ],
+          "probs": [
+            1.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "global",
+      "description": "Use undirected symmetrized union of edges across layers.",
+      "frozen": "true"
+    },
+    {
+      "key": "layer_contact_weight_family",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 5.0,
+          "beta": 5.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Relative daily exposure weight of family layer.",
+      "frozen": "false"
+    },
+    {
+      "key": "layer_contact_weight_work",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3.0,
+          "beta": 7.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Relative daily exposure weight of work/school layer.",
+      "frozen": "false"
+    },
+    {
+      "key": "layer_contact_weight_comm",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 8.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Relative daily exposure weight of community layer.",
+      "frozen": "false"
+    },
+    {
+      "key": "info_base_logit",
+      "dtype": "float",
+      "default": -3.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": -3.0,
+          "sd": 1.5
+        }
+      },
+      "bounds": {
+        "low": -10.0,
+        "high": 3.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Baseline log-odds of info receipt absent exposure.",
+      "frozen": "false"
+    },
+    {
+      "key": "info_coef_family",
+      "dtype": "float",
+      "default": 2.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 2.0,
+          "sd": 1.0
+        }
+      },
+      "bounds": {
+        "low": -1.0,
+        "high": 6.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Logit coefficient for family exposure.",
+      "frozen": "false"
+    },
+    {
+      "key": "info_coef_work",
+      "dtype": "float",
+      "default": 1.2,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.2,
+          "sd": 1.0
+        }
+      },
+      "bounds": {
+        "low": -1.0,
+        "high": 6.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Logit coefficient for work/school exposure.",
+      "frozen": "false"
+    },
+    {
+      "key": "info_coef_comm",
+      "dtype": "float",
+      "default": 0.8,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.8,
+          "sd": 1.0
+        }
+      },
+      "bounds": {
+        "low": -1.0,
+        "high": 6.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Logit coefficient for community exposure.",
+      "frozen": "false"
+    },
+    {
+      "key": "info_decay_rate",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Daily probability that info state lapses without new exposure.",
+      "frozen": "false"
+    },
+    {
+      "key": "media_reach",
+      "dtype": "float",
+      "default": 0.6,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Share of population reached by media messaging daily.",
+      "frozen": "false"
+    },
+    {
+      "key": "messaging_effect_size",
+      "dtype": "float",
+      "default": 0.15,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 8.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfoDiffusion",
+      "description": "Increment to info log-odds per unit message strength.",
+      "frozen": "false"
+    },
+    {
+      "key": "baseline_adoption_logit",
+      "dtype": "float",
+      "default": -2.2,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": -2.0,
+          "sd": 1.5
+        }
+      },
+      "bounds": {
+        "low": -10.0,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Baseline adoption log-odds absent info, social, and policy.",
+      "frozen": "false"
+    },
+    {
+      "key": "risk_perception_effect",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.0,
+          "sd": 0.5
+        }
+      },
+      "bounds": {
+        "low": -1.0,
+        "high": 4.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Log-odds increment per unit risk perception.",
+      "frozen": "false"
+    },
+    {
+      "key": "social_influence_strength",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 4.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Multiplier on layer-weighted masked neighbor fraction.",
+      "frozen": "false"
+    },
+    {
+      "key": "p_stay_mask",
+      "dtype": "float",
+      "default": 0.95,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 20.0,
+          "beta": 1.0
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Daily probability masked agents remain masked (before drop drivers).",
+      "frozen": "false"
+    },
+    {
+      "key": "base_drop_prob",
+      "dtype": "float",
+      "default": 0.02,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.5,
+          "beta": 20.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Base daily probability of abandoning mask absent other effects.",
+      "frozen": "false"
+    },
+    {
+      "key": "fatigue_rate",
+      "dtype": "float",
+      "default": 0.005,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0.0,
+          "high": 0.05
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Incremental increase in drop probability per day since policy start.",
+      "frozen": "false"
+    },
+    {
+      "key": "habit_strengthening_rate",
+      "dtype": "float",
+      "default": 0.03,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0.0,
+          "high": 0.1
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Daily increase in adherence while masked, reducing drop likelihood.",
+      "frozen": "false"
+    },
+    {
+      "key": "adherence_decay_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0.0,
+          "high": 0.1
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Daily decay rate of adherence.",
+      "frozen": "false"
+    },
+    {
+      "key": "compliance_fatigue_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0.0,
+          "high": 0.05
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Daily increase in drop probability due to general fatigue.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_phase1_start_day",
+      "dtype": "int",
+      "default": 10,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            10
+          ],
+          "probs": [
+            1.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 180
+      },
+      "owner_module": "PolicyMessengerEnforcer",
+      "description": "Start day of recommendation phase.",
+      "frozen": "true"
+    },
+    {
+      "key": "policy_phase1_type",
+      "dtype": "categorical",
+      "default": "recommendation",
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            "recommendation"
+          ],
+          "probs": [
+            1.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 2
+      },
+      "owner_module": "PolicyMessengerEnforcer",
+      "description": "Policy type for phase 1.",
+      "frozen": "true"
+    },
+    {
+      "key": "policy_phase2_start_day",
+      "dtype": "int",
+      "default": 20,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            20
+          ],
+          "probs": [
+            1.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 180
+      },
+      "owner_module": "PolicyMessengerEnforcer",
+      "description": "Start day of mandate phase.",
+      "frozen": "true"
+    },
+    {
+      "key": "policy_phase2_type",
+      "dtype": "categorical",
+      "default": "mandate",
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            "mandate"
+          ],
+          "probs": [
+            1.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 2
+      },
+      "owner_module": "PolicyMessengerEnforcer",
+      "description": "Policy type for phase 2.",
+      "frozen": "true"
+    },
+    {
+      "key": "policy_effect_size_recommendation",
+      "dtype": "float",
+      "default": 0.1,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 8.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyMessengerEnforcer",
+      "description": "Increase in adoption log-odds under recommendation.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_effect_size_mandate",
+      "dtype": "float",
+      "default": 0.35,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3.0,
+          "beta": 5.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyMessengerEnforcer",
+      "description": "Increase in adoption log-odds under mandate.",
+      "frozen": "false"
+    },
+    {
+      "key": "enforcement_probability",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 8.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyMessengerEnforcer",
+      "description": "Daily probability that a given agent faces enforcement pressure.",
+      "frozen": "false"
+    },
+    {
+      "key": "enforcement_penalty",
+      "dtype": "float",
+      "default": 50.0,
+      "prior": {
+        "type": "loguniform",
+        "args": {
+          "low": 1.0,
+          "high": 500.0
+        }
+      },
+      "bounds": {
+        "low": 1.0,
+        "high": 500.0
+      },
+      "owner_module": "PolicyMessengerEnforcer",
+      "description": "Monetary cost of non-compliance when caught.",
+      "frozen": "false"
+    },
+    {
+      "key": "inspection_rate_per_1000_per_day",
+      "dtype": "float",
+      "default": 2.0,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0.0,
+          "high": 50.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 50.0
+      },
+      "owner_module": "PolicyMessengerEnforcer",
+      "description": "Inspections per 1000 population per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "supply_initial_inventory",
+      "dtype": "int",
+      "default": 5000,
+      "prior": {
+        "type": "loguniform",
+        "args": {
+          "low": 100.0,
+          "high": 100000.0
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1000000
+      },
+      "owner_module": "RetailSupply",
+      "description": "Initial mask inventory across retailers.",
+      "frozen": "false"
+    },
+    {
+      "key": "restock_rate",
+      "dtype": "int",
+      "default": 300,
+      "prior": {
+        "type": "loguniform",
+        "args": {
+          "low": 10.0,
+          "high": 10000.0
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 100000
+      },
+      "owner_module": "RetailSupply",
+      "description": "Daily restock quantity arriving after lead time.",
+      "frozen": "false"
+    },
+    {
+      "key": "mask_price",
+      "dtype": "float",
+      "default": 2.0,
+      "prior": {
+        "type": "loguniform",
+        "args": {
+          "low": 0.1,
+          "high": 20.0
+        }
+      },
+      "bounds": {
+        "low": 0.1,
+        "high": 20.0
+      },
+      "owner_module": "RetailSupply",
+      "description": "Price per mask unit.",
+      "frozen": "false"
+    },
+    {
+      "key": "affordability_threshold",
+      "dtype": "float",
+      "default": 0.05,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 18.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "RetailSupply",
+      "description": "Max share of daily income the agent is willing to spend on a mask.",
+      "frozen": "false"
+    },
+    {
+      "key": "lead_time_days",
+      "dtype": "int",
+      "default": 2,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0,
+          "high": 30
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 30
+      },
+      "owner_module": "RetailSupply",
+      "description": "Lead time for restock deliveries.",
+      "frozen": "false"
+    },
+    {
+      "key": "daily_consumption_per_masked_agent",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0.05,
+          "high": 1.0
+        }
+      },
+      "bounds": {
+        "low": 0.05,
+        "high": 1.0
+      },
+      "owner_module": "RetailSupply",
+      "description": "Average masks consumed per masked agent per day (drives replenishment demand).",
+      "frozen": "false"
+    },
+    {
+      "key": "reporting_noise_sd",
+      "dtype": "float",
+      "default": 0.02,
+      "prior": {
+        "type": "uniform",
+        "args": {
+          "low": 0.0,
+          "high": 0.1
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Standard deviation of Gaussian reporting noise on adoption rate.",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.mask_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv: wearing_mask (agent-day) aggregated by mean per day"
+    },
+    {
+      "id": "observable.inventory_outage_days_cum",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "cum_sum(RetailSupply.outage_flag_daily)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "NA"
+    },
+    {
+      "id": "train.received_info_rate_daily",
+      "source_module": "InfoDiffusion",
+      "formula_or_field": "mean(Person.received_info)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv: received_info (agent-day) aggregated by mean per day"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_to_observed",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_to_observed",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "R2_to_observed",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "R2",
+        "config": {}
+      }
+    },
+    {
+      "name": "peak_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "peak",
+        "config": {}
+      }
+    },
+    {
+      "name": "time_to_threshold_adoption_70pct",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "time_to_threshold",
+        "config": {
+          "threshold": 0.7
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 10000,
+    "random_seed": 42,
+    "network": {
+      "source": "data_fitting/mask_adoption_data/social_network.json",
+      "symmetrize_edges": true,
+      "layers": [
+        "family",
+        "work_school",
+        "community"
+      ]
+    },
+    "agent_attributes": "data_fitting/mask_adoption_data/agent_attributes.csv",
+    "panel_day0": "data_fitting/mask_adoption_data/train_data.csv",
+    "policy_schedule": {
+      "day10": "recommendation",
+      "day20": "mandate"
+    }
+  },
+  "algorithms": {
+    "SymmetrizeMultiplexNetwork": "For each layer, add undirected edge (i,j) if either i lists j or j lists i; deduplicate neighbors; store per-layer adjacency.",
+    "LayerWeightedNeighborFraction": "Compute, for each agent and layer L, frac_L = masked_neighbors_L / degree_L; exposure_L = weight_L * frac_L.",
+    "LogisticWithPersistence": "Adoption dynamics combining persistence for masked agents and logistic adoption for unmasked agents with social/info/policy covariates.",
+    "InventoryLeadTimeQueue": "Discrete-time pipeline of restock orders: orders placed at day t arrive at day t+lead_time with fixed quantity.",
+    "GridSearchCalibrator": "Search over selected parameter grids to minimize RMSE_to_observed on days [0..29], respecting bounds and frozen flags."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agents with demographics and heterogeneity (risk, income, etc.)",
+      "fields_used": [
+        "agent_id",
+        "age",
+        "household_id",
+        "workplace_id",
+        "risk_perception",
+        "income",
+        "trust_in_authorities",
+        "social_influence_susceptibility",
+        "compliance_propensity"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Construct multiplex social layers for influence and info diffusion",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Initialize day-0 states; calibrate model on days 0-29; compute observed daily adoption and info rates",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: parse config, load data, run simulation, calibration, and prediction."
+      },
+      {
+        "name": "core/environment.py",
+        "description": "Environment and scheduler; time-stepping and module orchestration."
+      },
+      {
+        "name": "core/entities.py",
+        "description": "Entity classes: Person, Household, WorkplaceSchool, PublicLocation, PolicyMaker, MediaChannel, Retailer."
+      },
+      {
+        "name": "modules/info_diffusion.py",
+        "description": "InfoDiffusion module implementation."
+      },
+      {
+        "name": "modules/adoption_decision.py",
+        "description": "AdoptionDecision module implementation."
+      },
+      {
+        "name": "modules/policy.py",
+        "description": "PolicyMessengerEnforcer module implementation."
+      },
+      {
+        "name": "modules/retail_supply.py",
+        "description": "RetailSupply module implementation."
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "AdoptionAggregator and metrics computation helpers."
+      },
+      {
+        "name": "data/loaders.py",
+        "description": "Data loaders for CSV/JSON; network symmetrization utilities."
+      },
+      {
+        "name": "calibration/grid_search.py",
+        "description": "Grid search and sensitivity checks; parameter freezing and bounds enforcement."
+      },
+      {
+        "name": "metrics/metrics.py",
+        "description": "RMSE, MAE, R2, peak, time-to-threshold computations."
+      },
+      {
+        "name": "utils/random.py",
+        "description": "Random number utilities and reproducibility controls."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "scikit-learn"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_to_observed",
+    "MAE_to_observed",
+    "R2_to_observed"
+  ]
+}

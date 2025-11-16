@@ -1,0 +1,1576 @@
+{
+  "model_type": "agent_based",
+  "description": "Networked agent-based model of mask-wearing behavioral diffusion under peer influence, information campaigns, and policy mandates, with optional disease coupling. Agents interact on a small-world social network and at venues; adoption evolves via social conformity, informational updates, enforcement, costs, fatigue, and access.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age",
+        "household_id",
+        "peers",
+        "mask_wearing",
+        "compliance_propensity",
+        "risk_perception",
+        "trust_in_authority",
+        "susceptibility_to_influence",
+        "fatigue_level",
+        "misinformation_exposure",
+        "perceived_cost",
+        "access_to_masks",
+        "health_status"
+      ],
+      "behaviors": [
+        "decide_mask_use",
+        "interact_with_peer",
+        "observe_and_update_beliefs",
+        "receive_information",
+        "comply_with_policy",
+        "acquire_mask"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "age_distribution": "truncated_normal(mean=40, sd=18, min=0, max=90)",
+          "household_assignment": "stochastic using Poisson household_size_mean, contiguous IDs per household",
+          "peers": "Watts-Strogatz small-world network with avg_degree and rewiring_prob",
+          "mask_wearing": "Bernoulli(initial_mask_adoption_rate)",
+          "compliance_propensity": "clip(Normal(mean=compliance_propensity_mean, sd=compliance_propensity_sd), 0, 1)",
+          "risk_perception": "clip(Normal(mean=initial_risk_perception_mean, sd=initial_risk_perception_sd), 0, 1)",
+          "trust_in_authority": "clip(Normal(mean=initial_trust_mean, sd=initial_trust_sd), 0, 1)",
+          "susceptibility_to_influence": "clip(Lognormal(mean=0, sd=0.5) scaled to [0,1])",
+          "fatigue_level": "0.0",
+          "misinformation_exposure": "Bernoulli(misinformation_rate)",
+          "perceived_cost": "clip(Normal(mean=perceived_cost_mean, sd=perceived_cost_sd), 0, 1)",
+          "access_to_masks": "Bernoulli(mask_availability)",
+          "health_status": "If model_disease: Bernoulli(initial_infected_prevalence) => 'I' else 'S'; otherwise 'healthy'"
+        }
+      }
+    },
+    {
+      "name": "PublicHealthAuthority",
+      "attributes": [
+        "policy_state",
+        "enforcement_strength",
+        "campaign_intensity",
+        "message_bias",
+        "budget"
+      ],
+      "behaviors": [
+        "broadcast_message",
+        "implement_policy",
+        "adjust_policy",
+        "allocate_resources"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_state": "advisory",
+          "enforcement_strength": 0.6,
+          "campaign_intensity": "information_campaign_intensity",
+          "message_bias": "message_bias_authority",
+          "budget": 1.0
+        }
+      }
+    },
+    {
+      "name": "Venue",
+      "attributes": [
+        "id",
+        "type",
+        "capacity",
+        "mask_requirement",
+        "enforcement_level"
+      ],
+      "behaviors": [
+        "host_interactions",
+        "enforce_rules"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "types": [
+            "household",
+            "workplace",
+            "school",
+            "public_space"
+          ],
+          "counts": {
+            "household": "derived from population_size and household_size_mean",
+            "workplace": "number_of_workplaces",
+            "school": "number_of_schools",
+            "public_space": "number_of_public_spaces"
+          },
+          "capacity_by_type": {
+            "household": "Poisson(household_size_mean) truncated >=1",
+            "workplace": "Normal(workplace_capacity_mean, 0.2*workplace_capacity_mean) rounded >=5",
+            "school": "Normal(school_capacity_mean, 0.2*school_capacity_mean) rounded >=50",
+            "public_space": "Normal(public_space_capacity_mean, 0.3*public_space_capacity_mean) rounded >=5"
+          },
+          "mask_requirement_by_type": {
+            "household": "venue_mask_requirement_household",
+            "workplace": "venue_mask_requirement_workplace",
+            "school": "venue_mask_requirement_school",
+            "public_space": "venue_mask_requirement_public_space"
+          },
+          "enforcement_level_by_type": {
+            "household": 0.0,
+            "workplace": 0.5,
+            "school": 0.6,
+            "public_space": 0.4
+          }
+        }
+      }
+    },
+    {
+      "name": "InformationSource",
+      "attributes": [
+        "id",
+        "reach",
+        "credibility",
+        "message_bias"
+      ],
+      "behaviors": [
+        "broadcast"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "sources": [
+            {
+              "id": "official",
+              "reach": "authority_reach",
+              "credibility": 0.8,
+              "message_bias": "message_bias_authority"
+            },
+            {
+              "id": "misinfo",
+              "reach": "misinformation_reach",
+              "credibility": 0.4,
+              "message_bias": "misinformation_bias"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "SocialInfluenceModule",
+      "description": "Updates individual mask-wearing decisions based on peer observations, personal traits, fatigue, and perceived costs.",
+      "inputs": [
+        "Person.peers",
+        "Person.mask_wearing",
+        "Person.susceptibility_to_influence",
+        "Person.compliance_propensity",
+        "Person.risk_perception",
+        "Person.trust_in_authority",
+        "Person.perceived_cost",
+        "Person.fatigue_level"
+      ],
+      "outputs": [
+        "Person.mask_wearing",
+        "Person.risk_perception",
+        "Person.fatigue_level",
+        "log.influence_edges"
+      ],
+      "dependencies": [
+        "VenueInteractionModule",
+        "InformationModule",
+        "PolicyAndEnforcementModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  observed_rate = weighted_mean(mask_wearing of peers over last peer_memory_days) + Normal(0, observation_noise_std)\n  observed_rate = clip(observed_rate, 0, 1)\n  normative_pressure = conformity_bias * (observed_rate - (i.mask_wearing ? 1 : 0))\n  informational_influence = social_influence_strength * i.susceptibility_to_influence * (observed_rate - 0.5)\n  risk_adjust = risk_perception_sensitivity * (i.risk_perception - 0.5)\n  trust_effect = i.trust_in_authority - 0.5\n  cost_penalty = i.perceived_cost + (1 - i.access_to_masks) * 0.2\n  fatigue_penalty = 0\n  if day >= fatigue_onset_day:\n    fatigue_penalty = i.fatigue_level\n  base_latent = susceptibility_slope * (i.compliance_propensity - 0.5) + normative_pressure + informational_influence + trust_effect + risk_adjust - cost_penalty - fatigue_penalty\n  p_mask = sigmoid(base_latent)\n  # compliance decay if previously wearing\n  if i.mask_wearing:\n    p_mask = p_mask * (1 - compliance_decay_rate)\n  decision = Bernoulli(p_mask + Normal(0, behavioral_threshold_std))\n  # update state\n  new_mask = decision == 1\n  if influence_logging and (new_mask and !i.mask_wearing):\n    record influences from peers j with mask_wearing=1 (edge weights proportional to contribution)\n  i.mask_wearing = new_mask\n  # fatigue updates\n  if i.mask_wearing:\n    i.fatigue_level = clip(i.fatigue_level + fatigue_increment, 0, 1)\n  else:\n    i.fatigue_level = clip(i.fatigue_level - fatigue_recovery_rate, 0, 1)\n  # update risk perception slightly toward observed peer norm\n  i.risk_perception = clip(i.risk_perception + 0.1 * (observed_rate - i.risk_perception), 0, 1)",
+        "notes": [
+          "sigmoid(x) = 1/(1+exp(-x))",
+          "Influence logging supports net_social_influence_R estimation.",
+          "Observation memory implemented as exponentially weighted moving average over past days."
+        ]
+      },
+      "requirements": [
+        "social_network",
+        "random_number_generator",
+        "influence_log_store"
+      ],
+      "module_parameters": [
+        "social_influence_strength",
+        "conformity_bias",
+        "homophily_strength",
+        "peer_memory_days",
+        "observation_noise_std",
+        "behavioral_threshold_std",
+        "compliance_decay_rate",
+        "fatigue_onset_day",
+        "fatigue_increment",
+        "fatigue_recovery_rate",
+        "susceptibility_slope",
+        "risk_perception_sensitivity",
+        "influence_logging"
+      ]
+    },
+    {
+      "name": "InformationModule",
+      "description": "Simulates broadcasts from authority and misinformation sources; updates trust and risk perceptions.",
+      "inputs": [
+        "InformationSource.*",
+        "PublicHealthAuthority.*",
+        "Person.trust_in_authority",
+        "Person.risk_perception",
+        "Person.misinformation_exposure"
+      ],
+      "outputs": [
+        "Person.trust_in_authority",
+        "Person.risk_perception"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  # Official information exposure\n  hits_official = Bernoulli(authority_reach * (1 + information_campaign_intensity))\n  if hits_official:\n    delta_trust = trust_update_rate * (0.5 + message_bias_authority) * (1 - i.trust_in_authority)\n    i.trust_in_authority = clip(i.trust_in_authority + delta_trust, 0, 1)\n    i.risk_perception = clip(i.risk_perception + risk_perception_sensitivity * (0.5 + message_bias_authority - i.risk_perception) * 0.3, 0, 1)\n  # Misinformation exposure\n  hits_misinfo = Bernoulli(misinformation_reach * (i.misinformation_exposure ? 1 : 0))\n  if hits_misinfo:\n    i.trust_in_authority = clip(i.trust_in_authority - trust_update_rate * (0.5 + abs(misinformation_bias)) * i.trust_in_authority, 0, 1)\n    i.risk_perception = clip(i.risk_perception + risk_perception_sensitivity * (misinformation_bias), 0, 1)",
+        "notes": [
+          "message_bias_authority > 0 promotes masking; misinformation_bias < 0 reduces perceived risks or pro-mask messaging.",
+          "Exposure modeled as Bernoulli per day; can be extended to Poisson events."
+        ]
+      },
+      "requirements": [
+        "information_sources",
+        "public_health_authority"
+      ],
+      "module_parameters": [
+        "information_campaign_intensity",
+        "message_bias_authority",
+        "authority_reach",
+        "misinformation_rate",
+        "misinformation_bias",
+        "misinformation_reach",
+        "trust_update_rate",
+        "risk_perception_sensitivity",
+        "initial_trust_mean",
+        "initial_trust_sd"
+      ]
+    },
+    {
+      "name": "PolicyAndEnforcementModule",
+      "description": "Implements mandates, venue requirements, and enforcement that affect compliance probabilities and costs.",
+      "inputs": [
+        "PublicHealthAuthority.policy_state",
+        "PublicHealthAuthority.enforcement_strength",
+        "Venue.mask_requirement",
+        "Venue.enforcement_level",
+        "Person.mask_wearing",
+        "Person.perceived_cost"
+      ],
+      "outputs": [
+        "Person.mask_wearing",
+        "Person.perceived_cost"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "is_mandate_day = (policy_mandate_start_day >= 0) and (day >= policy_mandate_start_day) and ((policy_mandate_end_day < 0) or (day <= policy_mandate_end_day))\nfor each venue v hosting today:\n  for each attendee i in v:\n    required = v.mask_requirement or is_mandate_day\n    if required:\n      # enforcement check influences non-compliers\n      if !i.mask_wearing:\n        enforcement_draw = Bernoulli(enforcement_probability * PublicHealthAuthority.enforcement_strength * v.enforcement_level)\n        if enforcement_draw:\n          # penalty increases expected cost of non-compliance, nudging masking\n          i.perceived_cost = clip(i.perceived_cost - min(0.2, penalty_severity * 0.1), 0, 1)\n          # immediate compliance effect\n          p_force = policy_compliance_base * v.enforcement_level\n          i.mask_wearing = Bernoulli(p_force) ? true : i.mask_wearing\n# policy adjustment hook (weekly)\nif day % adjustment_interval_days == 0:\n  # no-op by default; space for adaptive policies",
+        "notes": [
+          "Mandate toggled by start/end days; venue mask_requirement booleans apply regardless of mandates.",
+          "penalty_severity reduces perceived cost of masking relative to non-compliance by modeling aversion to penalty."
+        ]
+      },
+      "requirements": [
+        "venues",
+        "schedule_of_attendance"
+      ],
+      "module_parameters": [
+        "policy_mandate_start_day",
+        "policy_mandate_end_day",
+        "enforcement_probability",
+        "penalty_severity",
+        "enforcement_strength",
+        "adjustment_interval_days",
+        "policy_compliance_base",
+        "venue_mask_requirement_household",
+        "venue_mask_requirement_workplace",
+        "venue_mask_requirement_school",
+        "venue_mask_requirement_public_space"
+      ]
+    },
+    {
+      "name": "VenueInteractionModule",
+      "description": "Assigns daily venue attendance and generates peer observations and contacts.",
+      "inputs": [
+        "Person.age",
+        "Venue.type",
+        "Venue.capacity",
+        "Person.household_id"
+      ],
+      "outputs": [
+        "attendance.logs",
+        "contacts.logs"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "# Build attendance sets per venue type\nfor each person i:\n  if i.age < 18:\n    attends_school = Bernoulli(attendance_rate_school)\n  else if 18 <= i.age < 65:\n    attends_work = Bernoulli(attendance_rate_workplace)\n  else:\n    attends_work = false\n  attends_public = Bernoulli(attendance_rate_public)\n  # Always 'attends' household implicitly\n  assign i to specific venues by capacity constraints\n# Create contacts within venues\nfor each venue v today:\n  n_contacts ~ Poisson(contacts_per_visit_mean)\n  sample pairs within attendees with variance factor contact_variance_factor\n  record observed partner.mask_wearing for SocialInfluenceModule and potential disease contacts",
+        "notes": [
+          "Household contacts always available; others depend on attendance rates.",
+          "contacts_per_visit_mean controls average degree of mixing within venue per day."
+        ]
+      },
+      "requirements": [
+        "venue_registry",
+        "capacity_allocator",
+        "random_number_generator"
+      ],
+      "module_parameters": [
+        "avg_degree",
+        "rewiring_prob",
+        "homophily_strength",
+        "household_size_mean",
+        "number_of_workplaces",
+        "number_of_schools",
+        "number_of_public_spaces",
+        "workplace_capacity_mean",
+        "school_capacity_mean",
+        "public_space_capacity_mean",
+        "attendance_rate_workplace",
+        "attendance_rate_school",
+        "attendance_rate_public",
+        "contacts_per_visit_mean",
+        "contact_variance_factor"
+      ]
+    },
+    {
+      "name": "MaskAcquisitionModule",
+      "description": "Models access to masks through acquisition and restocking; updates access and perceived costs.",
+      "inputs": [
+        "Person.access_to_masks",
+        "Person.perceived_cost"
+      ],
+      "outputs": [
+        "Person.access_to_masks",
+        "Person.perceived_cost"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day % restock_interval_days == 0:\n  for each person i:\n    p_acquire = mask_availability * (1 - price_to_cost_sensitivity * i.perceived_cost)\n    i.access_to_masks = Bernoulli(clip(p_acquire, 0, 1)) ? true : i.access_to_masks\n    # If failed to acquire, increase perceived cost slightly due to scarcity/friction\n    if !i.access_to_masks:\n      i.perceived_cost = clip(i.perceived_cost + 0.05, 0, 1)",
+        "notes": [
+          "Access affects effective cost and adoption probability.",
+          "Perceived cost includes time/effort, not monetary only."
+        ]
+      },
+      "requirements": [
+        "supply_channel",
+        "random_number_generator"
+      ],
+      "module_parameters": [
+        "mask_availability",
+        "restock_interval_days",
+        "perceived_cost_mean",
+        "perceived_cost_sd",
+        "price_to_cost_sensitivity"
+      ]
+    },
+    {
+      "name": "DiseaseTransmissionModule",
+      "description": "Optional disease coupling: simulates infections via contacts and mask effectiveness.",
+      "inputs": [
+        "contacts.logs",
+        "Person.mask_wearing",
+        "Person.health_status"
+      ],
+      "outputs": [
+        "Person.health_status",
+        "infection.logs"
+      ],
+      "dependencies": [
+        "VenueInteractionModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if !model_disease: return\nfor each contact (i, j) in contacts.logs:\n  if health_status[i]=='I' and health_status[j]=='S' or vice versa:\n    base_p = infection_probability_per_contact\n    transmit_factor = (1 - mask_effectiveness_on_transmission) if infector.mask_wearing else 1\n    suscept_factor = (1 - mask_effectiveness_on_susceptibility) if susceptible.mask_wearing else 1\n    p = base_p * transmit_factor * suscept_factor\n    if Bernoulli(p): susceptible.health_status = 'I'\n# recoveries\nfor each person i with health_status=='I':\n  if days_since_infection(i) >= recovery_days: i.health_status = 'R'",
+        "notes": [
+          "Chain-binomial transmission per contact.",
+          "No waning immunity by default."
+        ]
+      },
+      "requirements": [
+        "contact_tracer",
+        "random_number_generator"
+      ],
+      "module_parameters": [
+        "model_disease",
+        "infection_probability_per_contact",
+        "mask_effectiveness_on_transmission",
+        "mask_effectiveness_on_susceptibility",
+        "initial_infected_prevalence",
+        "recovery_days"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily observables: adoption rates, dropout, venue compliance, social influence R, and infection prevalence.",
+      "inputs": [
+        "Person.mask_wearing",
+        "attendance.logs",
+        "log.influence_edges",
+        "Person.health_status"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.venue_compliance_by_type_daily",
+        "observable.dropout_rate_daily",
+        "observable.net_social_influence_R_daily",
+        "observable.infection_prevalence_daily",
+        "derived.peak_adoption",
+        "derived.time_to_50_percent_adoption",
+        "derived.compliance_duration_mean"
+      ],
+      "dependencies": [
+        "SocialInfluenceModule",
+        "VenueInteractionModule",
+        "DiseaseTransmissionModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate = mean_i(mask_wearing_i)\nvenue_compliance = for each venue type t: mean(mask_wearing among attendees in t today)\ndropout_rate = (# of agents who were masked yesterday and unmasked today) / (# masked yesterday)\nif influence_logging:\n  R_b = (number of newly adopting agents attributed to peer influence today) / (number of masked agents yesterday), smoothed EMA\ninfection_prev = fraction with health_status=='I' (if model_disease)\n# running aggregates for peak and t50\nupdate peak_adoption if adoption_rate > current_peak\nif time_to_50 not set and adoption_rate >= 0.5: set time_to_50 = current_day\nupdate per-agent compliance streaks; compute mean streak length among maskers for compliance_duration_mean periodically",
+        "notes": [
+          "net_social_influence_R is a behavioral reproduction number estimated from influence logs; fallback to change in adoption correlated with peer exposure if logs disabled."
+        ]
+      },
+      "requirements": [
+        "time_series_store"
+      ],
+      "module_parameters": [
+        "influence_logging"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 1000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of Person agents.",
+      "frozen": false
+    },
+    {
+      "key": "simulation_days",
+      "dtype": "int",
+      "default": 100,
+      "bounds": {
+        "low": 10,
+        "high": 3650
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": false
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.25,
+        "high": 7.0
+      },
+      "owner_module": "global",
+      "description": "Length of one simulation time step in days.",
+      "frozen": true
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Seed for RNG.",
+      "frozen": false
+    },
+    {
+      "key": "network_topology",
+      "dtype": "categorical",
+      "default": "small_world",
+      "bounds": null,
+      "owner_module": "global",
+      "description": "Type of social network topology.",
+      "frozen": true
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 2,
+        "high": 100
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Average degree in the social network.",
+      "frozen": true
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Rewiring probability for small-world network.",
+      "frozen": true
+    },
+    {
+      "key": "homophily_strength",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Tendency to connect to similar agents (used in mixing and influence weighting).",
+      "frozen": false
+    },
+    {
+      "key": "initial_mask_adoption_rate",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of mask-wearers.",
+      "frozen": false
+    },
+    {
+      "key": "initial_trust_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationModule",
+      "description": "Mean initial trust in authority.",
+      "frozen": false
+    },
+    {
+      "key": "initial_trust_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationModule",
+      "description": "SD of initial trust.",
+      "frozen": false
+    },
+    {
+      "key": "initial_risk_perception_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean initial perceived risk.",
+      "frozen": false
+    },
+    {
+      "key": "initial_risk_perception_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "SD of initial perceived risk.",
+      "frozen": false
+    },
+    {
+      "key": "social_influence_strength",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Strength of informational peer influence.",
+      "frozen": false
+    },
+    {
+      "key": "conformity_bias",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Pressure to conform to observed peer norm.",
+      "frozen": false
+    },
+    {
+      "key": "peer_memory_days",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 1,
+        "high": 60
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Lookback window for peer observation.",
+      "frozen": false
+    },
+    {
+      "key": "observation_noise_std",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Noise in perceived peer adoption.",
+      "frozen": false
+    },
+    {
+      "key": "behavioral_threshold_std",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Choice noise around adoption threshold.",
+      "frozen": false
+    },
+    {
+      "key": "compliance_decay_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Daily decay of compliance propensity while masked.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_onset_day",
+      "dtype": "int",
+      "default": 21,
+      "bounds": {
+        "low": 0,
+        "high": 200
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Day when fatigue begins to accumulate.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_increment",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Daily increase in fatigue when masked.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_recovery_rate",
+      "dtype": "float",
+      "default": 0.005,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Daily decrease in fatigue when unmasked.",
+      "frozen": false
+    },
+    {
+      "key": "susceptibility_slope",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Scale of mapping latent propensity to adoption probability.",
+      "frozen": false
+    },
+    {
+      "key": "perceived_cost_mean",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MaskAcquisitionModule",
+      "description": "Mean initial perceived cost of masking.",
+      "frozen": false
+    },
+    {
+      "key": "perceived_cost_sd",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MaskAcquisitionModule",
+      "description": "SD of initial perceived cost.",
+      "frozen": false
+    },
+    {
+      "key": "mask_availability",
+      "dtype": "float",
+      "default": 0.9,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MaskAcquisitionModule",
+      "description": "Probability of acquiring masks when attempting.",
+      "frozen": false
+    },
+    {
+      "key": "restock_interval_days",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 1,
+        "high": 60
+      },
+      "owner_module": "MaskAcquisitionModule",
+      "description": "Days between acquisition attempts.",
+      "frozen": false
+    },
+    {
+      "key": "price_to_cost_sensitivity",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "MaskAcquisitionModule",
+      "description": "How access/cost affects acquisition probability.",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationModule",
+      "description": "Initial share of population predisposed/exposed to misinformation.",
+      "frozen": false
+    },
+    {
+      "key": "information_campaign_intensity",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InformationModule",
+      "description": "Amplification of authority reach.",
+      "frozen": false
+    },
+    {
+      "key": "message_bias_authority",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationModule",
+      "description": "Valence of official messaging toward masking.",
+      "frozen": false
+    },
+    {
+      "key": "trust_update_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationModule",
+      "description": "Learning rate for trust updates.",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_sensitivity",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "SocialInfluenceModule",
+      "description": "Sensitivity of adoption to perceived risk.",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_bias",
+      "dtype": "float",
+      "default": -0.6,
+      "bounds": {
+        "low": -1.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationModule",
+      "description": "Valence of misinformation message (negative reduces masking).",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_reach",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationModule",
+      "description": "Daily probability of misinfo exposure among predisposed.",
+      "frozen": false
+    },
+    {
+      "key": "authority_reach",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationModule",
+      "description": "Daily probability of official message exposure.",
+      "frozen": false
+    },
+    {
+      "key": "policy_mandate_start_day",
+      "dtype": "int",
+      "default": -1,
+      "bounds": {
+        "low": -1,
+        "high": 2000
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "-1 means no mandate; otherwise first day mandate applies.",
+      "frozen": false
+    },
+    {
+      "key": "policy_mandate_end_day",
+      "dtype": "int",
+      "default": -1,
+      "bounds": {
+        "low": -1,
+        "high": 2000
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "-1 means open-ended; otherwise last day of mandate.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_probability",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Probability a non-complier is checked at a required venue.",
+      "frozen": false
+    },
+    {
+      "key": "penalty_severity",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Severity scaling for penalties or deterrence.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_strength",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Authority-level multiplier on enforcement.",
+      "frozen": false
+    },
+    {
+      "key": "adjustment_interval_days",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 1,
+        "high": 30
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Cadence for policy adjustments.",
+      "frozen": true
+    },
+    {
+      "key": "policy_compliance_base",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Baseline compliance probability under enforcement.",
+      "frozen": false
+    },
+    {
+      "key": "venue_mask_requirement_household",
+      "dtype": "bool",
+      "default": false,
+      "bounds": null,
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Households require masks.",
+      "frozen": true
+    },
+    {
+      "key": "venue_mask_requirement_workplace",
+      "dtype": "bool",
+      "default": true,
+      "bounds": null,
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Workplaces require masks.",
+      "frozen": false
+    },
+    {
+      "key": "venue_mask_requirement_school",
+      "dtype": "bool",
+      "default": true,
+      "bounds": null,
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Schools require masks.",
+      "frozen": false
+    },
+    {
+      "key": "venue_mask_requirement_public_space",
+      "dtype": "bool",
+      "default": true,
+      "bounds": null,
+      "owner_module": "PolicyAndEnforcementModule",
+      "description": "Public spaces require masks.",
+      "frozen": false
+    },
+    {
+      "key": "household_size_mean",
+      "dtype": "float",
+      "default": 2.6,
+      "bounds": {
+        "low": 1.0,
+        "high": 6.0
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Mean household size.",
+      "frozen": true
+    },
+    {
+      "key": "number_of_workplaces",
+      "dtype": "int",
+      "default": 50,
+      "bounds": {
+        "low": 0,
+        "high": 10000
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Count of workplace venues.",
+      "frozen": false
+    },
+    {
+      "key": "number_of_schools",
+      "dtype": "int",
+      "default": 20,
+      "bounds": {
+        "low": 0,
+        "high": 5000
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Count of school venues.",
+      "frozen": false
+    },
+    {
+      "key": "number_of_public_spaces",
+      "dtype": "int",
+      "default": 100,
+      "bounds": {
+        "low": 0,
+        "high": 20000
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Count of public spaces.",
+      "frozen": false
+    },
+    {
+      "key": "workplace_capacity_mean",
+      "dtype": "int",
+      "default": 50,
+      "bounds": {
+        "low": 5,
+        "high": 500
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Mean workplace capacity.",
+      "frozen": false
+    },
+    {
+      "key": "school_capacity_mean",
+      "dtype": "int",
+      "default": 500,
+      "bounds": {
+        "low": 50,
+        "high": 2000
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Mean school capacity.",
+      "frozen": false
+    },
+    {
+      "key": "public_space_capacity_mean",
+      "dtype": "int",
+      "default": 30,
+      "bounds": {
+        "low": 5,
+        "high": 200
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Mean public space capacity.",
+      "frozen": false
+    },
+    {
+      "key": "attendance_rate_workplace",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Daily attendance rate for workplaces.",
+      "frozen": false
+    },
+    {
+      "key": "attendance_rate_school",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Daily attendance rate for schools.",
+      "frozen": false
+    },
+    {
+      "key": "attendance_rate_public",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Daily attendance rate for public spaces.",
+      "frozen": false
+    },
+    {
+      "key": "contacts_per_visit_mean",
+      "dtype": "float",
+      "default": 8.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 40.0
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Average contacts per venue visit.",
+      "frozen": false
+    },
+    {
+      "key": "contact_variance_factor",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "VenueInteractionModule",
+      "description": "Overdispersion of contact counts.",
+      "frozen": false
+    },
+    {
+      "key": "model_disease",
+      "dtype": "bool",
+      "default": false,
+      "bounds": null,
+      "owner_module": "DiseaseTransmissionModule",
+      "description": "Toggle disease simulation.",
+      "frozen": false
+    },
+    {
+      "key": "infection_probability_per_contact",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "DiseaseTransmissionModule",
+      "description": "Per-contact infection probability without masks.",
+      "frozen": false
+    },
+    {
+      "key": "mask_effectiveness_on_transmission",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DiseaseTransmissionModule",
+      "description": "Reduction in infectiousness when infector masks.",
+      "frozen": false
+    },
+    {
+      "key": "mask_effectiveness_on_susceptibility",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "DiseaseTransmissionModule",
+      "description": "Reduction in susceptibility when susceptible masks.",
+      "frozen": false
+    },
+    {
+      "key": "initial_infected_prevalence",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "DiseaseTransmissionModule",
+      "description": "Initial share infected.",
+      "frozen": false
+    },
+    {
+      "key": "recovery_days",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 3,
+        "high": 30
+      },
+      "owner_module": "DiseaseTransmissionModule",
+      "description": "Days until recovery.",
+      "frozen": false
+    },
+    {
+      "key": "influence_logging",
+      "dtype": "bool",
+      "default": true,
+      "bounds": null,
+      "owner_module": "AdoptionAggregator",
+      "description": "Enable logging for influence attribution.",
+      "frozen": true
+    },
+    {
+      "key": "compliance_propensity_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial compliance propensity distribution.",
+      "frozen": false
+    },
+    {
+      "key": "compliance_propensity_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "SD of initial compliance propensity distribution.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.mask_wearing)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.venue_compliance_by_type_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "by_group(venue_type, mean(mask_wearing among attendees))",
+      "frequency": "daily",
+      "aggregation": "by_group(venue_type)",
+      "target_data_field": "train_venues.csv:compliance_by_type"
+    },
+    {
+      "id": "observable.dropout_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "(# masked yesterday and unmasked today) / (# masked yesterday)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:dropout_rate"
+    },
+    {
+      "id": "observable.net_social_influence_R_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "influence_attributed_new_adopters / prior_day_masked_count (EMA-smoothed)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:behavioral_R"
+    },
+    {
+      "id": "observable.infection_prevalence_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.health_status == 'I')",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:infection_prevalence"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "PeakAdoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "Peak",
+        "config": {
+          "window": null
+        }
+      }
+    },
+    {
+      "name": "TimeTo50Percent",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToThreshold",
+        "config": {
+          "threshold": 0.5,
+          "direction": "up"
+        }
+      }
+    },
+    {
+      "name": "ComplianceDurationMean",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "Custom",
+        "config": {
+          "function": "mean_consecutive_masking_streak_length"
+        }
+      }
+    },
+    {
+      "name": "PolicyEffectUplift",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "Difference",
+        "config": {
+          "baseline_run_id": "no_policy",
+          "comparison_run_id": "policy",
+          "aggregate": "mean_over_days"
+        }
+      }
+    },
+    {
+      "name": "CampaignEffectUplift",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "Difference",
+        "config": {
+          "baseline_run_id": "no_campaign",
+          "comparison_run_id": "campaign",
+          "aggregate": "mean_over_days"
+        }
+      }
+    },
+    {
+      "name": "AdoptionInequalityIndex",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "Gini",
+        "config": {
+          "group_by": "trust_quantile"
+        }
+      }
+    },
+    {
+      "name": "VenueComplianceRate",
+      "inputs": [
+        "observable.venue_compliance_by_type_daily"
+      ],
+      "definition": {
+        "type": "Identity",
+        "config": {}
+      }
+    },
+    {
+      "name": "DropoutRate",
+      "inputs": [
+        "observable.dropout_rate_daily"
+      ],
+      "definition": {
+        "type": "Identity",
+        "config": {}
+      }
+    },
+    {
+      "name": "NetSocialInfluenceR",
+      "inputs": [
+        "observable.net_social_influence_R_daily"
+      ],
+      "definition": {
+        "type": "Identity",
+        "config": {}
+      }
+    },
+    {
+      "name": "InfectionPrevalenceRMSE",
+      "inputs": [
+        "observable.infection_prevalence_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 1000,
+    "random_seed": 42,
+    "network_generation": "Watts-Strogatz small-world with avg_degree=10, rewiring_prob=0.1; add homophily by age quantiles using assortative rewiring proportional to homophily_strength",
+    "households": "Create ceil(population_size/household_size_mean) households; assign persons sequentially with Poisson draws",
+    "venues": "Instantiate counts and capacities per parameters; assign households to household venues",
+    "health": "If model_disease: sample initial_infected_prevalence to 'I', rest 'S'"
+  },
+  "algorithms": {
+    "NetworkGeneration": "Watts-Strogatz small-world with assortative rewiring by age quantiles per homophily_strength",
+    "SocialInfluenceUpdate": "Latent propensity updated via normative + informational components; logistic conversion to adoption probability with noise and fatigue",
+    "InformationUpdate": "Bernoulli exposure to official/misinformation; trust and risk updated via bounded linear updates",
+    "PolicyEnforcement": "Venue/macro mandate toggles; enforcement increases compliance and reduces perceived non-compliance benefit",
+    "VenueAssignment": "Daily stochastic attendance by venue type with capacity constraints; pairwise contacts sampled within venues",
+    "MaskAcquisition": "Periodic acquisition attempts influenced by availability and perceived cost; scarcity feedback",
+    "DiseaseTransmission": "Chain-binomial per-contact infection with mask effectiveness modifiers",
+    "Aggregation": "Compute daily observables and derived metrics; influence-based R via attribution logs"
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibrate and evaluate population-level adoption and infection prevalence.",
+      "fields_used": [
+        "day",
+        "adoption_rate",
+        "dropout_rate",
+        "behavioral_R",
+        "infection_prevalence"
+      ]
+    },
+    {
+      "name": "train_venues.csv",
+      "purpose": "Calibrate venue-specific compliance rates.",
+      "fields_used": [
+        "day",
+        "venue_type",
+        "compliance_by_type"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point; simulation loop, configuration parsing, and orchestration."
+      },
+      {
+        "name": "entities.py",
+        "description": "Entity class definitions for Person, PublicHealthAuthority, Venue, InformationSource."
+      },
+      {
+        "name": "network.py",
+        "description": "Network generation utilities (Watts-Strogatz, assortativity)."
+      },
+      {
+        "name": "modules/social_influence.py",
+        "description": "SocialInfluenceModule implementation."
+      },
+      {
+        "name": "modules/information.py",
+        "description": "InformationModule implementation."
+      },
+      {
+        "name": "modules/policy.py",
+        "description": "PolicyAndEnforcementModule implementation."
+      },
+      {
+        "name": "modules/venue.py",
+        "description": "VenueInteractionModule implementation."
+      },
+      {
+        "name": "modules/mask_supply.py",
+        "description": "MaskAcquisitionModule implementation."
+      },
+      {
+        "name": "modules/disease.py",
+        "description": "DiseaseTransmissionModule implementation."
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "AdoptionAggregator and metrics computation."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric functions (RMSE, MAE, Peak, TimeToThreshold, Gini, etc.)."
+      },
+      {
+        "name": "io.py",
+        "description": "Data loading, observable binding, run logging."
+      },
+      {
+        "name": "config.py",
+        "description": "Parameter schema, validation, defaults."
+      },
+      {
+        "name": "utils/random.py",
+        "description": "RNG wrappers and seeding."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "scipy",
+      "networkx",
+      "pandas",
+      "numba",
+      "tqdm"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 70,
+    "end_day": 99
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption",
+    "MAE_adoption",
+    "PeakAdoption",
+    "TimeTo50Percent",
+    "InfectionPrevalenceRMSE"
+  ]
+}

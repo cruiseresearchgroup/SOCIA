@@ -1,0 +1,1175 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based simulation of vaccination behavior adoption driven by social influence and information diffusion on a social network, with policy interventions and campaign effects.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "trust_in_institutions",
+        "risk_perception",
+        "susceptibility_to_misinfo",
+        "adoption_state",
+        "stubborn",
+        "info_true_level",
+        "info_misinfo_level",
+        "fatigue",
+        "household_id",
+        "degree",
+        "tie_strengths_to_neighbors"
+      ],
+      "behaviors": [
+        "receive_information",
+        "share_information",
+        "update_beliefs",
+        "decide_adoption",
+        "respond_to_policy"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "adoption_state_fraction": 0.05,
+          "age_group_shares": {
+            "0_17": 0.2,
+            "18_34": 0.35,
+            "35_64": 0.3,
+            "65_plus": 0.15
+          },
+          "trust_distribution": {
+            "mean": 0.5,
+            "sd": 0.2,
+            "clip": [
+              0.0,
+              1.0
+            ]
+          },
+          "risk_perception_distribution": {
+            "mean": 0.4,
+            "sd": 0.25,
+            "clip": [
+              0.0,
+              1.0
+            ]
+          },
+          "susceptibility_to_misinfo_distribution": {
+            "mean": 0.4,
+            "sd": 0.2,
+            "clip": [
+              0.0,
+              1.0
+            ]
+          },
+          "stubborn_fraction": 0.1,
+          "initial_info_true_awareness_fraction": 0.1,
+          "initial_info_misinfo_belief_fraction": 0.1
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkGenerator",
+      "description": "Constructs the social network with small-world or scale-free structure, assigns households, and initializes tie strengths.",
+      "inputs": [],
+      "outputs": [
+        "graph.social",
+        "households",
+        "person.attributes_initialized"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  N <- params.n_agents\n  if params.network_type == 'watts_strogatz':\n    G <- watts_strogatz_graph(N, k=round(params.avg_degree), p=params.rewiring_prob, seed=random_seed)\n  else if params.network_type == 'barabasi_albert':\n    G <- barabasi_albert_graph(N, m=params.m_ba, seed=random_seed)\n  assign age_group to each node using shares\n  assign households by grouping nodes; connect additional intra-household edges with prob=params.household_cluster_prob\n  for each edge (i,j) in G:\n    w ~ Normal(params.edge_weight_mean, params.edge_weight_sd), clip to [0.1, 3]\n    set tie_strength(i,j)=w\n  adjust mixing by age homophily and risk assortativity via rewiring while preserving degree distribution\n  output graph.social = G and initialized person attributes",
+        "notes": [
+          "Executed only at t=0 (initialization)",
+          "Homophily and assortativity enforced by iterative edge swaps that increase assortativity metrics without isolating nodes"
+        ]
+      },
+      "requirements": [
+        "init_only"
+      ],
+      "module_parameters": [
+        "n_agents",
+        "network_type",
+        "avg_degree",
+        "rewiring_prob",
+        "m_ba",
+        "homophily_age",
+        "assortativity_by_risk",
+        "household_cluster_prob",
+        "edge_weight_mean",
+        "edge_weight_sd"
+      ]
+    },
+    {
+      "name": "PolicyCampaign",
+      "description": "Schedules and emits policy signals (campaign intensity, trust boost, incentives, mandate, and misinfo takedown) that affect information and adoption dynamics.",
+      "inputs": [
+        "t"
+      ],
+      "outputs": [
+        "policy.trust_boost_t",
+        "policy.incentive_amount_t",
+        "policy.mandate_active_t",
+        "policy.misinfo_takedown_rate_t"
+      ],
+      "dependencies": [
+        "NetworkGenerator"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if params.campaign_start_day <= t <= params.campaign_end_day:\n  trust_boost <- params.campaign_trust_boost * params.campaign_intensity\n  incentive <- params.incentive_amount * params.campaign_intensity\nelse:\n  trust_boost <- 0.0\n  incentive <- 0.0\nmandate_active <- (t >= params.mandate_start_day)\nmisinfo_takedown <- params.misinformation_takedown_rate * (1.0 if t >= params.campaign_start_day else 0.0)\nemit signals: policy.trust_boost_t=trust_boost, policy.incentive_amount_t=incentive, policy.mandate_active_t=mandate_active, policy.misinfo_takedown_rate_t=misinfo_takedown",
+        "notes": [
+          "Mandate defaults to inactive (start_day=9999)",
+          "Signals are consumed downstream by InformationPropagation and BehaviorAdoption"
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "campaign_start_day",
+        "campaign_end_day",
+        "campaign_intensity",
+        "campaign_trust_boost",
+        "incentive_amount",
+        "misinformation_takedown_rate",
+        "mandate_start_day",
+        "mandate_enforcement_prob",
+        "noncompliance_penalty"
+      ]
+    },
+    {
+      "name": "InformationPropagation",
+      "description": "Propagates true information and misinformation over the social network using a weighted independent cascade with decay and fatigue.",
+      "inputs": [
+        "graph.social",
+        "person.states",
+        "policy.misinfo_takedown_rate_t",
+        "policy.trust_boost_t"
+      ],
+      "outputs": [
+        "info.true_exposures_t",
+        "info.misinfo_exposures_t",
+        "person.info_states_updated"
+      ],
+      "dependencies": [
+        "NetworkGenerator",
+        "PolicyCampaign"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  # Decay existing info levels\n  i.info_true_level <- i.info_true_level * (1 - params.info_decay_rate)\n  i.info_misinfo_level <- i.info_misinfo_level * (1 - params.info_decay_rate)\n  # Self-initiated exposures (media/search)\n  with prob params.self_initiated_exposure_rate: i.info_true_level += 1\n  with prob params.self_initiated_exposure_rate: i.info_misinfo_level += 1\nfor each edge (i,j) in graph.social:\n  w <- tie_strength(i,j)\n  # True info sharing from i to j\n  p_share_true <- params.base_share_prob_true * (1 + params.tie_strength_influence*(w-1)) * (1 + params.trust_sensitivity*(i.trust_in_institutions + policy.trust_boost_t - 0.5))\n  p_share_true <- clip(p_share_true, 0, 1)\n  if Bernoulli(p_share_true) and i.info_true_level > 0: j.info_true_level += 1\n  # Misinfo sharing from i to j with takedown\n  p_share_m <- params.base_share_prob_misinfo * (1 - policy.misinfo_takedown_rate_t) * (1 + params.tie_strength_influence*(w-1)) * (1 + params.trust_sensitivity*(0.5 - i.trust_in_institutions))\n  p_share_m <- clip(p_share_m, 0, 1)\n  if Bernoulli(p_share_m) and i.info_misinfo_level > 0: j.info_misinfo_level += 1\n# Fatigue reduces subsequent sharing likelihood via state\nfor each person i:\n  exposures_true_today <- count of true info increments\n  exposures_m_today <- count of misinfo increments\n  i.fatigue <- clip(i.fatigue + params.fatigue_increment_per_exposure*(exposures_true_today + exposures_m_today), 0, 1)\naggregate info.true_exposures_t and info.misinfo_exposures_t as totals for day t",
+        "notes": [
+          "Sharing probabilities are modulated by tie strength and trust",
+          "Fatigue accumulates and can optionally be used to downweight future sharing (implemented by adjusting base_share_prob_* externally if desired)"
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "base_share_prob_true",
+        "base_share_prob_misinfo",
+        "info_decay_rate",
+        "fatigue_increment_per_exposure",
+        "rebuttal_effectiveness",
+        "self_initiated_exposure_rate",
+        "tie_strength_influence",
+        "trust_sensitivity"
+      ]
+    },
+    {
+      "name": "BehaviorAdoption",
+      "description": "Determines daily adoption decisions using a logistic function of social norms, perceived risk, trust, and incentives; mandates affect compliance.",
+      "inputs": [
+        "graph.social",
+        "person.states",
+        "policy.trust_boost_t",
+        "policy.incentive_amount_t",
+        "policy.mandate_active_t",
+        "PolicyCampaign.mandate_enforcement_prob",
+        "PolicyCampaign.noncompliance_penalty"
+      ],
+      "outputs": [
+        "adoption.new_adopters_t",
+        "adoption.cumulative_adopters_t",
+        "person.adoption_state_updated"
+      ],
+      "dependencies": [
+        "NetworkGenerator",
+        "PolicyCampaign",
+        "InformationPropagation"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "new_adopters <- 0\nfor each person i where i.adoption_state == 0 and i.stubborn == 0:\n  # Social norm: sample up to max_daily_contacts_to_consider neighbors\n  N_i <- neighbors(i)\n  S <- random_sample(N_i, size=min(len(N_i), params.max_daily_contacts_to_consider))\n  norm_i <- mean([neighbor.adoption_state for neighbor in S]) if len(S)>0 else 0\n  # Perceived risk blends personal risk and true info minus misinfo influence\n  belief_adjust <- i.info_true_level - (1 - params.rebuttal_effectiveness) * i.info_misinfo_level * i.susceptibility_to_misinfo\n  risk_i <- clip(i.risk_perception + 0.1 * belief_adjust, 0, 1)\n  trust_eff <- clip(i.trust_in_institutions + policy.trust_boost_t, 0, 1)\n  logit <- params.base_adoption_logit + params.weight_social_norm*norm_i + params.weight_risk*risk_i + params.weight_trust*trust_eff + params.weight_cost_incentive*policy.incentive_amount_t + Normal(0, params.private_signal_noise)\n  p_adopt <- 1 / (1 + exp(-logit))\n  # Mandate effect: increase effective probability or force compliance with enforcement\n  if policy.mandate_active_t:\n    p_enforce <- PolicyCampaign.mandate_enforcement_prob\n    if Bernoulli(p_enforce):\n      p_adopt <- max(p_adopt, 0.95)  # near-certain compliance when enforced\n    else:\n      # Soft effect of penalty on adoption propensity\n      p_adopt <- clip(p_adopt + 0.002 * PolicyCampaign.noncompliance_penalty, 0, 1)\n  if Bernoulli(p_adopt):\n    i.adoption_state <- 1\n    new_adopters += 1\n# Vaccination is absorbing; habit_drop_prob can model decay if >0\nif params.habit_drop_prob > 0:\n  for each person j with j.adoption_state == 1:\n    if Bernoulli(params.habit_drop_prob): j.adoption_state <- 0\ncumulative_adopters <- count of persons with adoption_state == 1\nemit adoption.new_adopters_t = new_adopters, adoption.cumulative_adopters_t = cumulative_adopters",
+        "notes": [
+          "Logistic adoption allows interpretable coefficients",
+          "Mandate compliance is modeled via enforcement probability and penalty strength"
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "base_adoption_logit",
+        "weight_social_norm",
+        "weight_risk",
+        "weight_trust",
+        "weight_cost_incentive",
+        "private_signal_noise",
+        "stubborn_fraction",
+        "habit_drop_prob",
+        "max_daily_contacts_to_consider"
+      ]
+    },
+    {
+      "name": "AggregationAndMetrics",
+      "description": "Aggregates daily observables and applies optional smoothing and reporting adjustments.",
+      "inputs": [
+        "adoption.new_adopters_t",
+        "adoption.cumulative_adopters_t",
+        "info.true_exposures_t",
+        "info.misinfo_exposures_t"
+      ],
+      "outputs": [
+        "observable.new_adoptions_daily",
+        "observable.cumulative_adoption_share",
+        "observable.misinfo_exposure_index",
+        "observable.true_info_exposure_index"
+      ],
+      "dependencies": [
+        "BehaviorAdoption",
+        "InformationPropagation"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "report_new <- adoption.new_adopters_t\nreport_cum <- adoption.cumulative_adopters_t\n# Adjust for reporting delay by buffering (if delay > 0)\nif params.reporting_delay_days > 0:\n  buffer.push(report_new), output prior item after delay\n# Underreporting factor (<=1) scales observed counts\nobs_new <- round(report_new * params.underreporting_factor)\nobs_cum_share <- (report_cum * params.underreporting_factor) / params.n_agents\nobs_misinfo <- info.misinfo_exposures_t / params.n_agents\nobs_true <- info.true_exposures_t / params.n_agents\n# Optional smoothing on new adoptions\nobs_new_smoothed <- moving_average(obs_new, window=params.smoothing_window_days)\nemit observable.new_adoptions_daily=obs_new_smoothed, observable.cumulative_adoption_share=obs_cum_share, observable.misinfo_exposure_index=obs_misinfo, observable.true_info_exposure_index=obs_true",
+        "notes": [
+          "Smoothing window defaults to 3 days",
+          "Cumulative share is normalized by population size"
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "smoothing_window_days",
+        "reporting_delay_days",
+        "underreporting_factor"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "simulation_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 10,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": false
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 2147483646
+      },
+      "owner_module": "global",
+      "description": "Global RNG seed for reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 1
+      },
+      "owner_module": "global",
+      "description": "Simulation time step in days.",
+      "frozen": true
+    },
+    {
+      "key": "initial_adoption_fraction",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of population with adoption_state=1 at t=0.",
+      "frozen": false
+    },
+    {
+      "key": "initial_misinfo_belief_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of agents with nonzero misinformation level.",
+      "frozen": false
+    },
+    {
+      "key": "initial_true_info_awareness_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.7
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of agents with nonzero true info level.",
+      "frozen": false
+    },
+    {
+      "key": "share_age_0_17",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.4
+      },
+      "owner_module": "global",
+      "description": "Population share age 0-17.",
+      "frozen": false
+    },
+    {
+      "key": "share_age_18_34",
+      "dtype": "float",
+      "default": 0.35,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.6
+      },
+      "owner_module": "global",
+      "description": "Population share age 18-34.",
+      "frozen": false
+    },
+    {
+      "key": "share_age_35_64",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.6
+      },
+      "owner_module": "global",
+      "description": "Population share age 35-64.",
+      "frozen": false
+    },
+    {
+      "key": "share_age_65_plus",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.4
+      },
+      "owner_module": "global",
+      "description": "Population share age 65+.",
+      "frozen": false
+    },
+    {
+      "key": "mean_trust",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial trust distribution.",
+      "frozen": false
+    },
+    {
+      "key": "trust_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std dev of initial trust distribution.",
+      "frozen": false
+    },
+    {
+      "key": "mean_risk_perception",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of initial perceived risk distribution.",
+      "frozen": false
+    },
+    {
+      "key": "risk_sd",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std dev of initial risk distribution.",
+      "frozen": false
+    },
+    {
+      "key": "mean_susceptibility_misinfo",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Mean of susceptibility to misinformation.",
+      "frozen": false
+    },
+    {
+      "key": "misinfo_sd",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Std dev of susceptibility to misinformation.",
+      "frozen": false
+    },
+    {
+      "key": "n_agents",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 500,
+        "high": 100000
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Number of agents (population size).",
+      "frozen": false
+    },
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "watts_strogatz",
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Type of network: 'watts_strogatz' or 'barabasi_albert'.",
+      "frozen": false
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "float",
+      "default": 8.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 50.0
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Average degree for network initialization.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Rewiring probability for Watts-Strogatz networks.",
+      "frozen": false
+    },
+    {
+      "key": "m_ba",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 10
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Number of edges to attach from a new node to existing nodes in Barabasi-Albert.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_age",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Strength of age-based homophily during rewiring (0=no homophily, 1=strong).",
+      "frozen": false
+    },
+    {
+      "key": "assortativity_by_risk",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Strength of assortative mixing by risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "household_cluster_prob",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Probability of adding intra-household edges to increase clustering.",
+      "frozen": false
+    },
+    {
+      "key": "edge_weight_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.1,
+        "high": 3.0
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Mean tie strength for edges.",
+      "frozen": false
+    },
+    {
+      "key": "edge_weight_sd",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "NetworkGenerator",
+      "description": "Standard deviation of tie strength for edges.",
+      "frozen": false
+    },
+    {
+      "key": "base_share_prob_true",
+      "dtype": "float",
+      "default": 0.12,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.6
+      },
+      "owner_module": "InformationPropagation",
+      "description": "Base probability of sharing true info along an edge per day.",
+      "frozen": false
+    },
+    {
+      "key": "base_share_prob_misinfo",
+      "dtype": "float",
+      "default": 0.18,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "InformationPropagation",
+      "description": "Base probability of sharing misinformation along an edge per day.",
+      "frozen": false
+    },
+    {
+      "key": "info_decay_rate",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationPropagation",
+      "description": "Daily decay rate of information salience levels.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_increment_per_exposure",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "InformationPropagation",
+      "description": "Increment to fatigue per exposure event.",
+      "frozen": false
+    },
+    {
+      "key": "rebuttal_effectiveness",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationPropagation",
+      "description": "Factor reducing misinformation impact when true info is present.",
+      "frozen": false
+    },
+    {
+      "key": "self_initiated_exposure_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "InformationPropagation",
+      "description": "Daily probability of self-seeking exposure to each information type.",
+      "frozen": false
+    },
+    {
+      "key": "tie_strength_influence",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InformationPropagation",
+      "description": "Multiplier for how tie strength modulates sharing probability around mean 1.",
+      "frozen": false
+    },
+    {
+      "key": "trust_sensitivity",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "InformationPropagation",
+      "description": "Sensitivity of sharing probability to trust-in-institutions.",
+      "frozen": false
+    },
+    {
+      "key": "base_adoption_logit",
+      "dtype": "float",
+      "default": -2.2,
+      "bounds": {
+        "low": -6.0,
+        "high": 0.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Intercept of adoption logistic model.",
+      "frozen": false
+    },
+    {
+      "key": "weight_social_norm",
+      "dtype": "float",
+      "default": 2.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 6.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Coefficient on neighbor adoption share.",
+      "frozen": false
+    },
+    {
+      "key": "weight_risk",
+      "dtype": "float",
+      "default": 1.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 6.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Coefficient on perceived risk.",
+      "frozen": false
+    },
+    {
+      "key": "weight_trust",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Coefficient on trust (plus policy trust boost).",
+      "frozen": false
+    },
+    {
+      "key": "weight_cost_incentive",
+      "dtype": "float",
+      "default": 0.03,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Coefficient translating monetary incentive to adoption log-odds.",
+      "frozen": false
+    },
+    {
+      "key": "private_signal_noise",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Std dev of idiosyncratic shock to adoption logit.",
+      "frozen": false
+    },
+    {
+      "key": "stubborn_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.3
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Fraction of population that never adopts.",
+      "frozen": false
+    },
+    {
+      "key": "habit_drop_prob",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.05
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Daily probability of losing adoption (kept 0 for one-shot vaccination).",
+      "frozen": true
+    },
+    {
+      "key": "max_daily_contacts_to_consider",
+      "dtype": "int",
+      "default": 20,
+      "bounds": {
+        "low": 5,
+        "high": 100
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Max neighbors sampled to compute social norm.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_start_day",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 0,
+        "high": 60
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "First day of campaign activity.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_end_day",
+      "dtype": "int",
+      "default": 29,
+      "bounds": {
+        "low": 0,
+        "high": 180
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Last day of campaign activity.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_intensity",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Scaling factor for campaign effects.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_trust_boost",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Additive trust boost due to campaign messaging.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_amount",
+      "dtype": "float",
+      "default": 50.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 200.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Monetary incentive per adopter (currency units).",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_takedown_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Fractional reduction in misinfo sharing rate during campaign.",
+      "frozen": false
+    },
+    {
+      "key": "mandate_start_day",
+      "dtype": "int",
+      "default": 9999,
+      "bounds": {
+        "low": 0,
+        "high": 10000
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Day mandate becomes active (9999 means never during horizon).",
+      "frozen": false
+    },
+    {
+      "key": "mandate_enforcement_prob",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Daily probability a non-adopter faces mandate enforcement.",
+      "frozen": false
+    },
+    {
+      "key": "noncompliance_penalty",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 500.0
+      },
+      "owner_module": "PolicyCampaign",
+      "description": "Penalty magnitude (effective monetary equivalent) for noncompliance.",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "AggregationAndMetrics",
+      "description": "Window size for moving average smoothing of daily adoptions.",
+      "frozen": false
+    },
+    {
+      "key": "reporting_delay_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 7
+      },
+      "owner_module": "AggregationAndMetrics",
+      "description": "Reporting delay for daily adoptions (days).",
+      "frozen": false
+    },
+    {
+      "key": "underreporting_factor",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "AggregationAndMetrics",
+      "description": "Multiplicative factor applied to reported adoptions to account for underreporting.",
+      "frozen": false
+    },
+    {
+      "key": "observation_start_day",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "global",
+      "description": "Day index corresponding to the first observed data point.",
+      "frozen": true
+    },
+    {
+      "key": "evaluation_start_day",
+      "dtype": "int",
+      "default": 30,
+      "bounds": {
+        "low": 0,
+        "high": 364
+      },
+      "owner_module": "global",
+      "description": "Start day of evaluation/prediction window.",
+      "frozen": true
+    },
+    {
+      "key": "evaluation_end_day",
+      "dtype": "int",
+      "default": 39,
+      "bounds": {
+        "low": 1,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "End day of evaluation/prediction window (inclusive).",
+      "frozen": true
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "AggregationAndMetrics",
+      "formula_or_field": "moving_average(sum(1 for adoption events at t), window=smoothing_window_days)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "vaccination_timeseries_train.csv:new_adoptions"
+    },
+    {
+      "id": "observable.cumulative_adoption_share",
+      "source_module": "AggregationAndMetrics",
+      "formula_or_field": "adoption.cumulative_adopters_t / n_agents",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "vaccination_timeseries_train.csv:cumulative_share"
+    },
+    {
+      "id": "observable.misinfo_exposure_index",
+      "source_module": "AggregationAndMetrics",
+      "formula_or_field": "info.misinfo_exposures_t / n_agents",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "social_media_misinfo_index_train.csv:index"
+    },
+    {
+      "id": "observable.true_info_exposure_index",
+      "source_module": "AggregationAndMetrics",
+      "formula_or_field": "info.true_exposures_t / n_agents",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "public_health_info_index_train.csv:index"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_new_adoptions_daily",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAPE_cumulative_adoption",
+      "inputs": [
+        "observable.cumulative_adoption_share"
+      ],
+      "definition": {
+        "type": "MAPE",
+        "config": {
+          "epsilon": 1e-06
+        }
+      }
+    },
+    {
+      "name": "PeakError_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "window": 7
+        }
+      }
+    },
+    {
+      "name": "TimeTo50_cumulative",
+      "inputs": [
+        "observable.cumulative_adoption_share"
+      ],
+      "definition": {
+        "type": "TimeToThresholdDiff",
+        "config": {
+          "threshold": 0.5
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "initial_adoption_fraction": 0.05,
+    "initial_true_info_awareness_fraction": 0.1,
+    "initial_misinfo_belief_fraction": 0.1
+  },
+  "algorithms": {
+    "IndependentCascadeWeighted": "Edge-based diffusion where an informed node attempts to activate neighbors with probability p_ij = base_prob * f(tie_strength, trust, policy) and subject to per-step decay.",
+    "LogisticAdoption": "Daily adoption probability p = sigmoid(beta0 + b1*social_norm + b2*risk + b3*trust + b4*incentive + epsilon), with mandate modifiers.",
+    "AssortativeRewiring": "Iterative double-edge swaps to increase homophily/assortativity without changing node degrees.",
+    "MovingAverage": "Centered or trailing moving average smoothing for daily series with specified window."
+  },
+  "data_sources": [
+    {
+      "name": "vaccination_timeseries_train.csv",
+      "purpose": "Training and calibration targets for daily and cumulative adoption.",
+      "fields_used": [
+        "date",
+        "new_adoptions",
+        "cumulative_share"
+      ]
+    },
+    {
+      "name": "social_media_misinfo_index_train.csv",
+      "purpose": "Calibration of misinformation exposure index dynamics.",
+      "fields_used": [
+        "date",
+        "index"
+      ]
+    },
+    {
+      "name": "public_health_info_index_train.csv",
+      "purpose": "Calibration of true information exposure dynamics.",
+      "fields_used": [
+        "date",
+        "index"
+      ]
+    },
+    {
+      "name": "vaccination_timeseries_eval.csv",
+      "purpose": "Holdout set for prediction period evaluation.",
+      "fields_used": [
+        "date",
+        "new_adoptions",
+        "cumulative_share"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.py",
+        "description": "Parameter schemas, defaults, and validation."
+      },
+      {
+        "name": "entities.py",
+        "description": "Agent class (Person) and data containers for states."
+      },
+      {
+        "name": "network_module.py",
+        "description": "NetworkGenerator implementation and rewiring utilities."
+      },
+      {
+        "name": "policy_module.py",
+        "description": "PolicyCampaign signals and scheduling."
+      },
+      {
+        "name": "info_module.py",
+        "description": "InformationPropagation logic and state updates."
+      },
+      {
+        "name": "adoption_module.py",
+        "description": "BehaviorAdoption logic and transitions."
+      },
+      {
+        "name": "aggregation_module.py",
+        "description": "AggregationAndMetrics and observable generation."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric calculators (RMSE, MAPE, PeakError, TimeToThresholdDiff)."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Load target datasets, align dates, and write outputs."
+      },
+      {
+        "name": "simulation.py",
+        "description": "Scheduler, dependency resolution, and main simulation loop."
+      },
+      {
+        "name": "run.py",
+        "description": "Entry point; parses CLI args, runs simulation, computes metrics."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "pydantic",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_new_adoptions_daily",
+    "MAPE_cumulative_adoption",
+    "PeakError_new_adoptions",
+    "TimeTo50_cumulative"
+  ]
+}

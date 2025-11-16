@@ -1,0 +1,230 @@
+{
+  "summary": "The simulation runs and includes several useful components (seeded randomness, small-world network, a logistic mask adoption decision, and basic media/policy/supply dynamics). However, it diverges from the task specification in entity naming/attributes/behaviors and fails to compute the required metrics. There is also a critical logic bug: is_wearing_mask is never reset daily, so agents remain masked once they adopt (unless inventory depletes). Parameters from the spec are not mapped to internal names and are therefore ignored. Fixing the metrics, daily decision logic, parameter mapping, and minimal spec-aligned behaviors should be the top priorities.",
+  "critical_issues": [
+    {
+      "issue": "Required metrics missing or misnamed",
+      "impact": "Evaluation cannot use the expected outputs; simulation appears incomplete and results are not comparable across runs/configurations.",
+      "solution": "Implement and return: overall_adoption_rate (time series and/or end-of-day), time_to_50_percent_adoption, peak_adoption_rate, steady_state_adoption_rate (last 20% of days), mandate_effect_size (via counterfactual or within-run estimator), adoption_inequality_index (CV or Gini across demographic groups), noncompliance_under_mandate (1 - compliance on mandate days). Ensure names match the spec exactly.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Daily wearing state is not reset based on the new decision",
+      "impact": "Once an agent starts wearing, they keep wearing regardless of daily willingness; this inflates adoption, distorts dynamics, and invalidates metrics like time_to_50_percent_adoption.",
+      "solution": "At each day\u2019s decision, compute willingness and then set is_wearing_mask = willing_after_enforcement_and_norms and mask_inventory > 0. If inventory hits 0, set is_wearing_mask = False immediately.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Parameter names diverge from the specification and are not mapped",
+      "impact": "User-provided configurations using the spec\u2019s names are ignored, producing unexpected and irreproducible behavior across users and runs.",
+      "solution": "Add a parameter mapping layer to accept the spec\u2019s parameters (e.g., average_degree -> network_avg_degree; enforcement_probability -> mandate_enforcement_prob; cost_sensitivity -> adoption_cost_weight; mask_supply_per_day -> supply_restock_per_day_per_capita; messaging_frequency_per_week/message_effect_size -> media scheduling).",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Entity misalignment with spec (names/attributes/behaviors)",
+      "impact": "Hard to validate against the spec; some interactions (observational norms in location, move_between_locations, purchase limits) are not represented, reducing realism.",
+      "solution": "Align classes: PolicyAuthority (mandate_status, policy_type, enforcement_resources, messaging_budget, campaign_targeting_strategy), Retailer (purchase_limit_per_person), Location (mask_requirement_level: recommended/required, public_visibility, open_hours). Implement minimal versions of move_between_locations and observational norms.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Policy cost not included in individual utility",
+      "impact": "Mandate and enforcement (including fines) do not meaningfully change decisions, underestimating policy impact and invalidating mandate_effect_size.",
+      "solution": "In decide_mask_use, include expected penalty term enforcement_probability * fine_amount normalized by personal budget or income. Use individual budget rather than global budget_mean for cost normalization.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Retail purchase limits and per-day constraints not enforced",
+      "impact": "Supply constraints are under-modeled; agents can hoard or buy every day beyond the spec\u2019s purchase limits, skewing adoption and inventory dynamics.",
+      "solution": "Add per-agent daily purchase counters and enforce purchase_limit_per_person; reset counters at the start of each day.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Observational norms in locations not implemented",
+      "impact": "A key interaction (within-location normative pressure) is missing, reducing realism and misrepresenting how visible compliance affects decisions.",
+      "solution": "Compute location.local_norm_compliance from current occupants each day and pass a normative pressure term into the decision utility.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Mandate effect estimation",
+      "current_approach": "Not computed or approximated by compliance_under_mandate only.",
+      "suggested_approach": "Run a short counterfactual sub-simulation with mandate disabled (same seed and params) to compute mandate_effect_size as the difference in adoption trajectories (mean over aligned days or at steady-state).",
+      "expected_benefit": "Causal attribution of mandate impact; metric aligns with spec and improves policy analysis utility."
+    },
+    {
+      "aspect": "Cost modeling",
+      "current_approach": "Cost normalized by global budget_mean; fines not used.",
+      "suggested_approach": "Normalize cost by the agent\u2019s own budget or income; include expected penalty = enforcement_probability * fine_amount in the utility cost term when mandate is active.",
+      "expected_benefit": "Better heterogeneity and more realistic policy responsiveness."
+    },
+    {
+      "aspect": "Observational norms within locations",
+      "current_approach": "local_norm_compliance exists but is unused.",
+      "suggested_approach": "Update local_norm_compliance daily; incorporate it into utility with a normative influence weight distinct from social network peer_rate.",
+      "expected_benefit": "Captures visible compliance effects; improves convergence dynamics and face validity."
+    },
+    {
+      "aspect": "Supply and purchase limits",
+      "current_approach": "No per-day purchase caps; simplistic restocking.",
+      "suggested_approach": "Implement purchase_limit_per_person per day; reset daily; calibrate restock_rate_per_day from mask_supply_per_day; optionally add adaptive pricing with ceilings.",
+      "expected_benefit": "Prevents hoarding behaviors; more realistic shortages and their effect on adoption."
+    },
+    {
+      "aspect": "Media/message modeling",
+      "current_approach": "Simple pro_mask_bias - misinformation_rate; no credibility/bias attributes from spec; no explicit message_frequency/effect size.",
+      "suggested_approach": "Add credibility and bias; generate broadcasts based on messaging_frequency_per_week and message_effect_size; modulate impact by agent trust_in_media and MediaChannel.credibility.",
+      "expected_benefit": "Improves explanatory power for messaging campaigns and misinformation scenarios."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation_code_iter_75.py",
+      "modification": "Reset is_wearing_mask each day based on willingness and inventory; ensure depletion sets is_wearing_mask to False.",
+      "reason": "Fixes critical logic error causing persistent wearing once adopted.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "modification": "Implement required metrics as per spec and return them with exact names.",
+      "reason": "Enables evaluation and consistency with the task specification.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "modification": "Add param mapping from spec names to internal names before validation.",
+      "reason": "Ensures provided configurations are honored; reduces surprises.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "modification": "Include expected penalty from enforcement and fines in decide_mask_use and normalize cost by per-agent budget.",
+      "reason": "Makes policy levers effective and agent-heterogeneous.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "modification": "Add per-day purchase limit tracking and enforce purchase_limit_per_person in Person.purchase_masks or in Simulation.step.",
+      "reason": "Implements spec-aligned retail constraints; improves supply realism.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "modification": "Update and use Location.local_norm_compliance in the decision utility.",
+      "reason": "Implements observational norms in locations interaction.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "modification": "Optionally run a counterfactual sub-simulation with mandate disabled to compute mandate_effect_size.",
+      "reason": "Provides a valid estimate of mandate effect holding other factors constant.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "modification": "Add MediaChannel credibility and bias; incorporate messaging_frequency_per_week and message_effect_size.",
+      "reason": "Aligns with spec and improves the media mechanism fidelity.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "steady_state_adoption_rate",
+      "current_gap": "No steady-state metric; daily wearing persistence inflates rates.",
+      "suggestion": "Compute mean adoption over the last 20% of days. Validate against observed plateau values from real-world mask adoption time series."
+    },
+    {
+      "metric": "mandate_effect_size",
+      "current_gap": "Not computed; policy cost absent in utility.",
+      "suggestion": "Add expected penalty in utility and compute counterfactual no-mandate run. Calibrate enforcement_probability and fine_amount to empirical mandate effects reported in literature."
+    },
+    {
+      "metric": "adoption_inequality_index",
+      "current_gap": "Not computed; adoption is not segmented.",
+      "suggestion": "Use coefficient of variation across age/income/risk group adoption rates or a Gini index. Compare to observed disparities in surveys or mobility/mask datasets."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix daily wearing state reset and inventory depletion logic in Simulation.step.",
+    "Implement and return all required metrics with exact names, including steady state and mandate effect.",
+    "Add parameter name mapping to accept the spec\u2019s configuration fields.",
+    "Incorporate policy cost (expected penalty) and per-agent budget normalization in decide_mask_use.",
+    "Implement per-day purchase limits and reset counters daily.",
+    "Update and use location-level observational norms in decisions.",
+    "Add minimal class attribute alignment (PolicyAuthority/Retailer/Location) or adapters.",
+    "Enhance MediaChannel with credibility/bias and frequency/effect parameters."
+  ],
+  "additional_comments": "Dependencies are reasonable. NetworkX is required; consider a graceful fallback small-world generator if unavailable. Remove unused imports or add optional CLI/plotting to justify them. The special requirement to call main() directly is satisfied.",
+  "code_snippets": [
+    {
+      "file": "simulation_code_iter_75.py",
+      "before": "            # Wear if willing and has inventory\n            if willing and person.mask_inventory > 0:\n                person.is_wearing_mask = True\n\n            # Simple consumption: mask wears out with small probability\n            if person.is_wearing_mask and np.random.rand() < 1.0 / 7.0:\n                person.mask_inventory = max(0, person.mask_inventory - 1)\n",
+      "after": "            # Compute location normative pressure\n            loc = self.locations[person.location_id]\n            norm_pressure = getattr(loc, 'local_norm_compliance', 0.0)\n            # Combine willingness with normative pressure (simple convex blend)\n            willingness = 0.8 * willing + 0.2 * norm_pressure\n\n            # Daily wearing is determined fresh each day\n            person.is_wearing_mask = (np.random.rand() < willingness) and (person.mask_inventory > 0)\n\n            # Consumption: only when actually wearing\n            if person.is_wearing_mask and np.random.rand() < (1.0 / 7.0):\n                person.mask_inventory = max(0, person.mask_inventory - 1)\n                if person.mask_inventory == 0:\n                    person.is_wearing_mask = False\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "before": "    def _finalize(self) -> Dict[str, Any]:\n        ...\n        return {\n            \"overall_adoption_rate\": overall,\n            \"time_to_reach_threshold\": time_to,\n            \"compliance_rate_under_mandate\": compliance_under_mandate,\n            \"adoption_by_demographic\": adoption_by_demographic,\n            \"supply_constraint_gap\": supply_constraint_gap,\n            \"post_policy_sustainment\": post_policy_sustainment,\n            \"timeseries\": {\n                \"overall_adoption_rate_ts\": ts,\n                \"willing_but_constrained_ts\": scg_ts,\n                \"mandate_active_ts\": mandate_flags,\n            },\n        }\n",
+      "after": "    def _finalize(self) -> Dict[str, Any]:\n        ts = self.metrics[\"overall_adoption_rate_ts\"]\n        mandate_flags = self.metrics[\"mandate_active_ts\"]\n        T = len(ts)\n        overall_adoption_rate = float(ts[-1]) if ts else 0.0\n\n        # time_to_50_percent_adoption\n        time_to_50 = None\n        for d, v in enumerate(ts):\n            if v >= 0.5:\n                time_to_50 = d\n                break\n\n        # peak and steady-state (last 20% window)\n        peak_adoption_rate = float(np.max(ts)) if ts else 0.0\n        window = max(1, int(0.2 * T))\n        steady_state_adoption_rate = float(np.mean(ts[-window:])) if ts else 0.0\n\n        # Noncompliance under mandate\n        mandate_vals = [v for v, f in zip(ts, mandate_flags) if f]\n        noncompliance_under_mandate = float(1.0 - np.mean(mandate_vals)) if mandate_vals else 0.0\n\n        # Adoption inequality index (CV across groups)\n        groups = []\n        # age groups\n        def age_group(a):\n            return '<25' if a < 25 else '25-44' if a < 45 else '45-64' if a < 65 else '65+'\n        age_bins = {k: [] for k in ['<25','25-44','45-64','65+']}\n        for p in self.people:\n            age_key = age_group(p.age)\n            age_bins[age_key].append(1.0 if p.is_wearing_mask else 0.0)\n        age_rates = [np.mean(v) for v in age_bins.values() if v]\n        if age_rates:\n            groups.extend(age_rates)\n        adoption_inequality_index = float(np.std(groups) / (np.mean(groups) + 1e-9)) if groups else 0.0\n\n        results = {\n            \"overall_adoption_rate\": overall_adoption_rate,\n            \"time_to_50_percent_adoption\": time_to_50,\n            \"peak_adoption_rate\": peak_adoption_rate,\n            \"steady_state_adoption_rate\": steady_state_adoption_rate,\n            \"mandate_effect_size\": None,  # filled if counterfactual computed\n            \"adoption_inequality_index\": adoption_inequality_index,\n            \"noncompliance_under_mandate\": noncompliance_under_mandate,\n            \"timeseries\": {\n                \"overall_adoption_rate_ts\": ts,\n                \"mandate_active_ts\": mandate_flags,\n            },\n        }\n        return results\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "before": "    def run(self) -> Dict[str, Any]:\n        T = int(self.p[\"time_horizon_days\"])\n        if os.getenv(\"SIM_SMOKE_TEST\") == \"1\" or self.p.get(\"fast_mode\", False):\n            T = min(T, 10)\n        for _ in range(T):\n            self.step()\n        results = self._finalize()\n        return results\n",
+      "after": "    def run(self) -> Dict[str, Any]:\n        T = int(self.p[\"time_horizon_days\"])\n        if os.getenv(\"SIM_SMOKE_TEST\") == \"1\" or self.p.get(\"fast_mode\", False):\n            T = min(T, 10)\n        for _ in range(T):\n            # recompute local norms at start of day\n            for loc in self.locations:\n                occ = [p for p in self.people if p.location_id == loc.id]\n                loc.local_norm_compliance = float(np.mean([1.0 if p.is_wearing_mask else 0.0 for p in occ])) if occ else 0.0\n            self.step()\n        results = self._finalize()\n\n        # Optional counterfactual for mandate_effect_size\n        if bool(self.p.get(\"compute_counterfactual\", True)):\n            cf_params = dict(self.p)\n            cf_params[\"mandate_start_day\"] = None\n            cf = Simulation(cf_params)\n            # align smoke test behavior\n            if os.getenv(\"SIM_SMOKE_TEST\") == \"1\" or cf.p.get(\"fast_mode\", False):\n                cf.p[\"time_horizon_days\"] = T\n            cf.run()\n            if cf.metrics.get(\"overall_adoption_rate_ts\"):\n                # compute difference in steady-state means\n                window = max(1, int(0.2 * T))\n                ss_base = float(np.mean(self.metrics[\"overall_adoption_rate_ts\"][-window:]))\n                ss_cf = float(np.mean(cf.metrics[\"overall_adoption_rate_ts\"][-window:]))\n                results[\"mandate_effect_size\"] = ss_base - ss_cf\n        return results\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "before": "def _default_params() -> Dict[str, Any]:\n    return {\n        # Core\n        \"population_size\": 200,\n        ...\n        \"message_schedule\": [],\n        ...\n    }\n",
+      "after": "def _map_spec_params(p: Dict[str, Any]) -> Dict[str, Any]:\n    mapped = dict(p)\n    # Network\n    if 'average_degree' in p and 'network_avg_degree' not in p:\n        mapped['network_avg_degree'] = p['average_degree']\n    if 'network_topology' in p and p['network_topology'] == 'small_world':\n        mapped.setdefault('network_rewiring_prob', 0.1)\n    # Policy/enforcement\n    if 'enforcement_probability' in p and 'mandate_enforcement_prob' not in p:\n        mapped['mandate_enforcement_prob'] = p['enforcement_probability']\n    if 'fine_amount' in p:\n        mapped['fine_amount'] = p['fine_amount']\n    if 'mandate_active' in p:\n        mapped['mandate_start_day'] = 0 if p['mandate_active'] else None\n    # Supply/Retailer\n    if 'mask_supply_per_day' in p and 'supply_restock_per_day_per_capita' not in p and 'population_size' in p:\n        mapped['supply_restock_per_day_per_capita'] = p['mask_supply_per_day'] / max(p['population_size'], 1)\n    if 'purchase_limit_per_person' in p:\n        mapped['purchase_limit_per_person'] = p['purchase_limit_per_person']\n    # Costs/influence\n    if 'cost_sensitivity' in p and 'adoption_cost_weight' not in p:\n        mapped['adoption_cost_weight'] = p['cost_sensitivity']\n    if 'social_influence_weight' in p:\n        mapped['social_influence_weight'] = p['social_influence_weight']\n    if 'policy_pressure_weight' in p and 'policy_influence_weight' not in p:\n        mapped['policy_influence_weight'] = p['policy_pressure_weight']\n    if 'personal_risk_weight' in p and 'risk_perception_weight' not in p:\n        mapped['risk_perception_weight'] = p['personal_risk_weight']\n    # Media\n    if 'messaging_frequency_per_week' in p:\n        mapped['messaging_frequency_per_week'] = p['messaging_frequency_per_week']\n    if 'message_effect_size' in p:\n        mapped['message_effect_size'] = p['message_effect_size']\n    return mapped\n\n# In Simulation.__init__ before validation\nself.p = _map_spec_params(dict(params))\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "before": "        cost_term = vendor_price / max(budget_mean, 1e-6)\n        noise = np.random.normal(0.0, noise_level)\n        utility = (\n            w_s * self.social_influence_susceptibility * peer_rate\n            + w_p * self.policy_sensitivity * policy_signal\n            + w_r * self.risk_perception\n            - w_c * cost_term\n            + 0.1 * self.mask_attitude\n            + 0.2 * self.habit_strength\n            - 0.1 * self.fatigue_level\n            + noise\n        )\n",
+      "after": "        # Normalize cost by personal budget and include expected penalty\n        personal_budget = max(self.budget, 1e-6)\n        price_term = vendor_price / personal_budget\n        enforcement_prob = weights.get('enforcement_probability', 0.0)\n        fine_amount = weights.get('fine_amount', 0.0)\n        expected_penalty = (policy_signal * enforcement_prob * fine_amount) / personal_budget\n        cost_term = price_term + expected_penalty\n        noise = np.random.normal(0.0, noise_level)\n        utility = (\n            w_s * self.social_influence_susceptibility * peer_rate\n            + w_p * self.policy_sensitivity * policy_signal\n            + w_r * self.risk_perception\n            - w_c * cost_term\n            + 0.1 * self.mask_attitude\n            + 0.2 * self.habit_strength\n            - 0.1 * self.fatigue_level\n            + noise\n        )\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "before": "        willing_but_constrained = 0\n        weights = dict(\n            social_influence_weight=self.p[\"social_influence_weight\"],\n            policy_influence_weight=self.p[\"policy_influence_weight\"],\n            risk_perception_weight=self.p[\"risk_perception_weight\"],\n            adoption_cost_weight=self.p[\"adoption_cost_weight\"],\n        )\n",
+      "after": "        willing_but_constrained = 0\n        daily_purchases = {pid: 0 for pid in range(n)}\n        purchase_limit = int(self.p.get('purchase_limit_per_person', 5))\n        weights = dict(\n            social_influence_weight=self.p[\"social_influence_weight\"],\n            policy_influence_weight=self.p[\"policy_influence_weight\"],\n            risk_perception_weight=self.p[\"risk_perception_weight\"],\n            adoption_cost_weight=self.p[\"adoption_cost_weight\"],\n            enforcement_probability=float(self.p.get('mandate_enforcement_prob', 0.0)),\n            fine_amount=float(self.p.get('fine_amount', 0.0)),\n        )\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "before": "            if willing and not person.is_wearing_mask and person.mask_inventory <= 0:\n                units, constrained = person.purchase_masks(self.vendor, max_units=1)\n                if constrained and units == 0:\n                    willing_but_constrained += 1\n",
+      "after": "            if willing and person.mask_inventory <= 0 and daily_purchases[person.id] < purchase_limit:\n                units, constrained = person.purchase_masks(self.vendor, max_units=1)\n                daily_purchases[person.id] += units\n                if constrained and units == 0:\n                    willing_but_constrained += 1\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation_code_iter_75.py",
+      "before": "class MediaChannel:\n    ...\n    def broadcast_content(self, day: int, policy_signal: float) -> float:\n        schedule_boost = 1.0\n        if self.message_schedule and day in self.message_schedule:\n            schedule_boost = 1.25\n        net = (self.pro_mask_bias * schedule_boost + 0.5 * policy_signal) - self.misinformation_rate\n        return float(np.clip(net, -1.0, 1.0))\n",
+      "after": "class MediaChannel:\n    id: int\n    reach: float\n    pro_mask_bias: float\n    misinformation_rate: float\n    message_schedule: List[int]\n    credibility: float = 0.5\n    bias: float = 0.0\n    message_effect_size: float = 0.1\n    messaging_frequency_per_week: int = 3\n\n    def broadcast_content(self, day: int, policy_signal: float) -> float:\n        # periodic messaging\n        weekly = (day % 7) < self.messaging_frequency_per_week\n        schedule_boost = 1.25 if (self.message_schedule and day in self.message_schedule) or weekly else 1.0\n        base = (self.pro_mask_bias - self.misinformation_rate + self.bias)\n        net = (base * schedule_boost + 0.5 * policy_signal) * (self.credibility * self.message_effect_size)\n        return float(np.clip(net, -1.0, 1.0))\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent iteration added a logistic decision model, reproducible seeding, a small-world network, and several metrics/time series; these are solid improvements. However, the code still deviates from the required spec, and a critical daily state reset bug persists. Metrics are misnamed/missing, and parameter naming mismatches remain.",
+    "positive_impacts": [
+      "Reproducible seeding across random modules.",
+      "Watts\u2013Strogatz small-world network consistent with the social influence context.",
+      "Logistic adoption decision integrating peer/policy/risk/cost terms.",
+      "Time series tracking for adoption and mandate flags."
+    ],
+    "negative_impacts": [
+      "Required metrics not implemented; outputs misaligned with spec.",
+      "Daily wearing state not reset; leads to unrealistic lock-in.",
+      "Parameter naming divergence makes provided configs ineffective.",
+      "Policy fines/enforcement not integrated into decision cost.",
+      "Location observational norms and purchase limits not implemented."
+    ],
+    "suggestions": [
+      "Implement the exact metrics with correct names and add a counterfactual for mandate_effect_size.",
+      "Reset is_wearing_mask based on daily willingness and inventory; tie mask consumption to wearing days.",
+      "Add a parameter mapping layer to accept the spec\u2019s names and ensure compatibility.",
+      "Incorporate expected policy penalty and per-agent cost normalization.",
+      "Update and use location-level norms; implement per-day purchase limits."
+    ]
+  }
+}

@@ -1,0 +1,507 @@
+{
+  "model_type": "agent_based",
+  "description": "A multiplex networked agent-based simulation calibrated on the first 30 days of data to predict individual mask-wearing behavior for days 30\u201339. Agents update daily via a calibrated logistic adoption rule with persistence, layer-specific peer influence, exogenous information effects, and policy/campaign influences. The social network is symmetrized with family, work/school, and community layers.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age",
+        "demographic_group",
+        "risk_attitude",
+        "conformity_level",
+        "trust_in_authorities",
+        "trust_in_peers",
+        "perceived_risk",
+        "mask_wearing_state",
+        "adoption_threshold",
+        "influence_weight",
+        "stubbornness",
+        "fatigue_level",
+        "memory_length_days",
+        "household_id",
+        "workplace_id",
+        "community_id",
+        "is_influencer",
+        "received_info_state",
+        "last_info_day",
+        "degree_family",
+        "degree_work_school",
+        "degree_community"
+      ],
+      "behaviors": [
+        "observe_neighbors",
+        "update_perceived_norm",
+        "decide_adopt_or_drop_mask",
+        "communicate_mask_behavior",
+        "share_information_or_misinformation",
+        "respond_to_policy_enforcement"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "source_files": [
+            "agent_attributes.csv",
+            "train_data.csv",
+            "social_network.json"
+          ],
+          "set_initial_state_from_day": 0,
+          "symmetrize_network": true
+        }
+      }
+    },
+    {
+      "name": "Network",
+      "attributes": [
+        "topology",
+        "adjacency_list",
+        "edge_weights",
+        "tie_types_distribution",
+        "clustering_coefficient",
+        "average_degree",
+        "layer_weights"
+      ],
+      "behaviors": [
+        "compute_social_influence",
+        "update_edge_weights"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "layers": [
+            "family",
+            "work_school",
+            "community"
+          ],
+          "symmetrize": true,
+          "remove_self_loops": true,
+          "deduplicate_edges": true
+        }
+      }
+    },
+    {
+      "name": "Location",
+      "attributes": [
+        "id",
+        "type",
+        "capacity",
+        "mask_policy",
+        "enforcement_strength",
+        "signage_or_cue_level",
+        "open_hours"
+      ],
+      "behaviors": [
+        "enforce_policy",
+        "apply_social_norm_cues",
+        "record_compliance"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "counts": {
+            "households": 250,
+            "workplaces": 50,
+            "public_spaces": 10
+          },
+          "policy_start_day": 10
+        }
+      }
+    },
+    {
+      "name": "Organization",
+      "attributes": [
+        "id",
+        "type",
+        "stance",
+        "credibility",
+        "reach",
+        "targeting_strategy",
+        "message_schedule",
+        "campaign_intensity"
+      ],
+      "behaviors": [
+        "broadcast_message",
+        "target_segments",
+        "adjust_campaign_based_on_metrics"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "campaign_start_day": 30,
+          "campaign_end_day": 90,
+          "default_stance": "pro-mask"
+        }
+      }
+    },
+    {
+      "name": "Environment",
+      "attributes": [
+        "global_risk_signal",
+        "misinformation_level",
+        "policy_level",
+        "shock_events"
+      ],
+      "behaviors": [
+        "update_risk_signal",
+        "trigger_shock_event"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "global_risk_signal": 0.5,
+          "policy_level": "none",
+          "misinformation_level": 0.0,
+          "shock_events": []
+        }
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "observe_neighbors",
+      "description": "Agents observe each network layer to estimate the fraction of neighbors wearing masks and perceived norms.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "layer_weights": {
+          "family": 1.0,
+          "work_school": 0.6,
+          "community": 0.3
+        },
+        "observation_noise": 0.05
+      },
+      "algorithm": "For each layer l in {family, work_school, community}: peer_frac_{i,l}(t-1) = (# neighbors wearing at t-1) / (degree_l + epsilon). Apply Gaussian noise N(0, observation_noise) then clamp to [0,1]."
+    },
+    {
+      "name": "update_perceived_norm",
+      "description": "Compute a memory-weighted perceived norm combining recent exposures.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "memory_length_days": 7,
+        "decay_lambda": 0.5
+      },
+      "algorithm": "Norm_i(t) = sum_{k=1..M} [exp(-decay_lambda*(k-1)) * WeightedPeerFrac_i(t-k)] / sum_{k=1..M} exp(-decay_lambda*(k-1)), where WeightedPeerFrac uses layer_weights."
+    },
+    {
+      "name": "decide_adopt_or_drop_mask",
+      "description": "Daily update of mask-wearing via logistic adoption with persistence and dropout.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "adoption_rule": "logistic",
+        "beta0_intercept": "estimate_from_train_data",
+        "beta_persist": "estimate_from_train_data",
+        "beta_info": "estimate_from_train_data",
+        "beta_peer_family": "estimate_from_train_data",
+        "beta_peer_work": "estimate_from_train_data",
+        "beta_peer_comm": "estimate_from_train_data",
+        "beta_risk": "estimate_from_train_data",
+        "beta_policy": "estimate_from_train_data",
+        "beta_normcue": "estimate_from_train_data",
+        "dropout_probability": "estimate_from_transitions",
+        "fatigue_rate": 0.005
+      },
+      "algorithm": "Let x_i(t) = beta0 + beta_persist*wear_i(t-1) + beta_info*info_i(t) + beta_risk*risk_i + beta_peer_family*peer_frac_family_i(t-1) + beta_peer_work*peer_frac_work_i(t-1) + beta_peer_comm*peer_frac_comm_i(t-1) + beta_policy*Policy_t + beta_normcue*Norm_i(t-1). p_i(t) = sigmoid(x_i(t)). Sample wear_i(t) ~ Bernoulli(p_i(t)). If wear_i(t-1)=1 and wear_i(t)=1, optionally apply dropout with prob p_drop (overrides to 0 with that probability) modulated by fatigue: p_drop_eff = min(1, dropout_probability + fatigue_rate * days_since_adopt)."
+    },
+    {
+      "name": "share_information_or_misinformation",
+      "description": "Exogenous and social information exposure events increase short-term adoption propensity.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "info_arrival_prob_base": "estimate_from_train_data",
+        "social_info_boost": "estimate_from_train_data",
+        "info_effect_half_life_days": 3,
+        "misinformation_rate": 0.0
+      },
+      "algorithm": "Pr(info_i(t)=1) = info_arrival_prob_base + social_info_boost * WeightedPeerFrac_i(t-1). If info_i(t)=1 then set received_info_state=1 and last_info_day=t. For k days after last_info_day, add beta_info*exp(-ln(2)*k/info_effect_half_life_days) to x_i(t). Misinformation events (rate) subtract a fraction of beta_info and reduce trust_in_authorities."
+    },
+    {
+      "name": "respond_to_policy_enforcement",
+      "description": "Location policies enforce compliance and shift norms starting Day 10.",
+      "applicable_to": [
+        "Person",
+        "Location"
+      ],
+      "parameters": {
+        "policy_start_day": 10,
+        "enforcement_strength": "estimate_or_set",
+        "mandate_threshold_shift": -0.15
+      },
+      "algorithm": "If t >= policy_start_day and agent enters a Location with mask_policy=on: temporarily override wear_i(t)=1 with probability proportional to enforcement_strength, and add a policy term Policy_t=1 to x_i(t). Also adjust perceived norm upward by signage_or_cue_level."
+    },
+    {
+      "name": "broadcast_message",
+      "description": "Organizations broadcast pro-mask messages increasing info exposure starting Day 30.",
+      "applicable_to": [
+        "Organization",
+        "Person"
+      ],
+      "parameters": {
+        "campaign_start_day": 30,
+        "campaign_end_day": 90,
+        "campaign_intensity": "estimate_or_set",
+        "targeting_strategy": "degree_or_risk_targeting"
+      },
+      "algorithm": "For t in [campaign_start_day, campaign_end_day], select target agents by targeting_strategy. For each targeted agent, set info_i(t)=1 with probability proportional to campaign_intensity*credibility and agent trust_in_authorities."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "peer_influence_diffusion",
+      "description": "Agents update adoption via layer-weighted peer fractions observed on the previous day.",
+      "entities_involved": [
+        "Person",
+        "Network"
+      ],
+      "trigger": "time",
+      "effect": "Modifies adoption probability via beta_peer_{layer} terms in the logistic equation."
+    },
+    {
+      "name": "social_reinforcement_and_sanctions",
+      "description": "Repeated exposures and normative cues increase adoption propensity; fatigue may increase dropout.",
+      "entities_involved": [
+        "Person",
+        "Person",
+        "Location"
+      ],
+      "trigger": "time",
+      "effect": "Adjusts Norm_i(t) and effective dropout_probability."
+    },
+    {
+      "name": "organizational_broadcast",
+      "description": "Campaign messages increase likelihood of info exposure and raise perceived risk for trusting agents.",
+      "entities_involved": [
+        "Organization",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Increases info_i(t) and temporarily increases x_i(t) via the info effect term."
+    },
+    {
+      "name": "policy_enforcement",
+      "description": "Mandates at locations enforce immediate compliance and shift longer-term norms.",
+      "entities_involved": [
+        "Location",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Immediate mask_wearing_state may be set to 1 with some probability; Policy_t term increases adoption propensity."
+    },
+    {
+      "name": "misinformation_propagation",
+      "description": "Negative messaging reduces adoption propensity and trust in authorities.",
+      "entities_involved": [
+        "Organization",
+        "Person",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Subtracts from info effect and reduces future responsiveness to authority-driven messages."
+    },
+    {
+      "name": "tie_dynamics",
+      "description": "Optional: edges can be rewired based on homophily and norm conflict; disabled for prediction window.",
+      "entities_involved": [
+        "Person",
+        "Person",
+        "Network"
+      ],
+      "trigger": "state",
+      "effect": "Rewires edges and updates degree distribution (off by default for days 0\u201339)."
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "parameters": {
+    "data_folder": "data_fitting/mask_adoption_data/",
+    "num_agents": "infer_from_data",
+    "network_topology": "multiplex_small_world_like",
+    "avg_degree": "empirical_by_layer",
+    "symmetrize_edges": true,
+    "rewiring_prob": 0.1,
+    "edge_weight_mean": 1.0,
+    "layer_weights": {
+      "family": 1.0,
+      "work_school": 0.6,
+      "community": 0.3
+    },
+    "seed_fraction": 0.05,
+    "seed_selection_strategy": "random",
+    "influencer_fraction": 0.02,
+    "influencer_reach_multiplier": 3.0,
+    "adoption_rule": "logistic",
+    "beta0_intercept": "estimate_from_train_data",
+    "beta_persist": "estimate_from_train_data",
+    "beta_info": "estimate_from_train_data",
+    "beta_peer_family": "estimate_from_train_data",
+    "beta_peer_work": "estimate_from_train_data",
+    "beta_peer_comm": "estimate_from_train_data",
+    "beta_risk": "estimate_from_train_data",
+    "beta_policy": "estimate_from_train_data",
+    "beta_normcue": "estimate_from_train_data",
+    "dropout_probability": "estimate_from_transitions",
+    "fatigue_rate": 0.005,
+    "memory_length_days": 7,
+    "observation_noise": 0.05,
+    "trust_mean": 0.6,
+    "trust_std": 0.2,
+    "risk_signal": 0.5,
+    "misinformation_rate": 0.0,
+    "policy_level": "none",
+    "policy_start_day": 10,
+    "enforcement_strength": 0.0,
+    "campaign_intensity": 0.0,
+    "campaign_start_day": 30,
+    "campaign_end_day": 90,
+    "location_counts": {
+      "households": 250,
+      "workplaces": 50,
+      "public_spaces": 10
+    },
+    "time_horizon_days": 180,
+    "update_mode": "synchronous",
+    "random_seed": 42,
+    "training_days": [
+      0,
+      29
+    ],
+    "prediction_days": [
+      30,
+      39
+    ],
+    "info_arrival_prob_base": "estimate_from_train_data",
+    "social_info_boost": "estimate_from_train_data",
+    "info_effect_half_life_days": 3,
+    "mandate_threshold_shift": -0.15,
+    "noise_std": "calibrate"
+  },
+  "initialization": {
+    "population_size": "infer_from_agent_attributes",
+    "random_seed": 42,
+    "steps": [
+      "Load agent_attributes.csv; cast ids to int; normalize risk_perception to [0,1].",
+      "Load social_network.json; build three undirected graphs; remove self-loops; deduplicate edges; compute degrees per layer.",
+      "Load train_data.csv; sort by (agent_id, day); ensure complete days 0..29; cast wearing_mask/received_info to {0,1}.",
+      "Compute peer fractions by layer at t-1 for days 1..29 using network and wearing_mask.",
+      "Estimate logistic coefficients and dropout from days 0..29.",
+      "Initialize agent states at day 29 (end of train) to use as starting point for day 30 prediction.",
+      "Set policy parameters active from day 10; set campaign schedule from day 30."
+    ]
+  },
+  "algorithms": {
+    "CALIBRATE_LOGISTIC": "Fit a discrete-time logistic regression (GLMM optional) of wearing_mask_t ~ wear_{t-1} + received_info_t + risk_perception + peer_frac_family_{t-1} + peer_frac_work_{t-1} + peer_frac_comm_{t-1} + Policy_t + Norm_{t-1} + subgroup fixed effects. Use statsmodels or sklearn. Extract coefficients as betas.",
+    "ESTIMATE_DROPOUT": "Compute p_drop = mean(wear_t=0 | wear_{t-1}=1) over days 1..29; optionally stratify and average.",
+    "COMPUTE_LAYER_EXPOSURES": "For each agent and day, peer_frac_{layer}(t-1) = count_neighbors_wearing(t-1)/degree_{layer}. Handle degree=0 by setting fraction=0.",
+    "SIMULATE_DAY": "Synchronous update. For each agent: observe_neighbors -> update_perceived_norm -> compute info_i(t) -> compute x_i(t) from coefficients and inputs -> draw wear_i(t) ~ Bernoulli(sigmoid(x_i(t))); apply policy enforcement if active; apply dropout/fatigue if persisted wearing.",
+    "POLICY_BROADCAST": "If day >= policy_start_day, set Policy_t=1 for relevant locations; adjust enforcement-induced immediate wearing with probability enforcement_strength.",
+    "ORG_BROADCAST": "If campaign_start_day <= day <= campaign_end_day, for target agents set info_i(t)=1 with probability proportional to campaign_intensity*credibility*trust_in_authorities.",
+    "RMSE_OVER_PREDICTION_DAYS": "Aggregate predicted adoption rate per day r_hat(t) over days 30..39; compare with actual r(t) from train_data.csv if available; RMSE = sqrt(mean((r_hat(t) - r(t))^2))."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agent demographics and risk perception; compute subgroup effects.",
+      "fields_used": [
+        "agent_id",
+        "age_group",
+        "occupation",
+        "risk_perception"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Construct multiplex network and compute layer-specific peer exposures.",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibrate behavior model on days 0..29; initialize states; validate predictions.",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.yaml",
+        "description": "Holds parameters, file paths, and toggles for calibration/prediction."
+      },
+      {
+        "name": "data_loader.py",
+        "description": "Load and validate CSV/JSON, cast types, handle missing days, and join keys."
+      },
+      {
+        "name": "network_builder.py",
+        "description": "Build symmetrized multiplex graphs per layer; compute degrees and layer weights."
+      },
+      {
+        "name": "features.py",
+        "description": "Compute peer fractions by layer, perceived norms, policy flags, and info features."
+      },
+      {
+        "name": "calibration/calibrate.py",
+        "description": "Fit logistic model and dropout; serialize coefficients."
+      },
+      {
+        "name": "models/adoption_model.py",
+        "description": "Implements logistic adoption, info decay, and dropout/fatigue mechanisms."
+      },
+      {
+        "name": "simulation/entities.py",
+        "description": "Defines Person, Location, Organization, Environment classes with behaviors."
+      },
+      {
+        "name": "simulation/engine.py",
+        "description": "Main simulation loop (synchronous updates) and interaction orchestration."
+      },
+      {
+        "name": "evaluation/metrics.py",
+        "description": "Compute RMSE and other optional metrics over prediction days."
+      },
+      {
+        "name": "prediction/predict.py",
+        "description": "Run calibrated simulation for days 30..39 and write per-agent and aggregate predictions."
+      },
+      {
+        "name": "main.py",
+        "description": "CLI entry point to run calibration, simulation, and evaluation."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scikit-learn",
+      "statsmodels",
+      "scipy",
+      "pyyaml",
+      "joblib"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE"
+  ]
+}

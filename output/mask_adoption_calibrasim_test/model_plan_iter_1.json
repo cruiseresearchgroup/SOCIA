@@ -1,0 +1,1934 @@
+{
+  "model_type": "agent_based",
+  "description": "A multi-layer network-based agent-based model for the diffusion of mask-wearing behavior through social influence, information diffusion, and policy intervention. Calibrated on panel micro-data (days 0-29) with out-of-sample prediction for days 30-39.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "trust_in_institutions",
+        "pro_social_pref",
+        "mask_attitude",
+        "is_mask_wearing",
+        "received_info",
+        "compliance_propensity",
+        "peer_threshold",
+        "media_exposure_level",
+        "location_id",
+        "household_id",
+        "budget",
+        "mask_inventory"
+      ],
+      "behaviors": [
+        "decide_mask_wearing",
+        "update_risk_perception",
+        "interact_with_peers",
+        "consume_media",
+        "respond_to_policy",
+        "purchase_masks",
+        "move_between_locations",
+        "share_opinion"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "use_empirical_initial_states": true,
+          "risk_perception_source": "agent_attributes.csv:risk_perception",
+          "initial_wearing_mask_source": "train_data.csv:wearing_mask at day==0",
+          "initial_received_info_source": "train_data.csv:received_info at day==0",
+          "budget_default": 100.0,
+          "mask_inventory_default": 1
+        }
+      }
+    },
+    {
+      "name": "Household",
+      "attributes": [
+        "id",
+        "members",
+        "shared_budget",
+        "shared_mask_inventory"
+      ],
+      "behaviors": [
+        "pool_resources",
+        "share_masks",
+        "intra_household_influence"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "construction_rule": "connected_components_on_family_layer",
+          "shared_budget_default": 200.0,
+          "shared_mask_inventory_default": 2
+        }
+      }
+    },
+    {
+      "name": "Location",
+      "attributes": [
+        "id",
+        "type",
+        "capacity",
+        "mask_requirement",
+        "enforcement_level"
+      ],
+      "behaviors": [
+        "enforce_policy",
+        "host_visits"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "types": [
+            "work_school",
+            "community"
+          ],
+          "count_by_type": {
+            "work_school": 50,
+            "community": 100
+          },
+          "capacity_default": 200,
+          "mask_requirement_default": 0.0,
+          "enforcement_level_default": 0.0
+        }
+      }
+    },
+    {
+      "name": "GovernmentAgency",
+      "attributes": [
+        "id",
+        "mandate_strength",
+        "enforcement_resources",
+        "communication_intensity"
+      ],
+      "behaviors": [
+        "set_mask_policy",
+        "enforce_policy",
+        "broadcast_guidance"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "mandate_strength": 0.6,
+          "enforcement_resources": 1.0,
+          "communication_intensity": 1.0
+        }
+      }
+    },
+    {
+      "name": "MediaChannel",
+      "attributes": [
+        "id",
+        "reach",
+        "bias",
+        "message_intensity"
+      ],
+      "behaviors": [
+        "broadcast_information",
+        "adjust_message_intensity"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "reach": 1.0,
+          "bias": 0.0,
+          "message_intensity": 1.0
+        }
+      }
+    },
+    {
+      "name": "Retailer",
+      "attributes": [
+        "id",
+        "stock_level",
+        "price",
+        "restock_rate"
+      ],
+      "behaviors": [
+        "sell_masks",
+        "restock",
+        "adjust_price"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "stock_level_per_capita": 2.0,
+          "price": 1.0,
+          "restock_rate": 0.2
+        }
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "decide_mask_wearing",
+      "description": "Daily decision to wear a mask based on logistic probability with persistence, social influence by layer, information received, and policy enforcement.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "alpha_intercept": -3.0,
+        "gamma_risk_perception": 1.5,
+        "beta_peer_family": 1.2,
+        "beta_peer_work_school": 0.8,
+        "beta_peer_community": 0.5,
+        "delta_received_info": 1.0,
+        "phi_persistence": 2.5,
+        "social_influence_weight": 0.5
+      },
+      "algorithm": "Compute logit score from weighted sum of predictors; convert via sigmoid to probability; sample Bernoulli; apply dropout with small probability; enforce supply constraint (must have mask_inventory >= min_inventory_to_wear)."
+    },
+    {
+      "name": "update_risk_perception",
+      "description": "Risk perception updates from media and peer information signals (bounded in [0,1]).",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "media_effect_weight": 0.3
+      },
+      "algorithm": "risk_t = clip(risk_{t-1} + media_effect_weight * (guidance_intensity - 0.5) * 0.1, 0, 1)."
+    },
+    {
+      "name": "interact_with_peers",
+      "description": "Compute exposure fractions per layer (family, work/school, community).",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "w_family": 3.0,
+        "w_work_school": 1.8,
+        "w_community": 1.0,
+        "mobility_rate": 0.6
+      },
+      "algorithm": "For each layer, compute fraction of neighbors wearing masks at t-1; weight by w_layer and mobility_rate to produce effective exposure."
+    },
+    {
+      "name": "consume_media",
+      "description": "Receive exogenous information with daily hazard as a function of media and government guidance.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "lambda_media_daily": 0.01,
+        "communication_intensity": 1.0
+      },
+      "algorithm": "p_media = 1 - exp(-lambda_media_daily * communication_intensity); received_info_t = received_info_{t-1} OR Bernoulli(p_media)."
+    },
+    {
+      "name": "respond_to_policy",
+      "description": "Adjust adoption probability by mandate_strength and perceived enforcement after Day 10.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "mandate_strength": 0.6,
+        "enforcement_probability": 0.4,
+        "compliance_decay_rate": 0.01
+      },
+      "algorithm": "policy_boost = mandate_active ? mandate_strength * enforcement_probability * exp(-compliance_decay_rate * (t - policy_start_day)) : 0; add policy_boost to log-odds."
+    },
+    {
+      "name": "purchase_masks",
+      "description": "Acquire masks subject to stock, price, and affordability; inventory supports wearing.",
+      "applicable_to": [
+        "Person"
+      ],
+      "parameters": {
+        "mask_cost_mean": 1.0,
+        "price_elasticity": -0.8,
+        "retailer_restock_rate": 0.2,
+        "mask_availability": 0.8
+      },
+      "algorithm": "purchase_prob = mask_availability * sigmoid(-price_elasticity * (budget/price - 1)); if Bernoulli(purchase_prob) and stock>0: decrement stock and increment mask_inventory."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "social_peer_influence",
+      "description": "Agents observe peers\u2019 mask-wearing in their social network and update attitudes and adoption based on thresholds and influence weights.",
+      "entities_involved": [
+        "Person",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Updates effective exposure per layer; shifts adoption probability via logistic term for peer fractions."
+    },
+    {
+      "name": "policy_compliance_enforcement",
+      "description": "Government imposes mask requirement from Day 10; agents adjust behavior with mandate_strength and perceived enforcement.",
+      "entities_involved": [
+        "GovernmentAgency",
+        "Location",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Adds policy_boost to adoption log-odds; may override adoption if not enough supply or if noncompliance drawn."
+    },
+    {
+      "name": "information_diffusion",
+      "description": "Information propagates via social ties and media; increases received_info state and boosts adoption.",
+      "entities_involved": [
+        "MediaChannel",
+        "GovernmentAgency",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Updates received_info via hazard from peer exposures and exogenous media."
+    },
+    {
+      "name": "supply_and_purchase",
+      "description": "Agents purchase masks from retailers subject to stock and price; inventory enables wearing.",
+      "entities_involved": [
+        "Person",
+        "Retailer"
+      ],
+      "trigger": "time",
+      "effect": "Increases Person.mask_inventory; decreases Retailer.stock_level."
+    },
+    {
+      "name": "intra_household_influence",
+      "description": "Household members influence each other to adopt and share masks.",
+      "entities_involved": [
+        "Household",
+        "Person"
+      ],
+      "trigger": "time",
+      "effect": "Household exposure adds to family layer influence; shared inventory can enable wearing for low-inventory members."
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkManager",
+      "description": "Loads and cleans the multiplex social network; constructs per-layer neighbor lists and degrees.",
+      "inputs": [
+        "data.social_network.json",
+        "data.agent_attributes.csv"
+      ],
+      "outputs": [
+        "graph.family",
+        "graph.work_school",
+        "graph.community",
+        "agent.degree_by_layer"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "steps",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "on_init:\n  load social_network.json into raw adjacency per agent per layer\n  for each layer in {family, work_school, community}:\n    for each agent i:\n      neighbors = unique(raw[i][layer]) - {i}\n      if symmetrize_edges:\n        for j in neighbors:\n          add i to raw[j][layer]\n      store neighbors[i][layer]\n  if layer_overlap_policy == 'merge_with_weight_sum':\n    merged_weight[i][j] = sum(layer_weight for layers where edge exists)\n  compute degree_by_layer[i][layer] = |neighbors[i][layer]|\n  return graphs and degree_by_layer",
+        "notes": [
+          "Edges are made undirected if symmetrize_edges=true.",
+          "Self-loops removed. Duplicates deduplicated.",
+          "Neighbor lists are stored for fast exposure calculation."
+        ]
+      },
+      "sbi_calibration": "false",
+      "sbi_target_signals": [],
+      "calibration_notes": "Static preprocessing; not calibrated.",
+      "requirements": [
+        "networkx",
+        "json"
+      ],
+      "module_parameters": [
+        "symmetrize_edges",
+        "layer_overlap_policy"
+      ]
+    },
+    {
+      "name": "ExposureCalculator",
+      "description": "Computes per-agent, per-layer peer mask fractions and info contact counts each day.",
+      "inputs": [
+        "graph.family",
+        "graph.work_school",
+        "graph.community",
+        "state.person.wearing_mask",
+        "state.person.received_info"
+      ],
+      "outputs": [
+        "exposure.peer_mask_fraction.family",
+        "exposure.peer_mask_fraction.work_school",
+        "exposure.peer_mask_fraction.community",
+        "exposure.info_contacts.family",
+        "exposure.info_contacts.work_school",
+        "exposure.info_contacts.community"
+      ],
+      "dependencies": [
+        "NetworkManager"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  for each layer L in {family, work_school, community}:\n    N = neighbors[i][L]\n    if |N| == 0:\n      peer_mask_fraction[i][L] = 0\n      info_contacts[i][L] = 0\n    else:\n      mask_count = sum(is_mask_wearing[j] for j in N)\n      info_count = sum(received_info[j] for j in N)\n      peer_mask_fraction[i][L] = (mask_count / |N|) * w_L * mobility_rate\n      info_contacts[i][L] = info_count\nemit exposure signals",
+        "notes": [
+          "Layer weights w_L scale the intensity of exposure.",
+          "mobility_rate scales contacts active per day.",
+          "Computes exposure based on t-1 states to avoid simultaneity."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily"
+      ],
+      "calibration_notes": "w_family, w_work_school, w_community and mobility_rate shape adoption slope and peak.",
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "w_family",
+        "w_work_school",
+        "w_community",
+        "mobility_rate"
+      ]
+    },
+    {
+      "name": "PolicyAndMedia",
+      "description": "Activates mandate from Day 10 and broadcasts guidance; generates policy and media signals.",
+      "inputs": [
+        "day"
+      ],
+      "outputs": [
+        "policy.mandate_active",
+        "policy.enforcement_level",
+        "guidance_intensity"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day >= policy_start_day:\n  mandate_active = 1\n  enforcement_level = enforcement_probability\n  guidance_intensity = communication_intensity * mandate_strength\nelse:\n  mandate_active = 0\n  enforcement_level = 0\n  guidance_intensity = communication_intensity * 0.5\nemit signals",
+        "notes": [
+          "guidance_intensity feeds InformationDiffusion and risk perception updates.",
+          "enforcement_level interacts with adoption log-odds as policy_boost via MaskAdoptionDecision."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily"
+      ],
+      "calibration_notes": "mandate_strength and enforcement_probability control mid-trajectory acceleration.",
+      "requirements": [],
+      "module_parameters": [
+        "policy_start_day",
+        "mandate_strength",
+        "enforcement_probability",
+        "communication_intensity"
+      ]
+    },
+    {
+      "name": "InformationDiffusion",
+      "description": "Updates each agent\u2019s received_info via peer hazards and exogenous media.",
+      "inputs": [
+        "exposure.info_contacts.family",
+        "exposure.info_contacts.work_school",
+        "exposure.info_contacts.community",
+        "guidance_intensity",
+        "state.person.received_info"
+      ],
+      "outputs": [
+        "state.person.received_info"
+      ],
+      "dependencies": [
+        "ExposureCalculator",
+        "PolicyAndMedia"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  if received_info[i] == 1: continue\n  # Media hazard adjusted by guidance\n  p_media = 1 - exp(-(lambda_media_daily * media_effect_weight * max(guidance_intensity, 1e-6)))\n  # Peer hazard assuming independent contacts\n  p_peer_family = 1 - (1 - p_info_contact_family) ** info_contacts[i].family\n  p_peer_work = 1 - (1 - p_info_contact_work_school) ** info_contacts[i].work_school\n  p_peer_comm = 1 - (1 - p_info_contact_community) ** info_contacts[i].community\n  p_total = 1 - (1 - p_media) * (1 - p_peer_family) * (1 - p_peer_work) * (1 - p_peer_comm)\n  received_info[i] = Bernoulli(p_total)",
+        "notes": [
+          "Assumes monotone received_info (once true, stays true).",
+          "Hazard form prevents probabilities >1 and aggregates across channels."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.info_rate_daily"
+      ],
+      "calibration_notes": "Hazard parameters tuned to match observed info prevalence trajectory.",
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "p_info_contact_family",
+        "p_info_contact_work_school",
+        "p_info_contact_community",
+        "lambda_media_daily",
+        "media_effect_weight"
+      ]
+    },
+    {
+      "name": "MaskAdoptionDecision",
+      "description": "Decides mask wearing daily using logistic probability with persistence, social exposure by layer, received_info, and policy boost.",
+      "inputs": [
+        "state.person.is_mask_wearing",
+        "state.person.received_info",
+        "exposure.peer_mask_fraction.family",
+        "exposure.peer_mask_fraction.work_school",
+        "exposure.peer_mask_fraction.community",
+        "policy.mandate_active",
+        "policy.enforcement_level",
+        "guidance_intensity",
+        "agent.attributes",
+        "state.person.mask_inventory",
+        "day"
+      ],
+      "outputs": [
+        "state.person.is_mask_wearing"
+      ],
+      "dependencies": [
+        "ExposureCalculator",
+        "PolicyAndMedia"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  prev = is_mask_wearing[i]\n  # Dropout for previous adopters absent exposure\n  if prev == 1 and Bernoulli(recovery_or_dropout_prob):\n    is_mask_wearing[i] = 0\n    continue\n  # Group modifiers\n  age_mod = {Youth: age_mod_youth, 'Young Adult': age_mod_young_adult, 'Middle Age': age_mod_middle_age, 'Older Adult': age_mod_older_adult}[age_group[i]]\n  occ_mod = {Student: occ_mod_student, 'White Collar': occ_mod_white_collar, 'Blue Collar': occ_mod_blue_collar, Service: occ_mod_service}[occupation[i]]\n  infl_mod = social_influence_weight * age_mod * occ_mod\n  # Policy boost\n  policy_boost = 0\n  if policy.mandate_active:\n    days_since_policy = max(0, day - policy_start_day)\n    policy_boost = enforcement_level * exp(-compliance_decay_rate * days_since_policy)\n  # Logit score\n  z = alpha_intercept\n  z += gamma_risk_perception * risk_perception[i]\n  z += infl_mod * (beta_peer_family * peer_mask_fraction.family[i] + beta_peer_work_school * peer_mask_fraction.work_school[i] + beta_peer_community * peer_mask_fraction.community[i])\n  z += delta_received_info * received_info[i]\n  z += phi_persistence * prev\n  z += policy_boost\n  p = 1 / (1 + exp(-z))\n  # Supply constraint\n  if mask_inventory[i] < min_inventory_to_wear:\n    is_mask_wearing[i] = 0 if Bernoulli(1 - p) else 0  # cannot wear without inventory\n  else:\n    is_mask_wearing[i] = Bernoulli(p)",
+        "notes": [
+          "Persistence term supports habit formation.",
+          "Group modifiers capture heterogeneity.",
+          "Policy_boost decays over time (fatigue).",
+          "Inventory gates the ability to wear even with high propensity."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily"
+      ],
+      "calibration_notes": "Micro-to-macro: fit coefficients via logistic hazard, then refine via simulation-based optimization.",
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "alpha_intercept",
+        "gamma_risk_perception",
+        "beta_peer_family",
+        "beta_peer_work_school",
+        "beta_peer_community",
+        "delta_received_info",
+        "phi_persistence",
+        "social_influence_weight",
+        "compliance_decay_rate",
+        "recovery_or_dropout_prob",
+        "age_mod_youth",
+        "age_mod_young_adult",
+        "age_mod_middle_age",
+        "age_mod_older_adult",
+        "occ_mod_student",
+        "occ_mod_white_collar",
+        "occ_mod_blue_collar",
+        "occ_mod_service",
+        "min_inventory_to_wear"
+      ]
+    },
+    {
+      "name": "RetailMarket",
+      "description": "Maintains retailer stock and processes mask purchases by agents.",
+      "inputs": [
+        "state.person.budget",
+        "state.person.mask_inventory",
+        "population_size"
+      ],
+      "outputs": [
+        "retailer.stock_level",
+        "retailer.price",
+        "state.person.mask_inventory"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day == 0:\n  stock_level = retailer_initial_stock_per_capita * population_size\n  price = mask_cost_mean\nfor each agent i:\n  affordability = budget[i] / price\n  purchase_prob = mask_availability * sigmoid(-price_elasticity * (affordability - 1))\n  if stock_level > 0 and Bernoulli(purchase_prob):\n    mask_inventory[i] += 1\n    stock_level -= 1\n# Restock and adjust price\nrestock_qty = retailer_restock_rate * population_size\nstock_level += restock_qty\nprice = max(0.1, mask_cost_mean * (1 + 0.1 * (1 - stock_level/(population_size + 1e-6))))",
+        "notes": [
+          "Simple price adjustment based on stock pressure.",
+          "Purchase probability increases with affordability and availability."
+        ]
+      },
+      "sbi_calibration": "false",
+      "sbi_target_signals": [],
+      "calibration_notes": "Kept parsimonious; not primary calibration target.",
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "mask_cost_mean",
+        "price_elasticity",
+        "retailer_restock_rate",
+        "mask_availability",
+        "retailer_initial_stock_per_capita"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily adoption and info rates; computes group-specific rates.",
+      "inputs": [
+        "state.person.is_mask_wearing",
+        "state.person.received_info",
+        "agent.attributes",
+        "day"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.adoption_rate_by_age_daily",
+        "observable.info_rate_daily"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate_daily[day] = mean(is_mask_wearing[:]) + Normal(0, observation_noise_std)\nadoption_rate_by_age_daily[day, g] = mean(is_mask_wearing[age_group==g])\ninfo_rate_daily[day] = mean(received_info[:])",
+        "notes": [
+          "Observation noise optional; set to small value to reflect measurement noise.",
+          "Group rates used for inequality metrics."
+        ]
+      },
+      "sbi_calibration": "true",
+      "sbi_target_signals": [
+        "observable.adoption_rate_daily",
+        "observable.adoption_rate_by_age_daily"
+      ],
+      "calibration_notes": "Primary outputs for RMSE/MAE calibration.",
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "observation_noise_std"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            42
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1000000000.0
+      },
+      "owner_module": "global",
+      "description": "RNG seed for reproducibility",
+      "frozen": true
+    },
+    {
+      "key": "time_horizon_days",
+      "dtype": "int",
+      "default": 120,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            120
+          ]
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 1000
+      },
+      "owner_module": "global",
+      "description": "Total simulated days",
+      "frozen": true
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "int",
+      "default": 1,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            1
+          ]
+        }
+      },
+      "bounds": {
+        "low": 1,
+        "high": 7
+      },
+      "owner_module": "global",
+      "description": "Time step in days",
+      "frozen": true
+    },
+    {
+      "key": "train_start_day",
+      "dtype": "int",
+      "default": 0,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1000
+      },
+      "owner_module": "global",
+      "description": "Training window start (inclusive)",
+      "frozen": true
+    },
+    {
+      "key": "train_end_day",
+      "dtype": "int",
+      "default": 29,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            29
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1000
+      },
+      "owner_module": "global",
+      "description": "Training window end (inclusive)",
+      "frozen": true
+    },
+    {
+      "key": "validation_start_day",
+      "dtype": "int",
+      "default": 30,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            30
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1000
+      },
+      "owner_module": "global",
+      "description": "Validation window start (inclusive)",
+      "frozen": true
+    },
+    {
+      "key": "validation_end_day",
+      "dtype": "int",
+      "default": 39,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            39
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1000
+      },
+      "owner_module": "global",
+      "description": "Validation window end (inclusive)",
+      "frozen": true
+    },
+    {
+      "key": "use_empirical_initial_states",
+      "dtype": "bool",
+      "default": true,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            true
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "global",
+      "description": "Initialize wearing_mask and received_info from day 0 data",
+      "frozen": true
+    },
+    {
+      "key": "use_empirical_network",
+      "dtype": "bool",
+      "default": true,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            true
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "global",
+      "description": "Use provided social_network.json rather than synthetic",
+      "frozen": true
+    },
+    {
+      "key": "seeding_strategy",
+      "dtype": "categorical",
+      "default": "priority_high_risk_and_high_degree",
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            "priority_high_risk_and_high_degree"
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "global",
+      "description": "Fallback strategy if not using empirical initial states",
+      "frozen": true
+    },
+    {
+      "key": "symmetrize_edges",
+      "dtype": "bool",
+      "default": true,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            true,
+            false
+          ],
+          "probs": [
+            0.9,
+            0.1
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "NetworkManager",
+      "description": "Make edges undirected",
+      "frozen": true
+    },
+    {
+      "key": "layer_overlap_policy",
+      "dtype": "categorical",
+      "default": "merge_with_weight_sum",
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            "merge_with_weight_sum",
+            "keep_parallel"
+          ],
+          "probs": [
+            0.8,
+            0.2
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "NetworkManager",
+      "description": "Handle multi-layer overlapping edges",
+      "frozen": false
+    },
+    {
+      "key": "w_family",
+      "dtype": "float",
+      "default": 3.0,
+      "prior": {
+        "type": "lognormal",
+        "args": {
+          "mu": 1.1,
+          "sigma": 0.5
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 6.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "Relative weight for family exposure",
+      "frozen": false
+    },
+    {
+      "key": "w_work_school",
+      "dtype": "float",
+      "default": 1.8,
+      "prior": {
+        "type": "lognormal",
+        "args": {
+          "mu": 0.6,
+          "sigma": 0.5
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 5.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "Relative weight for work/school exposure",
+      "frozen": false
+    },
+    {
+      "key": "w_community",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "lognormal",
+        "args": {
+          "mu": 0.0,
+          "sigma": 0.4
+        }
+      },
+      "bounds": {
+        "low": 0.2,
+        "high": 3.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "Relative weight for community exposure",
+      "frozen": false
+    },
+    {
+      "key": "mobility_rate",
+      "dtype": "float",
+      "default": 0.6,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "ExposureCalculator",
+      "description": "Daily activation of contacts",
+      "frozen": false
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 10,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            10
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 120
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Day government mandate begins",
+      "frozen": true
+    },
+    {
+      "key": "mandate_strength",
+      "dtype": "float",
+      "default": 0.6,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 3.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Mask policy stringency",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_probability",
+      "dtype": "float",
+      "default": 0.4,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.5,
+          "beta": 3.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Perceived chance of enforcement",
+      "frozen": false
+    },
+    {
+      "key": "communication_intensity",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "lognormal",
+        "args": {
+          "mu": 0.0,
+          "sigma": 0.3
+        }
+      },
+      "bounds": {
+        "low": 0.2,
+        "high": 3.0
+      },
+      "owner_module": "PolicyAndMedia",
+      "description": "Intensity of public guidance",
+      "frozen": false
+    },
+    {
+      "key": "p_info_contact_family",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 5.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.8
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Per-contact info transmission in family layer",
+      "frozen": false
+    },
+    {
+      "key": "p_info_contact_work_school",
+      "dtype": "float",
+      "default": 0.12,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.5,
+          "beta": 6.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.6
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Per-contact info transmission in work/school layer",
+      "frozen": false
+    },
+    {
+      "key": "p_info_contact_community",
+      "dtype": "float",
+      "default": 0.06,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.2,
+          "beta": 10.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.3
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Per-contact info transmission in community layer",
+      "frozen": false
+    },
+    {
+      "key": "lambda_media_daily",
+      "dtype": "float",
+      "default": 0.01,
+      "prior": {
+        "type": "loguniform",
+        "args": {
+          "low": 0.0001,
+          "high": 0.1
+        }
+      },
+      "bounds": {
+        "low": 0.0001,
+        "high": 0.1
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Baseline daily media hazard",
+      "frozen": false
+    },
+    {
+      "key": "media_effect_weight",
+      "dtype": "float",
+      "default": 0.3,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 4.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.5
+      },
+      "owner_module": "InformationDiffusion",
+      "description": "Scales media/guidance effect on info hazard",
+      "frozen": false
+    },
+    {
+      "key": "alpha_intercept",
+      "dtype": "float",
+      "default": -3.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": -3.0,
+          "sd": 1.0
+        }
+      },
+      "bounds": {
+        "low": -6.0,
+        "high": 0.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Baseline adoption log-odds",
+      "frozen": false
+    },
+    {
+      "key": "gamma_risk_perception",
+      "dtype": "float",
+      "default": 1.5,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.5,
+          "sd": 0.7
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 4.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Effect of risk perception",
+      "frozen": false
+    },
+    {
+      "key": "beta_peer_family",
+      "dtype": "float",
+      "default": 1.2,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.0,
+          "sd": 0.5
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Family peer fraction effect",
+      "frozen": false
+    },
+    {
+      "key": "beta_peer_work_school",
+      "dtype": "float",
+      "default": 0.8,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.8,
+          "sd": 0.5
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Work/school peer fraction effect",
+      "frozen": false
+    },
+    {
+      "key": "beta_peer_community",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.5,
+          "sd": 0.5
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Community peer fraction effect",
+      "frozen": false
+    },
+    {
+      "key": "delta_received_info",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.0,
+          "sd": 0.5
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Info exposure boost",
+      "frozen": false
+    },
+    {
+      "key": "phi_persistence",
+      "dtype": "float",
+      "default": 2.5,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 2.0,
+          "sd": 0.8
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 6.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "State persistence effect",
+      "frozen": false
+    },
+    {
+      "key": "social_influence_weight",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Global scale on social influence",
+      "frozen": false
+    },
+    {
+      "key": "compliance_decay_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "prior": {
+        "type": "loguniform",
+        "args": {
+          "low": 0.0001,
+          "high": 0.1
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Decay of policy effect over time",
+      "frozen": false
+    },
+    {
+      "key": "recovery_or_dropout_prob",
+      "dtype": "float",
+      "default": 0.02,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 1.2,
+          "beta": 60.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Daily probability to stop wearing absent reinforcement",
+      "frozen": false
+    },
+    {
+      "key": "age_mod_youth",
+      "dtype": "float",
+      "default": 1.1,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.1,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Influence modifier for Youth",
+      "frozen": false
+    },
+    {
+      "key": "age_mod_young_adult",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.0,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Influence modifier for Young Adult",
+      "frozen": false
+    },
+    {
+      "key": "age_mod_middle_age",
+      "dtype": "float",
+      "default": 0.95,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.95,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Influence modifier for Middle Age",
+      "frozen": false
+    },
+    {
+      "key": "age_mod_older_adult",
+      "dtype": "float",
+      "default": 1.05,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.05,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Influence modifier for Older Adult",
+      "frozen": false
+    },
+    {
+      "key": "occ_mod_student",
+      "dtype": "float",
+      "default": 1.15,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.1,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Influence modifier for Students",
+      "frozen": false
+    },
+    {
+      "key": "occ_mod_white_collar",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.0,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Influence modifier for White Collar",
+      "frozen": false
+    },
+    {
+      "key": "occ_mod_blue_collar",
+      "dtype": "float",
+      "default": 0.95,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.95,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Influence modifier for Blue Collar",
+      "frozen": false
+    },
+    {
+      "key": "occ_mod_service",
+      "dtype": "float",
+      "default": 1.05,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.05,
+          "sd": 0.2
+        }
+      },
+      "bounds": {
+        "low": 0.5,
+        "high": 1.5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Influence modifier for Service",
+      "frozen": false
+    },
+    {
+      "key": "min_inventory_to_wear",
+      "dtype": "int",
+      "default": 1,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            0,
+            1,
+            2
+          ],
+          "probs": [
+            0.1,
+            0.8,
+            0.1
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0,
+        "high": 5
+      },
+      "owner_module": "MaskAdoptionDecision",
+      "description": "Masks required in inventory to wear",
+      "frozen": false
+    },
+    {
+      "key": "mask_cost_mean",
+      "dtype": "float",
+      "default": 1.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 1.0,
+          "sd": 0.3
+        }
+      },
+      "bounds": {
+        "low": 0.1,
+        "high": 5.0
+      },
+      "owner_module": "RetailMarket",
+      "description": "Average mask price baseline",
+      "frozen": false
+    },
+    {
+      "key": "price_elasticity",
+      "dtype": "float",
+      "default": -0.8,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": -0.8,
+          "sd": 0.5
+        }
+      },
+      "bounds": {
+        "low": -3.0,
+        "high": 0.0
+      },
+      "owner_module": "RetailMarket",
+      "description": "Sensitivity of purchase to price/affordability",
+      "frozen": false
+    },
+    {
+      "key": "retailer_restock_rate",
+      "dtype": "float",
+      "default": 0.2,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 2.0,
+          "beta": 5.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "RetailMarket",
+      "description": "Daily per-capita restock rate",
+      "frozen": false
+    },
+    {
+      "key": "mask_availability",
+      "dtype": "float",
+      "default": 0.8,
+      "prior": {
+        "type": "beta",
+        "args": {
+          "alpha": 8.0,
+          "beta": 2.0
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "RetailMarket",
+      "description": "Baseline stock/service availability factor",
+      "frozen": false
+    },
+    {
+      "key": "retailer_initial_stock_per_capita",
+      "dtype": "float",
+      "default": 2.0,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 2.0,
+          "sd": 0.5
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "RetailMarket",
+      "description": "Initial masks in stock per capita",
+      "frozen": false
+    },
+    {
+      "key": "observation_noise_std",
+      "dtype": "float",
+      "default": 0.05,
+      "prior": {
+        "type": "normal",
+        "args": {
+          "mean": 0.05,
+          "sd": 0.02
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Noise added to observed rates",
+      "frozen": false
+    },
+    {
+      "key": "trust_in_institutions_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            0.5
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Population mean trust (for future extensions)",
+      "frozen": true
+    },
+    {
+      "key": "pro_social_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            0.5
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Population mean pro-social preference",
+      "frozen": true
+    },
+    {
+      "key": "risk_perception_beta_alpha",
+      "dtype": "float",
+      "default": 2.0,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            2.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.1,
+        "high": 10.0
+      },
+      "owner_module": "global",
+      "description": "Fallback Beta alpha for risk_perception",
+      "frozen": true
+    },
+    {
+      "key": "risk_perception_beta_beta",
+      "dtype": "float",
+      "default": 3.0,
+      "prior": {
+        "type": "categorical",
+        "args": {
+          "values": [
+            3.0
+          ]
+        }
+      },
+      "bounds": {
+        "low": 0.1,
+        "high": 10.0
+      },
+      "owner_module": "global",
+      "description": "Fallback Beta beta for risk_perception",
+      "frozen": true
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.is_mask_wearing)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:wearing_mask (daily mean by day)"
+    },
+    {
+      "id": "observable.adoption_rate_by_age_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.is_mask_wearing) by age_group",
+      "frequency": "daily",
+      "aggregation": "by_group(age_group)",
+      "target_data_field": "train_data.csv:wearing_mask joined with agent_attributes.csv (daily mean by age_group)"
+    },
+    {
+      "id": "observable.info_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.received_info)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:received_info (daily mean by day)"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "window": [
+            0,
+            29
+          ],
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "window": [
+            0,
+            29
+          ]
+        }
+      }
+    },
+    {
+      "name": "peak_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "Peak",
+        "config": {
+          "window": [
+            0,
+            39
+          ]
+        }
+      }
+    },
+    {
+      "name": "time_to_50_percent",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "ThresholdCrossingTime",
+        "config": {
+          "threshold": 0.5,
+          "start_day": 0
+        }
+      }
+    },
+    {
+      "name": "final_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "ValueAt",
+        "config": {
+          "day": 39
+        }
+      }
+    },
+    {
+      "name": "adoption_inequality_gini",
+      "inputs": [
+        "observable.adoption_rate_by_age_daily"
+      ],
+      "definition": {
+        "type": "GiniAcrossGroups",
+        "config": {
+          "day": 39
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 10000,
+    "random_seed": 42,
+    "network": {
+      "source": "data_fitting/mask_adoption_data/social_network.json",
+      "symmetrize_edges": true,
+      "layer_overlap_policy": "merge_with_weight_sum"
+    },
+    "agents": {
+      "attributes_file": "data_fitting/mask_adoption_data/agent_attributes.csv",
+      "states_file": "data_fitting/mask_adoption_data/train_data.csv",
+      "use_empirical_initial_states": true
+    },
+    "policy": {
+      "start_day": 10,
+      "mandate_strength": 0.6,
+      "enforcement_probability": 0.4,
+      "communication_intensity": 1.0
+    },
+    "retail": {
+      "initial_stock_per_capita": 2.0,
+      "price": 1.0
+    }
+  },
+  "algorithms": {
+    "DiscreteTimeLogisticAdoption": "Logistic probability with persistence, social exposure per layer, info boost, and policy boost; Bernoulli sampling with inventory constraint.",
+    "PeerExposureComputation": "Neighbor state aggregation per layer with weights and mobility scaling.",
+    "InfoHazardAggregation": "Independent channel hazards combined via 1 - product(1 - p_k).",
+    "CMAESCalibration": "Simulation-based optimization over parameters minimizing weighted loss of RMSE/MAE and secondary targets.",
+    "GiniAcrossGroups": "Gini coefficient across group-level adoption rates at a specified day."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agent demographics and risk_perception; group modifiers application.",
+      "fields_used": [
+        "agent_id",
+        "age_group",
+        "occupation",
+        "risk_perception"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Construct multiplex social ties by layer.",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Initialize day-0 states and calibrate dynamics on days 0-29; evaluate predictions days 30-39.",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: parse config, build environment, run simulation, compute metrics."
+      },
+      {
+        "name": "data_loader.py",
+        "description": "Load agent attributes, social network, and panel data; integrity checks."
+      },
+      {
+        "name": "network_manager.py",
+        "description": "Build and store multiplex graphs; symmetrize and compute degrees."
+      },
+      {
+        "name": "modules/exposure_calculator.py",
+        "description": "Compute peer exposures per layer each tick."
+      },
+      {
+        "name": "modules/policy_and_media.py",
+        "description": "Policy activation and media guidance signals."
+      },
+      {
+        "name": "modules/information_diffusion.py",
+        "description": "Update received_info via hazards."
+      },
+      {
+        "name": "modules/mask_adoption_decision.py",
+        "description": "Adoption decision logic with persistence and policy."
+      },
+      {
+        "name": "modules/retail_market.py",
+        "description": "Retail stock and purchase mechanics."
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "Compute observables and export time series."
+      },
+      {
+        "name": "calibration/cmaes_driver.py",
+        "description": "CMA-ES loop over parameter vector; evaluation and early stopping."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Implement RMSE, MAE, Peak, ThresholdCrossingTime, GiniAcrossGroups."
+      },
+      {
+        "name": "utils/random.py",
+        "description": "Random seed control and RNG wrappers."
+      },
+      {
+        "name": "config/schema.json",
+        "description": "JSON schema for parameters and module configs."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "cma",
+      "numba"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption",
+    "MAE_adoption",
+    "peak_adoption",
+    "time_to_50_percent",
+    "final_adoption",
+    "adoption_inequality_gini"
+  ]
+}

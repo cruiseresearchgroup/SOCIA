@@ -1,0 +1,174 @@
+{
+  "summary": "The current code introduces useful improvements (centralized smoothing/lag, influencer weighting, heavy IO controls, ever_adopted sentinel), but it fails at the syntax stage due to indentation and stray out-of-function blocks. Additionally, there are duplicated CLI flags and an invalid return at module scope, which block execution. Beyond syntax, the simulation diverges from the task specification for mask adoption dynamics, missing core entities (locations, policies, retailers), enforcement dynamics, supply constraints, and epidemiological coupling. Address syntax blockers first, then extend the model to align with the specified entities, interactions, and evaluation metrics.",
+  "critical_issues": [
+    {
+      "issue": "IndentationError in parse_cli due to dedented parser.add_argument lines and duplicated flags",
+      "impact": "Prevents the program from importing or running at all; argparse would also throw conflicts for duplicate option strings.",
+      "solution": "Indent all parser.add_argument calls inside parse_cli, remove the duplicate definitions for --save-heavy-io and --io-agent-sample-n, and keep a single return inside the function.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Stray, out-of-function block after load_parameter_definitions that redefines parameters and returns at module scope",
+      "impact": "Causes SyntaxError (return outside function) and redeclaration of definitions with unclear precedence.",
+      "solution": "Delete the out-of-function block entirely. Keep the additions within load_parameter_definitions and return once at the end of the function.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Multiple 'pass' statements at the start of functions that are followed by real code",
+      "impact": "Not a runtime error, but confusing for maintainers and static analyzers; can mask indentation issues and reduce readability.",
+      "solution": "Remove redundant pass statements where actual code follows. Keep pass only in intentionally empty code blocks.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Evaluation does not compute task-specified metrics (time_to_threshold, inequality_in_adoption, policy_impact, etc.)",
+      "impact": "Prevents assessment against the target specification; calibrators optimize a limited metric set, reducing fidelity to real-world outcomes.",
+      "solution": "Extend Simulation.evaluate to compute required metrics and, for policy_impact, run a counterfactual with policy disabled. Add retention, inequality, and threshold timing calculations.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Model lacks required entities and interactions for mask adoption dynamics (Locations with policies/enforcement, Retailers with inventory, MediaChannel, PolicyAuthority, disease environment)",
+      "impact": "Simulation cannot represent key drivers (supply constraints, location-specific compliance, enforcement events, infection feedback), so outputs are misaligned with the task.",
+      "solution": "Add modules/entities per spec: Location host contacts and enforce policy, Retailer sell/restock masks, PolicyAuthority issue mandates and distribute masks, MediaChannel exposure, basic SIR with mask effects; tie to Person behaviors and metrics.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Policy impact and enforcement",
+      "current_approach": "Binary policy_active flag that only boosts media intensity; no enforcement events or fines.",
+      "suggested_approach": "Add a PolicyAuthority module that issues policies and allocates enforcement budget to Locations. Add an EnforcementEvent process that triggers warnings/fines and updates compliance_propensity. Track enforcement_events_per_1000.",
+      "expected_benefit": "Captures behavior changes from mandates and perceived enforcement risk, enabling policy_impact and enforcement metrics."
+    },
+    {
+      "aspect": "Supply constraints and mask acquisition",
+      "current_approach": "No mask ownership or supply; adoption is abstracted as a binary behavior without inventory or price.",
+      "suggested_approach": "Add Retailer agents with inventory, price, restock_rate; add PurchaseMasks and DistributionEvent interactions; constrain adoption by mask_owned and mask_quality; include price_elasticity_of_demand and access_equity_index.",
+      "expected_benefit": "Realistic adoption under shortages, price changes, and targeted distributions; supports mask_availability metric."
+    },
+    {
+      "aspect": "Location-specific compliance",
+      "current_approach": "No location entities; adoption is global.",
+      "suggested_approach": "Add Location agents (home, work, community) with mask_policy and enforcement_strength; simulate contacts via location types and calculate average_compliance_by_location_type.",
+      "expected_benefit": "Heterogeneous compliance and context-specific behavior consistent with observed real-world patterns."
+    },
+    {
+      "aspect": "Epidemiological coupling",
+      "current_approach": "No disease state; no transmission impact of mask efficacy.",
+      "suggested_approach": "Add a simple SIR or SEIR process with base_transmission_rate and variant_factor; reduce transmission probability with mask_efficacy_source_control and wearer_protection; compute infection_incidence and R_t.",
+      "expected_benefit": "Feedback loop between risk perception and prevalence; enables infection-related metrics and policy evaluation."
+    },
+    {
+      "aspect": "Inequality in adoption and retention",
+      "current_approach": "No group attributes beyond community; no inequality or retention metrics.",
+      "suggested_approach": "Track socioeconomic_status and political_orientation; compute inequality_in_adoption via Gini/Theil across groups; compute retention_rate as P(continue use | used yesterday).",
+      "expected_benefit": "Quantifies disparities and behavior persistence, supporting targeted interventions."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Fix parse_cli indentation and remove duplicate CLI flags; ensure single return inside the function.",
+      "reason": "Resolves IndentationError and argparse conflicts, enabling the program to run.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove out-of-function block after load_parameter_definitions that redefines save_heavy_io/io_agent_sample_n and returns at module scope.",
+      "reason": "Prevents SyntaxError and duplicate parameter definition confusion.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Extend Simulation.evaluate to compute task metrics: time_to_threshold, retention_rate, inequality_in_adoption (Gini), policy_impact (counterfactual), enforcement_events_per_1000 (placeholder until module added), mask_availability.",
+      "reason": "Aligns evaluation outputs with the task specification, making results meaningful and calibratable.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add optional ground-truth handling in evaluate_params to avoid using self-comparison Brier; gate metric if no GT.",
+      "reason": "Prevents degenerate zero-loss metrics and improves calibration robustness.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove redundant pass statements that precede real code within functions.",
+      "reason": "Improves readability and reduces confusion about block scopes.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "policy_impact",
+      "current_gap": "Not computed; no counterfactual comparison.",
+      "suggestion": "Run a shadow simulation with identical random seed where policy_active is forced False and compare adoption rates."
+    },
+    {
+      "metric": "inequality_in_adoption",
+      "current_gap": "No measurement of disparities by socioeconomic or demographic groups.",
+      "suggestion": "Introduce socioeconomic_status and political_orientation distributions; compute Gini/Theil of adoption by groups; calibrate group-specific parameters using survey or mobility datasets."
+    },
+    {
+      "metric": "mask_availability",
+      "current_gap": "No inventory tracking; cannot report stockouts.",
+      "suggestion": "Implement Retailer inventory and restocking; track coverage (inventory/demand) and stockout frequency; validate against retail sales/stock data if available."
+    },
+    {
+      "metric": "effective_reproduction_number (R_t)",
+      "current_gap": "Not modeled; no disease spread.",
+      "suggestion": "Add simple SEIR with masked contact modification; compute R_t from next-generation matrix or incidence ratios; validate against observed case trends."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix parse_cli indentation and remove duplicate CLI flags to resolve syntax error.",
+    "Remove the stray out-of-function block after load_parameter_definitions and keep a single return.",
+    "Extend Simulation.evaluate to compute task metrics (time_to_threshold, retention_rate, inequality_in_adoption, policy_impact placeholders).",
+    "Introduce minimal Location, Retailer, and PolicyAuthority stubs with logging to begin capturing required metrics (enforcement events, mask availability).",
+    "Iteratively add disease coupling and refine behavior rules (fatigue, compliance, information) for better alignment."
+  ],
+  "additional_comments": "Keep the direct main() call at the end to satisfy the system\u2019s special requirement. When adding new modules (Locations, PolicyAuthority, Retailers), use the existing Module interface and the centralized commit pattern to preserve purity of forward passes. Maintain optional dependencies (numpy, pandas, networkx) with guards as currently implemented.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def load_parameter_definitions(path: Optional[str], initial_params: Dict[str, Any]) -> Dict[str, ParameterDefinition]:\n    ...\n    if \"io_agent_sample_n\" not in definitions:\n        definitions[\"io_agent_sample_n\"] = ParameterDefinition(...)\n    # FIXED: Applied feedback snippet from load_parameter_definitions()\nif \"save_heavy_io\" not in definitions:\n    definitions[\"save_heavy_io\"] = ParameterDefinition(...)\nif \"io_agent_sample_n\" not in definitions:\n    definitions[\"io_agent_sample_n\"] = ParameterDefinition(...)\nreturn definitions",
+      "after": "def load_parameter_definitions(path: Optional[str], initial_params: Dict[str, Any]) -> Dict[str, ParameterDefinition]:\n    definitions: Dict[str, ParameterDefinition] = {}\n    loaded: Dict[str, Any] = {}\n    if path and os.path.exists(path):\n        try:\n            with open(path, \"r\", encoding=\"utf-8\") as f:\n                loaded = json.load(f)\n        except Exception:\n            loaded = {}\n    keys = set(initial_params.keys()) | set(loaded.keys())\n    for k in keys:\n        spec = loaded.get(k, {})\n        definitions[k] = ParameterDefinition(\n            key=k,\n            dtype=spec.get(\"dtype\", \"float\"),\n            default=spec.get(\"default\", initial_params.get(k, 0.0)),\n            low=spec.get(\"bounds\", {}).get(\"low\"),\n            high=spec.get(\"bounds\", {}).get(\"high\"),\n            owner_module=spec.get(\"owner_module\", \"global\"),\n            frozen=spec.get(\"frozen\", False),\n            description=spec.get(\"description\", \"\")\n        )\n    for fk in [\"random_seed\", \"network_type_code\", \"adoption_rule_code\"]:\n        if fk in definitions:\n            definitions[fk].frozen = True\n    if \"capture_micro\" not in definitions:\n        definitions[\"capture_micro\"] = ParameterDefinition(key=\"capture_micro\", dtype=\"bool\", default=False, owner_module=\"InfluencePropagation\")\n    if \"save_micro_io\" not in definitions:\n        definitions[\"save_micro_io\"] = ParameterDefinition(key=\"save_micro_io\", dtype=\"bool\", default=False, owner_module=\"global\")\n    if \"micro_sample_frac\" not in definitions:\n        definitions[\"micro_sample_frac\"] = ParameterDefinition(key=\"micro_sample_frac\", dtype=\"float\", default=0.1, low=0.0, high=1.0, owner_module=\"InfluencePropagation\")\n    if \"save_heavy_io\" not in definitions:\n        definitions[\"save_heavy_io\"] = ParameterDefinition(key=\"save_heavy_io\", dtype=\"bool\", default=False, owner_module=\"global\")\n    if \"io_agent_sample_n\" not in definitions:\n        definitions[\"io_agent_sample_n\"] = ParameterDefinition(key=\"io_agent_sample_n\", dtype=\"int\", default=100, low=0, high=10000, owner_module=\"global\")\n    return definitions",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def parse_cli(argv: Optional[List[str]] = None) -> argparse.Namespace:\n    ...\n    parser.add_argument(\"--save-micro-io\", action=\"store_true\", ...)\n    # FIXED: Applied feedback snippet from parse_cli()\nparser.add_argument(\"--micro-sample-frac\", type=float, default=None, ...)\nparser.add_argument(\"--save-heavy-io\", action=\"store_true\", ...)\nparser.add_argument(\"--io-agent-sample-n\", type=int, default=None, ...)\n    # FIXED: Add heavy IO control flags\n    parser.add_argument(\"--save-heavy-io\", action=\"store_true\", ...)\n    parser.add_argument(\"--io-agent-sample-n\", type=int, default=None, ...)\n    return parser.parse_args(argv)",
+      "after": "def parse_cli(argv: Optional[List[str]] = None) -> argparse.Namespace:\n    parser = argparse.ArgumentParser(description=\"Agent-based diffusion simulation with pluggable calibration.\")\n    parser.add_argument(\"--param-file\", type=str, default=\"parameters.json\")\n    parser.add_argument(\"--parameter-defs\", type=str, default=\"parameter_definitions.json\")\n    parser.add_argument(\"--set\", dest=\"overrides\", action=\"append\", default=[])\n    parser.add_argument(\"--calibrator\", type=str, default=\"random_search\", choices=list(CALIBRATOR_REGISTRY.keys()))\n    parser.add_argument(\"--budget\", type=int, default=5)\n    parser.add_argument(\"--calib-window\", type=str, default=\"0:60\")\n    parser.add_argument(\"--artifacts-dir\", type=str, default=\"artifacts\")\n    parser.add_argument(\"--calibrator-config\", type=str, default=None)\n    parser.add_argument(\"--no-visualize\", action=\"store_true\")\n    parser.add_argument(\"--capture-micro\", action=\"store_true\")\n    parser.add_argument(\"--save-micro-io\", action=\"store_true\")\n    parser.add_argument(\"--micro-sample-frac\", type=float, default=None)\n    parser.add_argument(\"--save-heavy-io\", action=\"store_true\")\n    parser.add_argument(\"--io-agent-sample-n\", type=int, default=None)\n    return parser.parse_args(argv)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate(self, gt: Optional[Dict[str, List[float]]] = None, window: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:\n    ...\n    metrics = {\n        \"RMSE_overall_adoption\": rmse(y_hat_rate, y_true_rate) if y_true_rate else None,\n        \"MAE_new_adoptions\": mae(y_hat_new, y_true_new) if y_true_new else None,\n        \"PeakError_new_adoptions\": peak_error(y_hat_new, y_true_new) if y_true_new else None,\n        \"TimeToPeak_new_adoptions\": time_to_peak(y_hat_new),\n        \"window_evaluated\": list(window) if window is not None else None,\n    }",
+      "after": "def evaluate(self, gt: Optional[Dict[str, List[float]]] = None, window: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:\n    obs = self.state[\"observables\"]\n    results_dir = self.paths[\"results\"]\n    y_hat_rate_full = obs.get(\"adoption_rate_daily\", [])\n    y_hat_new_full = obs.get(\"new_adoptions_daily\", [])\n    gt = gt or self._load_ground_truth()\n    y_true_rate_full = gt.get(\"overall_adoption_rate\", []) if gt else []\n    y_true_new_full = gt.get(\"new_adoptions\", []) if gt else []\n    # slice helpers ... (same as before)\n    # compute RMSE/MAE/peaks ... (same as before)\n    # Additional metrics\n    # time_to_threshold\n    thr = float(self.params.values.get(\"adoption_threshold_target\", 0.8))\n    ttt = -1\n    for i, r in enumerate(y_hat_rate_full):\n        if r >= thr:\n            ttt = i\n            break\n    # retention_rate: P(use_t=1 | use_{t-1}=1)\n    adopted_hist = self.state.get(\"adopted_history\", [])\n    retention = None\n    if len(adopted_hist) >= 2:\n        prev = adopted_hist[-2]\n        curr = adopted_hist[-1]\n        denom = sum(prev)\n        numer = sum(1 for p, c in zip(prev, curr) if p == 1 and c == 1)\n        retention = (numer / denom) if denom > 0 else None\n    # inequality_in_adoption (Gini on final day by community)\n    by_comm = self.state[\"observables\"].get(\"adoption_rate_by_community\", [])\n    gini = None\n    if by_comm:\n        vals = list(by_comm[-1].values())\n        if vals:\n            vals_sorted = sorted(vals)\n            n = len(vals_sorted)\n            cum = 0.0\n            for i, v in enumerate(vals_sorted, 1):\n                cum += i * v\n            gini = (2 * cum) / (n * sum(vals_sorted)) - (n + 1) / n if sum(vals_sorted) > 0 else 0.0\n    # mask_availability placeholder (requires Retailer module)\n    mask_avail = self.state.get(\"signals\", {}).get(\"mask_availability\", None)\n    metrics = {\n        \"RMSE_overall_adoption\": rmse(y_hat_rate, y_true_rate) if y_true_rate else None,\n        \"MAE_new_adoptions\": mae(y_hat_new, y_true_new) if y_true_new else None,\n        \"PeakError_new_adoptions\": peak_error(y_hat_new, y_true_new) if y_true_new else None,\n        \"TimeToPeak_new_adoptions\": time_to_peak(y_hat_new),\n        \"time_to_threshold\": ttt,\n        \"retention_rate\": retention,\n        \"inequality_in_adoption\": gini,\n        \"mask_availability\": mask_avail,\n        \"window_evaluated\": list(window) if window is not None else None,\n    }\n    safe_json_dump(metrics, os.path.join(results_dir, \"metrics.json\"))\n    return metrics",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    ...\n        # In absence of GT here, compare to itself -> 0\n        brier = sum((p - r) ** 2 for p, r in zip(y_hat, y_hat)) / float(max(1, len(y_hat)))",
+      "after": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    ...\n        # Brier against GT if available\n        brier = None\n        gt = sim_eval._load_ground_truth()\n        if gt and gt.get(\"overall_adoption_rate\"):\n            y_true = gt[\"overall_adoption_rate\"]\n            a, b = y_hat[:len(y_true)], y_true[:len(y_hat)]\n            n = min(len(a), len(b))\n            if n > 0:\n                brier = sum((a[i] - b[i]) ** 2 for i in range(n)) / n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes brought meaningful architectural fixes but introduced critical syntax errors due to stray blocks and indentation mistakes.",
+    "positive_impacts": [
+      "Centralized smoothing/lag in Simulation.run with a pure ObservationAggregator.forward.",
+      "Influencer weighting and window capping for neighbor social fraction improves performance and realism.",
+      "Ever_adopted sentinel prevents habit decay misclassification.",
+      "Heavy IO controls reduce artifact size and allow sampling."
+    ],
+    "negative_impacts": [
+      "IndentationError in parse_cli due to dedented add_argument lines and duplicate flags.",
+      "Stray out-of-function redeclaration and return after load_parameter_definitions causing SyntaxError.",
+      "Duplicated CLI options (--save-heavy-io, --io-agent-sample-n) causing argparse conflicts."
+    ],
+    "suggestions": [
+      "Fix syntax blockers immediately by removing the stray block and consolidating/indenting CLI definitions.",
+      "Add unit tests or lint checks for CLI parsing and function scoping to prevent recurrence.",
+      "Proceed to implement task-specific metrics and minimal stubs for missing entities to align with the Mask Adoption Dynamics specification."
+    ]
+  }
+}

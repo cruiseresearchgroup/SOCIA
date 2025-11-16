@@ -1,0 +1,237 @@
+{
+  "summary": "The simulation runs and models core dynamics (social influence, policy messaging, contexts, and supply). However, it diverges from the specified schema, lacks several required entities and metrics, and does not implement the validation criteria. Recent fixes improved robustness (syntax and name errors, dict handling, inequality metric, stockout tracking), but mandates, enforcement mechanics, influence attribution, clustering metrics, and validation remain missing. The next iteration should introduce explicit Location, PolicyMaker, and InformationSource entities, align parameters with the spec via a mapping layer, implement enforcement actions and mandate periods, add missing metrics and validation checks, and provide a clear attribution mechanism for adoption events.",
+  "critical_issues": [
+    {
+      "issue": "Missing core entities (Location, PolicyMaker, InformationSource) and their behaviors as specified.",
+      "impact": "Prevents modeling of mandates, entry requirements, observability, detection probability, targeted messaging via different channels, and policy period effects. Downstream metrics like enforcement actions, sustained adoption after mandate end, policy effect size, and influence attribution cannot be computed correctly.",
+      "solution": "Implement minimal Location, PolicyMaker, and InformationSource classes (with required attributes/behaviors) and integrate them into the loop: locations host interactions and enforce entry rules; policymaker toggles mandates and enforcement level over policy_start_day:policy_end_day; information sources broadcast messages with reach/credibility/bias. Wire their outputs into InfluenceAndAdoption and Aggregator buffers.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No explicit enforcement actions; enforcement signals are static and tied only to location types.",
+      "impact": "Cannot compute enforcement_actions_per_day; admission/rejection and fines are not represented, weakening the policy mechanism and reducing realism.",
+      "solution": "Add an enforcement step during ContextScheduler + entry rule checks. If a person attempts entry without mask in enforced locations, probabilistically detect (detection_probability), then either warn/fine (using fine_amount) or reject. Record actions per day to buffers/history. Feed enforcement outcomes back into adoption (fatigue/trust).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Parameter schema misalignment with spec (e.g., mandate_effect_strength, policy_start_day/end_day, detection_probability, network_type).",
+      "impact": "External parameter files using the spec won\u2019t be honored; runs won\u2019t match intended scenarios. It also prevents validation tests (policy monotonicity) based on mandate_strength from being meaningful.",
+      "solution": "Introduce a parameter mapping layer to translate spec keys into internal keys. Alternatively, rename internal params to match the spec. Implement time-based mandate activation using policy_start_day/policy_end_day and detection_probability within enforcement logic.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing required metrics and validation criteria (adoption_clustering, policy_effect_size controlled for factors, influence_attribution, sustained_adoption_after_mandate_end, mask_shortage_days, enforcement_actions_per_day; convergence, supply sanity, policy monotonicity, baseline stability).",
+      "impact": "Cannot verify model behavior against the spec or diagnose mechanisms; validation cannot pass.",
+      "solution": "Add metrics in AdoptionAggregator and evaluate(): compute clustering/assortativity among adopters, counterfactual policy effect within mandate windows, attribution fractions for adoption events, post-mandate sustainment window, explicit stockout days, and enforcement action counts. Implement a validate() routine returning pass/fail for the listed criteria and include in summary.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Mandate periods are not modeled; policy signals/enforcement are static.",
+      "impact": "Dynamics during policy periods vs afterward are not captured; sustained adoption cannot be evaluated; policy effect size is conflated with baseline messaging.",
+      "solution": "Activate mandates and elevate enforcement/message intensities only during [policy_start_day, policy_end_day]. After mandates end, decay enforcement signals and track sustained adoption in a fixed window (e.g., 14 days).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No political_orientation attribute; inequality measured only by SES.",
+      "impact": "Cannot compute adoption_inequality_index across political orientation as required; social clustering by politics also cannot be modeled.",
+      "solution": "Add political_orientation to Person (drawn from a distribution) and compute inequality across both SES and political orientation. Optionally add homophily via political orientation in network rewiring.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Supply sanity not enforced; adoption decisions are not constrained by mask availability.",
+      "impact": "New adopters may exceed cumulative supply, violating the spec\u2019s sanity check and inflating adoption rates beyond realistic constraints.",
+      "solution": "Track cumulative available masks (initial + restock arrivals), and gate adoption that requires mask use on inventory availability. Alternatively, separate 'intention to adopt' from 'effective wearing' and use the latter for adoption_rate metrics. Implement a supply_sanity_check and report violations.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Mandate dynamics and enforcement",
+      "current_approach": "Static enforcement signal based on location type; no policy period or detection probability; no explicit enforcement actions.",
+      "suggested_approach": "Add PolicyMaker with policy_start_day/end_day, enforcement_level, fine_amount, detection_probability. Locations apply entry_requirements when mandate_active; detect non-compliance and issue warnings/fines/rejection; feed actions into metrics and agent states.",
+      "expected_benefit": "Captures temporal effects of mandates, enables enforcement metrics, and improves realism in adoption changes due to policy periods."
+    },
+    {
+      "aspect": "Information diffusion via channels",
+      "current_approach": "Single PolicyBroadcast module without channel heterogeneity (reach, credibility, bias).",
+      "suggested_approach": "Introduce InformationSource entities for authority media, social media, partisan outlets with different reach/credibility/bias/misinformation_rate; target audiences; merge messages in PolicyBroadcast to set agent-specific signals.",
+      "expected_benefit": "More realistic variation in messaging effects and better alignment with misinformation_rate parameter in the spec."
+    },
+    {
+      "aspect": "Influence attribution",
+      "current_approach": "No attribution of adoption events to mechanisms.",
+      "suggested_approach": "When adoption occurs, compute normalized contributions from social_term, policy_term, enforcement, market access (inventory availability), and risk_term; attribute event to the largest contributor and maintain counts per category.",
+      "expected_benefit": "Enables influence_attribution metric and supports policy analysis."
+    },
+    {
+      "aspect": "Adoption clustering and assortativity",
+      "current_approach": "No metric for clustering/assortativity of adopters.",
+      "suggested_approach": "Compute adopter clustering coefficient or assortativity (e.g., via neighbor overlap or fraction of adopter-adopter edges).",
+      "expected_benefit": "Captures network-level structure of adoption and supports validation and analysis."
+    },
+    {
+      "aspect": "Supply constraints coupling",
+      "current_approach": "People adopt regardless of inventory; purchases are only attempted opportunistically.",
+      "suggested_approach": "Require a mask to be available for effective wearing; if none available, classify as intended but not effectively wearing; base adoption_rate_over_time on effective wearing.",
+      "expected_benefit": "Prevents violating supply sanity and improves realism under shortages."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Add minimal Location, PolicyMaker, and InformationSource entities; integrate into Simulation.state and loop. Toggle mandate_active by day; enforce entry rules and count enforcement actions.",
+      "reason": "Aligns implementation with the spec, enables policy period dynamics, enforcement metrics, and targeted messaging.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement a parameter mapping layer to translate spec keys (e.g., network_type, mandate_effect_strength, policy_start_day, detection_probability, time_horizon_days) to internal keys used by modules.",
+      "reason": "Ensures compatibility with the task\u2019s parameter schema and external configurations.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add validation routine that computes adoption_convergence, supply_sanity_check, policy_monotonicity, baseline stability; integrate into orchestrate() and summary JSON.",
+      "reason": "Satisfies validation_criteria and surfaces diagnostics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Extend InfluenceAndAdoption.forward to compute cause contributions and attach attribution labels for each adoption event; aggregate shares in AdoptionAggregator and expose influence_attribution.",
+      "reason": "Implements influence_attribution metric required by the spec.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute adoption_clustering (assortativity/clustering) using adjacency and adopter states; append to history and include in evaluate() metrics.",
+      "reason": "Implements adoption_clustering metric; helps validate network effects.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Gate effective wearing on inventory; track intended vs effective adoption; implement mask_shortage_days explicitly in AdoptionAggregator and evaluate(); enforce supply_sanity_check.",
+      "reason": "Prevents unrealistic adoption under shortages and aligns with supply validation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Cap triadic closure attempts and avoid full adjacency copy each day (optional optimization: rewire a sampled subset).",
+      "reason": "Improves performance for large N and high clustering_bias.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add political_orientation attribute to Person; compute inequality across SES and political groups.",
+      "reason": "Enables adoption_inequality_index by political orientation as per spec.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "Policy effect is approximated by turning off policy weights globally, not isolated to the mandate period and without controlling for other factors.",
+      "suggestion": "Estimate effect using difference-in-differences: compare adoption during mandate window with counterfactual (policy_signal_weight=0) while keeping the same seed and observed disease signal; report the difference normalized by baseline trend."
+    },
+    {
+      "metric": "adoption_clustering",
+      "current_gap": "Not computed.",
+      "suggestion": "Compute the fraction of adopter-adopter edges over total edges and/or the average local clustering coefficient among adopters."
+    },
+    {
+      "metric": "influence_attribution",
+      "current_gap": "Not computed.",
+      "suggestion": "Log per-adoption event attribution and aggregate shares across the run; validate against known cases (e.g., high enforcement should increase mandate attribution)."
+    },
+    {
+      "metric": "sustained_adoption_after_mandate_end",
+      "current_gap": "Not computed.",
+      "suggestion": "Average adoption_rate_over_time in a 14-day window after policy_end_day and include in metrics."
+    },
+    {
+      "metric": "mask_shortage_days",
+      "current_gap": "Stockout_rate is tracked but not the count of days preventing purchases.",
+      "suggestion": "Track days with stockouts where at least one purchase failed due to zero inventory, or where demand exceeded supply."
+    }
+  ],
+  "prioritized_actions": [
+    "Introduce PolicyMaker, Location, and InformationSource entities and wire them into the loop with mandate periods and enforcement actions.",
+    "Add enforcement_actions_per_day and sustained_adoption_after_mandate_end metrics; implement explicit entry checks and fines/rejections.",
+    "Implement parameter mapping from spec keys to internal names; honor policy_start_day/policy_end_day and detection_probability.",
+    "Add influence attribution, adoption clustering, and policy effect size (counterfactual within mandate window).",
+    "Enforce supply sanity by gating effective wearing on inventory and tracking mask_shortage_days.",
+    "Add validation routine for all validation_criteria and include results in summary JSON.",
+    "Add political_orientation attribute and extend inequality index to include political groups.",
+    "Optimize network updates (cap triadic closure attempts and reduce adjacency copying)."
+  ],
+  "additional_comments": "Recent fixes significantly improved stability (syntax/name errors, dict handling, purchase rate, inequality metric). The new guards against NaN/Inf, time-budget caps, and skip_io are appropriate. For performance, daily adjacency copying and high triadic closure attempts could be heavy; capping attempts and sampling rewiring can mitigate this. Exception handling remains broad; consider narrowing where feasible to expose real errors during development or logs.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "class Person:\n    def __init__(...):\n        self.ses = ses\n        self.openness = openness\n        ...\n        self.current_location_type = \"home\"",
+      "after": "class Person:\n    def __init__(...):\n        self.ses = ses\n        self.political_orientation = rng.choice([\"left\",\"center\",\"right\"]) if hasattr(rng, 'choice') else (\"left\" if random.random()<0.33 else \"right\")\n        self.openness = openness\n        ...\n        self.current_location_type = \"home\"\n        self.effective_wearing = int(adopted and self.mask_inventory>0)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class InfluenceAndAdoption(BaseModule):\n    def _enforcement_signal(self, location: str) -> float:\n        enforcement_strength = float(self.params.get(\"enforcement_strength\", 0.3))\n        fine_amount = float(self.params.get(\"fine_amount\", 50.0))\n        if location in {\"retail\", \"transit_public\"}:\n            return clamp(enforcement_strength + 0.002 * fine_amount, 0.0, 1.5)\n        return 0.0",
+      "after": "class InfluenceAndAdoption(BaseModule):\n    def _enforcement_signal(self, location: str, state: Dict[str, Any]) -> float:\n        mandate_active = bool(state.get(\"policy_active\", False))\n        base = float(self.params.get(\"enforcement_strength\", 0.3))\n        fine_amount = float(self.params.get(\"fine_amount\", 50.0))\n        if not mandate_active:\n            base *= 0.3\n        if location in {\"retail\", \"transit_public\"}:\n            return clamp(base + 0.002 * fine_amount, 0.0, 1.5)\n        return 0.0",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "enforce_term = self._enforcement_signal(loc)\n...\nif pi.adopted == 0:\n    if rng.random() < p_adopt:\n        updates.append((i, 1))",
+      "after": "enforce_term = self._enforcement_signal(loc, state)\n...\n# Attribution weights for diagnostics\ncontrib = {\n  'peer': max(0.0, w_social * (frac_adopted - pi.threshold)),\n  'policy': max(0.0, policy_term),\n  'enforcement': max(0.0, enforce_term),\n  'risk': max(0.0, risk_term)\n}\nattr = max(contrib, key=contrib.get)\nif pi.adopted == 0:\n    if rng.random() < p_adopt:\n        updates.append((i, 1))\n        buffers.setdefault('attribution.new', []).append(attr)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class ContextScheduler(BaseModule):\n    def forward(...):\n        for p in persons:\n            ...\n            p.current_location_type = choice\n            counts[choice] = counts.get(choice, 0) + 1",
+      "after": "class ContextScheduler(BaseModule):\n    def forward(...):\n        detection_p = float(self.params.get('detection_probability', 0.3))\n        mandate_active = bool(state.get('policy_active', False))\n        enforcement_actions = 0\n        for p in persons:\n            ...\n            # Entry enforcement when mandate is active\n            if mandate_active and choice in {'retail','transit_public'}:\n                needs_mask = (p.effective_wearing == 0)\n                if needs_mask and rng.random() < detection_p:\n                    enforcement_actions += 1\n                    # Reject or fine\n                    if rng.random() < 0.5:\n                        # rejection: move to home\n                        p.current_location_type = 'home'\n                    else:\n                        # fine increases fatigue or reduces trust\n                        p.fatigue = clamp(p.fatigue + 0.05, 0.0, 1.0)\n            counts[p.current_location_type] = counts.get(p.current_location_type, 0) + 1\n        buffers['metric.enforcement_actions_daily'] = enforcement_actions",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class SupplyChain(BaseModule):\n    def forward(...):\n        for p in persons:\n            need_mask = (p.adopted == 1 and p.mask_inventory <= 0) or (\n                p.mask_inventory <= 0 and p.current_location_type in enforced_types and p.awareness > 0.2\n            )",
+      "after": "class SupplyChain(BaseModule):\n    def forward(...):\n        for p in persons:\n            need_mask = ((p.adopted == 1 or p.awareness > 0.2) and p.mask_inventory <= 0)\n        ...\n        # After purchasing, recompute effective wearing for enforced contexts\n        for p in persons:\n            p.effective_wearing = 1 if (p.adopted == 1 and p.mask_inventory > 0) else 0\n        buffers['metric.mask_shortage_day'] = 1 if self.retailer['stockouts_today'] > 0 else 0",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class AdoptionAggregator(BaseModule):\n    def forward(...):\n        buffers[\"observable.adoption_rate_daily\"] = self.observed_adoption_rate[-1]",
+      "after": "class AdoptionAggregator(BaseModule):\n    def forward(...):\n        # Effective wearing rate (supply-constrained)\n        effective = sum(1 for p in persons if getattr(p, 'effective_wearing', 0) == 1)\n        effective_rate = effective / float(max(1, N))\n        buffers['observable.adoption_rate_daily'] = effective_rate\n        # Adoption clustering (adopter-adopter edge share)\n        adj = state.get('adjacency') or [set() for _ in range(N)]\n        adopter_edges = 0\n        total_edges = 0\n        for u in range(N):\n            for v in adj[u]:\n                if u < v:\n                    total_edges += 1\n                    if persons[u].adopted == 1 and persons[v].adopted == 1:\n                        adopter_edges += 1\n        buffers['metric.adoption_clustering'] = (adopter_edges / float(total_edges)) if total_edges > 0 else 0.0\n        # Influence attribution aggregation\n        atts = buffers.get('attribution.new', [])\n        if atts:\n            counts = {k: atts.count(k) for k in set(atts)}\n            buffers['metric.influence_attribution'] = {k: counts[k] / float(len(atts)) for k in counts}",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate(self, gt: Dict[str, List[float]], window: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:\n    metrics: Dict[str, Any] = {}\n    metrics[\"RMSE\"] = rmse(y_true, y_pred)",
+      "after": "def evaluate(self, gt: Dict[str, List[float]], window: Optional[Tuple[int, int]] = None) -> Dict[str, Any]:\n    metrics: Dict[str, Any] = {}\n    metrics['RMSE'] = rmse(y_true, y_pred)\n    # Sustained adoption after mandate end\n    policy_end = int(self.params.get('policy_end_day', -1))\n    window_len = 14\n    if policy_end >= 0 and len(self.history['observable.adoption_rate_daily']) > policy_end + 1:\n        post = self.history['observable.adoption_rate_daily'][policy_end+1:policy_end+1+window_len]\n        if post:\n            metrics['sustained_adoption_after_mandate_end'] = sum(post)/len(post)\n    # Enforcement actions per day mean\n    enf_series = self.history.get('metric.enforcement_actions_daily', [])\n    if enf_series:\n        metrics['enforcement_actions_per_day'] = sum(enf_series)/len(enf_series)\n    # Policy effect size within mandate window\n    start = int(self.params.get('policy_start_day', 0)); end = int(self.params.get('policy_end_day', 0))\n    if end > start:\n        sim_cf = Simulation(self.get_params(), rng_seed=self.seed)\n        sim_cf.set_params(policy_signal_weight=0.0, message_intensity=0.0)\n        sim_cf.run(start_day=start, end_day=end, time_budget_sec=1.0 if FAST_MODE else 2.0)\n        pred = self.history['observable.adoption_rate_daily'][start:end+1]\n        cf = sim_cf.history['observable.adoption_rate_daily']\n        if pred and cf and len(pred) == len(cf):\n            diff = sum((p - c) for p, c in zip(pred, cf)) / len(pred)\n            metrics['policy_effect_size'] = diff",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def orchestrate(args: argparse.Namespace) -> Dict[str, Any]:\n    sim = Simulation(pm.get_values(), rng_seed=seed)\n    ...\n    metrics = sim.evaluate(gt, window=None)",
+      "after": "def orchestrate(args: argparse.Namespace) -> Dict[str, Any]:\n    sim = Simulation(pm.get_values(), rng_seed=seed)\n    # Spec-to-internal parameter mapping (example)\n    sim.set_params(**map_spec_params(pm.get_values()))\n    ...\n    metrics = sim.evaluate(gt, window=None)\n    # Validation\n    validation = validate_simulation(sim)\n    summary['validation'] = validation",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration fixed critical runtime issues (syntax, variable names), added dict casting, prevented NaN/Inf in outputs, captured inequality and purchase rate, and improved robustness of scheduling and supply handling. However, it did not address the missing entities, policy periods, enforcement actions, attribution, clustering, or validation criteria required by the spec.",
+    "positive_impacts": [
+      "Resolved SyntaxError and NameError in NetworkDynamics and InteractionScheduler.",
+      "Added support for dict parameters and JSON sanitization across outputs.",
+      "Tracked stockout rate, purchase rate, and inequality index; exposed contextual adoption.",
+      "Time-budget guards and skip_io reduce risk of timeouts in constrained environments."
+    ],
+    "negative_impacts": [
+      "The aggregator now stores dicts in history, but evaluation does not consume the new metrics; missing linkage to enforcement and attribution.",
+      "Mandate dynamics remain absent; enforcement still static and uncounted.",
+      "Parameter schema remains divergent from the spec, so external configurations may not apply as intended."
+    ],
+    "suggestions": [
+      "Implement the minimal entity layer (Location, PolicyMaker, InformationSource) and integrate mandate periods into PolicyBroadcast and enforcement.",
+      "Add enforcement count buffering and aggregation; gate effective adoption on inventory.",
+      "Introduce a spec-to-internal param mapping function and call it in orchestrate().",
+      "Implement validate_simulation(sim) to compute the spec\u2019s validation checks and include in outputs."
+    ]
+  }
+}

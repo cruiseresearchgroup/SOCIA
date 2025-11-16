@@ -1135,32 +1135,63 @@ def simulation_test(calibrator_type: str = "logit_head") -> None:
         sbi_simulation_test()
         return
     
+    # Get project root directory (assuming script is in output/test_mask_patch)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(script_dir))
+    data_base = os.path.join(project_root, "data_fitting", "mask_adoption_data")
+    
     # Load configuration and parameters for traditional calibrators
+    # Try outputs_* first, then test_outputs_* as fallback
+    param_dir = None
     if calibrator_type == "logit_head":
-        param_dir = "data_fitting/mask_adoption_data/outputs_LogitHeadCalibrator"
+        param_dir = os.path.join(data_base, "outputs_LogitHeadCalibrator")
+        if not os.path.exists(param_dir):
+            param_dir = os.path.join(data_base, "test_outputs_logit_head")
     elif calibrator_type == "random_search":
-        param_dir = "data_fitting/mask_adoption_data/outputs_RandomSearchCalibrator"
+        param_dir = os.path.join(data_base, "outputs_RandomSearchCalibrator")
+        if not os.path.exists(param_dir):
+            param_dir = os.path.join(data_base, "test_outputs_random_search")
     elif calibrator_type == "bo":
-        param_dir = "data_fitting/mask_adoption_data/outputs_BoCalibrator"
+        param_dir = os.path.join(data_base, "outputs_BoCalibrator")
     elif calibrator_type == "evo":
-        param_dir = "data_fitting/mask_adoption_data/outputs_EvoCalibrator"
+        param_dir = os.path.join(data_base, "outputs_EvoCalibrator")
+        if not os.path.exists(param_dir):
+            param_dir = os.path.join(data_base, "test_outputs_evo_GA")
     elif calibrator_type == "bo_TuRBO":
-        param_dir = "data_fitting/mask_adoption_data/outputs_BoCalibrator_TuRBO"
+        param_dir = os.path.join(data_base, "outputs_BoCalibrator_TuRBO")
+        if not os.path.exists(param_dir):
+            param_dir = os.path.join(data_base, "test_outputs_bo_TuRBO")
     elif calibrator_type == "bo_TuRBO_llm_guide":
-        param_dir = "data_fitting/mask_adoption_data/outputs_BoCalibrator_TuRBO_llm_guide"
+        param_dir = os.path.join(data_base, "outputs_BoCalibrator_TuRBO_llm_guide")
+        if not os.path.exists(param_dir):
+            param_dir = os.path.join(data_base, "test_outputs_bo_TuRBO_llm_guide")
     elif calibrator_type == "bo_vanilla":
-        param_dir = "data_fitting/mask_adoption_data/outputs_BoCalibrator_vanilla"
+        param_dir = os.path.join(data_base, "outputs_BoCalibrator_vanilla")
+        if not os.path.exists(param_dir):
+            param_dir = os.path.join(data_base, "test_outputs_bo_vanilla")
     else:
         raise ValueError(f"Unknown calibrator type: {calibrator_type}")
     
-    # Load configuration
+    if not os.path.exists(param_dir):
+        raise FileNotFoundError(f"Parameter directory not found: {param_dir}")
+    
+    # Load configuration (try config.json, if not found use default config)
     config_path = os.path.join(param_dir, "config.json")
+    if os.path.exists(config_path):
     with open(config_path, 'r') as f:
         config_data = json.load(f)
     cfg = SimulationConfig(**config_data["config"])
+    else:
+        # Use default config if config.json not found
+        print(f"Warning: config.json not found in {param_dir}, using default config")
+        cfg = SimulationConfig()
+        cfg.data_folder = data_base
     
     # Load calibrated parameters
     param_path = os.path.join(param_dir, "calibrated_parameters.json")
+    if not os.path.exists(param_path):
+        raise FileNotFoundError(f"Calibrated parameters not found: {param_path}")
+    
     with open(param_path, 'r') as f:
         param_data = json.load(f)
     
@@ -1173,6 +1204,10 @@ def simulation_test(calibrator_type: str = "logit_head") -> None:
     
     # Set seed for reproducibility
     set_global_seed(cfg.seed)
+    
+    # Ensure data_folder is absolute path
+    if not os.path.isabs(cfg.data_folder):
+        cfg.data_folder = os.path.join(project_root, cfg.data_folder)
     
     # Load test data
     test_path = os.path.join(cfg.data_folder, "test_data.csv")
@@ -1229,7 +1264,9 @@ def simulation_test(calibrator_type: str = "logit_head") -> None:
     mem_info_test = compute_mem_info(received_test, rho=rho_test)
     
     # Run Monte Carlo simulation on test data
-    print(f"Running Monte Carlo simulation on test data with {cfg.k_runs} runs...")
+    # 统一使用k_runs=20，确保所有方法使用相同的配置
+    unified_k_runs = 20
+    print(f"Running Monte Carlo simulation on test data with {unified_k_runs} runs (unified config)...")
     test_start_idx = 0
     test_end_idx = T_test
     
@@ -1244,7 +1281,7 @@ def simulation_test(calibrator_type: str = "logit_head") -> None:
     initial_states = wearing_test[0, :]
     observed_rates = np.mean(wearing_test[test_start_idx:test_end_idx], axis=1)
     
-    for r in range(cfg.k_runs):
+    for r in range(unified_k_runs):
         # Set different seed for each run to ensure variability
         run_seed = cfg.seed + r
         set_global_seed(run_seed)
@@ -1298,7 +1335,7 @@ def simulation_test(calibrator_type: str = "logit_head") -> None:
         run_transition_fit.append(transition_fit)
         
         if (r + 1) % 5 == 0 or r == 0:
-            print(f"  Run {r+1}/{cfg.k_runs}: RMSE={rmse:.4f}, MAE={mae:.4f}")
+            print(f"  Run {r+1}/{unified_k_runs}: RMSE={rmse:.4f}, MAE={mae:.4f}")
     
     # Calculate statistics across runs
     run_rmse = np.array(run_rmse)
@@ -1309,17 +1346,17 @@ def simulation_test(calibrator_type: str = "logit_head") -> None:
     
     # Calculate means and confidence intervals
     rmse_mean = np.mean(run_rmse)
-    rmse_ci = 1.96 * np.std(run_rmse) / np.sqrt(cfg.k_runs)
+    rmse_ci = 1.96 * np.std(run_rmse) / np.sqrt(unified_k_runs)
     mae_mean = np.mean(run_mae)
-    mae_ci = 1.96 * np.std(run_mae) / np.sqrt(cfg.k_runs)
+    mae_ci = 1.96 * np.std(run_mae) / np.sqrt(unified_k_runs)
     brier_mean = np.mean(run_brier)
-    brier_ci = 1.96 * np.std(run_brier) / np.sqrt(cfg.k_runs)
+    brier_ci = 1.96 * np.std(run_brier) / np.sqrt(unified_k_runs)
     transition_fit_mean = np.mean(run_transition_fit)
-    transition_fit_ci = 1.96 * np.std(run_transition_fit) / np.sqrt(cfg.k_runs)
+    transition_fit_ci = 1.96 * np.std(run_transition_fit) / np.sqrt(unified_k_runs)
     
     # Calculate daily rate statistics
     predicted_daily_rates_mean = np.mean(daily_rate_runs, axis=0)
-    predicted_daily_rates_ci = 1.96 * np.std(daily_rate_runs, axis=0) / np.sqrt(cfg.k_runs)
+    predicted_daily_rates_ci = 1.96 * np.std(daily_rate_runs, axis=0) / np.sqrt(unified_k_runs)
     
     # Create test metrics dictionary
     test_metrics = {
@@ -1334,13 +1371,26 @@ def simulation_test(calibrator_type: str = "logit_head") -> None:
         "observed_daily_rates": observed_rates.tolist(),
         "predicted_daily_rates_mean": predicted_daily_rates_mean.tolist(),
         "predicted_daily_rates_CI95": predicted_daily_rates_ci.tolist(),
-        "k_runs": cfg.k_runs
+        "k_runs": unified_k_runs
     }
     
-    # Create output directory for test results with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    test_output_dir = os.path.join(cfg.data_folder, f"test_outputs_{calibrator_type}_{timestamp}")
+    # Create output directory for test results with fixed name (matching compare_specific_calibrators.py)
+    # Map calibrator_type to output directory name
+    output_dir_map = {
+        "logit_head": "test_outputs_logit_head",
+        "random_search": "test_outputs_random_search",
+        "bo_TuRBO": "test_outputs_bo_TuRBO",
+        "bo_TuRBO_llm_guide": "test_outputs_bo_TuRBO_llm_guide",
+        "bo_vanilla": "test_outputs_bo_vanilla",
+        "evo": "test_outputs_evo_GA",
+        "sbi": "test_outputs_sbi"
+    }
+    output_dir_name = output_dir_map.get(calibrator_type, f"test_outputs_{calibrator_type}")
+    test_output_dir = os.path.join(cfg.data_folder, output_dir_name)
     ensure_dir(test_output_dir)
+    
+    # Update config to reflect unified k_runs
+    cfg.k_runs = unified_k_runs
     
     # Save test results
     save_json(test_metrics, os.path.join(test_output_dir, "test_metrics.json"))
@@ -1529,8 +1579,13 @@ def sbi_simulation_test() -> None:
     """
     print(f"Starting SBI simulation test with double Monte Carlo approach...")
     
+    # Get project root directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(script_dir))
+    data_base = os.path.join(project_root, "data_fitting", "mask_adoption_data")
+    
     # SBI configuration
-    checkpoint_dir = "data_fitting/mask_adoption_data/outputs_SBICalibrator_K5"
+    checkpoint_dir = os.path.join(data_base, "outputs_SBICalibrator_K5")
     M = 50  # Number of posterior parameter samples
     K = 20  # Number of simulation runs per parameter set (same as other calibrators)
     
@@ -1553,6 +1608,12 @@ def sbi_simulation_test() -> None:
     
     # Set seed for reproducibility
     set_global_seed(cfg.seed)
+    
+    # Ensure data_folder is absolute path
+    if not os.path.isabs(cfg.data_folder):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(script_dir))
+        cfg.data_folder = os.path.join(project_root, cfg.data_folder)
     
     # Load test data (same as other calibrators)
     test_path = os.path.join(cfg.data_folder, "test_data.csv")
@@ -1773,7 +1834,7 @@ def sbi_simulation_test() -> None:
         "observed_daily_rates": observed_rates.tolist(),
         "predicted_daily_rates_mean": predicted_daily_rates_mean.tolist(),
         "predicted_daily_rates_CI95": predicted_daily_rates_ci.tolist(),
-        "k_runs": M * K,  # Total simulation runs
+        "k_runs": K,  # Number of runs per parameter sample (unified with other calibrators)
         "sbi_info": {
             "n_posterior_samples": M,
             "k_runs_per_sample": K,
@@ -1783,13 +1844,16 @@ def sbi_simulation_test() -> None:
         }
     }
     
-    # Create output directory for SBI test results with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    test_output_dir = os.path.join(cfg.data_folder, f"test_outputs_sbi_{timestamp}")
+    # Create output directory for SBI test results with fixed name (matching compare_specific_calibrators.py)
+    test_output_dir = os.path.join(cfg.data_folder, "test_outputs_sbi")
     ensure_dir(test_output_dir)
+    
+    # Update config to reflect unified k_runs
+    cfg.k_runs = K
     
     # Save test results
     save_json(test_metrics, os.path.join(test_output_dir, "test_metrics.json"))
+    save_json({"config": asdict(cfg)}, os.path.join(test_output_dir, "config.json"))
     
     # Save SBI-specific posterior information
     posterior_info = {

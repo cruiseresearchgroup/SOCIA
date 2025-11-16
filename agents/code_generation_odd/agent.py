@@ -771,8 +771,11 @@ class CodeGenerationAgent(BaseAgent):
                 data_path=data_path_str
             )
             
-            # Add mask adoption patch if task description contains mask-wearing
+            # Add task-specific patches
             task_description = task_spec.get('description', '').lower()
+            blueprint_str_lower = blueprint_str.lower() if blueprint_str else ""
+            
+            # Add mask adoption patch if task description contains mask-wearing
             if 'mask-wearing' in task_description:
                 self.logger.info("Adding mask adoption temporal holdout patch to prompt")
                 mask_adoption_patch = """
@@ -785,6 +788,49 @@ Temporal Holdout (STRICT):
 - If val_days is empty, raise a clear error: "No validation days available after temporal split."
 """
                 prompt += mask_adoption_patch
+            
+            # Add SBI patch for SUPPLY/Beer Game tasks
+            if ('supply' in task_description or 'beer game' in task_description or 
+                'supply chain' in task_description or 'supply chain' in blueprint_str_lower):
+                self.logger.info("Adding SBI (Simulation-Based Inference) patch for SUPPLY task to prompt")
+                sbi_patch = """
+
+Calibration Method (REQUIRED for SUPPLY/Beer Game task):
+- MUST use Simulation-Based Inference (SBI) with Neural Posterior Estimation (NPE)
+- Import required libraries: 
+  ```python
+  import signal
+  import traceback
+  import torch
+  import numpy as np
+  from sbi import utils
+  from sbi.inference import NPE, simulate_for_sbi
+  ```
+- Implement a calibrator class (e.g., SBICalibrator) that:
+  1. Defines parameter bounds using get_parameters_uniform_prior_min_max() or equivalent
+  2. Creates a BoxUniform prior: `prior = utils.torchutils.BoxUniform(low=low, high=high)`
+  3. Implements a simulation wrapper function that takes parameter tensors and returns simulated trajectories
+  4. Generates simulations using: `theta, x = simulate_for_sbi(simulation_wrapper, proposal=prior, num_simulations=1000, show_progress_bar=True)`
+  5. Removes NaN simulations: `theta, x = theta[~nan_mask], x[~nan_mask]`
+  6. Trains NPE: 
+     ```python
+     inference = NPE(prior=prior, show_progress_bars=True)
+     density_estimator = inference.append_simulations(theta, x).train()
+     posterior = inference.build_posterior(density_estimator)
+     ```
+  7. Samples from posterior: `posterior_samples = posterior.sample((num_samples,), x=x_observed)`
+  8. Uses posterior mean for evaluation: `optimized_params = posterior_samples.mean(dim=0).cpu().numpy()`
+- Configuration parameters:
+  - num_simulations: 1000 (number of simulations for SBI training)
+  - num_samples_posterior: 10000 (number of posterior samples)
+  - sampling_timeout: 60 (timeout for posterior sampling in seconds)
+- Handle timeouts and errors gracefully (use signal.alarm for timeout handling)
+- Evaluate metrics (Wasserstein distance, MMD, MSE) using the optimized parameters from posterior mean
+- Reference implementation: generative-simulations/libs/SUPPLY/env.py evaluate_simulator_code_using_sbi method
+
+IMPORTANT: Do NOT use RandomSearchCalibrator or LogitHeadCalibrator for SUPPLY tasks. Use SBI with NPE instead.
+"""
+                prompt += sbi_patch
         
         return prompt
     

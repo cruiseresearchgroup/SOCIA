@@ -81,8 +81,12 @@ def compare_specific_calibrators():
     print("🔍 比较指定的7种Calibrator测试结果")
     print("=" * 80)
     
-    # Define the specific test result directories
-    data_dir = "data_fitting/mask_adoption_data"
+    # Get project root directory (assuming script is in output/test_mask_patch)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(script_dir))
+    
+    # Define the specific test result directories (use absolute path)
+    data_dir = os.path.join(project_root, "data_fitting", "mask_adoption_data")
     specific_folders = {
         "BoCalibrator_TuRBO": "test_outputs_bo_TuRBO",
         "BoCalibrator_TuRBO_LLM_Guide": "test_outputs_bo_TuRBO_llm_guide", 
@@ -93,13 +97,16 @@ def compare_specific_calibrators():
         "SBI": "test_outputs_sbi"
     }
     
-    # Load metrics for each calibrator
+    # Load metrics and configs for each calibrator
     all_metrics = {}
     calibrator_files = {}
+    all_configs = {}
+    all_observed_rates = {}
     
     for calibrator_name, folder_name in specific_folders.items():
         test_dir = os.path.join(data_dir, folder_name)
         metrics_file = os.path.join(test_dir, "test_metrics.json")
+        config_file = os.path.join(test_dir, "config.json")
         
         if os.path.exists(metrics_file):
             print(f"✅ 找到 {calibrator_name}: {metrics_file}")
@@ -107,6 +114,16 @@ def compare_specific_calibrators():
             if metrics:
                 all_metrics[calibrator_name] = extract_metric_values(metrics)
                 calibrator_files[calibrator_name] = metrics_file
+                
+                # Extract observed daily rates for test window validation
+                if "observed_daily_rates" in metrics:
+                    all_observed_rates[calibrator_name] = metrics["observed_daily_rates"]
+                
+                # Load config if available
+                if os.path.exists(config_file):
+                    config = load_metrics(config_file)
+                    if config:
+                        all_configs[calibrator_name] = config.get("config", {})
         else:
             print(f"❌ 未找到 {calibrator_name}: {metrics_file}")
     
@@ -115,6 +132,116 @@ def compare_specific_calibrators():
         return
     
     print(f"\n✅ 成功加载 {len(all_metrics)} 个calibrator结果")
+    
+    # ========== 验证数据集和测试窗口对齐 ==========
+    print("\n" + "=" * 80)
+    print("🔍 验证数据集和测试窗口对齐")
+    print("=" * 80)
+    
+    # 1. 检查测试窗口是否对齐（通过observed_daily_rates）
+    if all_observed_rates:
+        reference_rates = None
+        reference_name = None
+        test_window_aligned = True
+        
+        for name, rates in all_observed_rates.items():
+            if reference_rates is None:
+                reference_rates = rates
+                reference_name = name
+                print(f"✅ 参考测试窗口 ({reference_name}): {len(rates)} 天")
+            else:
+                if rates == reference_rates:
+                    print(f"✅ {name}: 测试窗口对齐 ({len(rates)} 天)")
+                else:
+                    print(f"❌ {name}: 测试窗口不一致!")
+                    print(f"   参考: {reference_rates}")
+                    print(f"   当前: {rates}")
+                    test_window_aligned = False
+        
+        if test_window_aligned:
+            print(f"\n✅ 所有方法的测试窗口已对齐: {len(reference_rates)} 天")
+            print(f"   测试窗口观测值: {reference_rates}")
+        else:
+            print(f"\n⚠️  警告: 部分方法的测试窗口不一致，比较结果可能不准确!")
+    
+    # 2. 检查数据集是否一致
+    if all_configs:
+        reference_data_folder = None
+        reference_name = None
+        dataset_aligned = True
+        
+        for name, config in all_configs.items():
+            data_folder = config.get("data_folder", "未知")
+            if reference_data_folder is None:
+                reference_data_folder = data_folder
+                reference_name = name
+                print(f"\n✅ 参考数据集 ({reference_name}): {data_folder}")
+            else:
+                if data_folder == reference_data_folder:
+                    print(f"✅ {name}: 数据集一致 ({data_folder})")
+                else:
+                    print(f"❌ {name}: 数据集不一致! ({data_folder} vs {reference_data_folder})")
+                    dataset_aligned = False
+        
+        if dataset_aligned:
+            print(f"\n✅ 所有方法使用相同的数据集: {reference_data_folder}")
+        else:
+            print(f"\n⚠️  警告: 部分方法使用了不同的数据集，比较结果可能不准确!")
+    
+    # 3. 检查关键配置参数
+    if all_configs:
+        print(f"\n📋 关键配置参数检查:")
+        print("-" * 70)
+        
+        # 检查val_split_ratio
+        val_split_ratios = {}
+        for name, config in all_configs.items():
+            val_split = config.get("val_split_ratio", "未知")
+            val_split_ratios[name] = val_split
+        
+        unique_ratios = set(val_split_ratios.values())
+        if len(unique_ratios) == 1:
+            print(f"✅ val_split_ratio: 所有方法一致 = {list(unique_ratios)[0]}")
+        else:
+            print(f"⚠️  val_split_ratio: 不一致")
+            for name, ratio in val_split_ratios.items():
+                print(f"   {name}: {ratio}")
+        
+        # 检查seed
+        seeds = {}
+        for name, config in all_configs.items():
+            seed = config.get("seed", "未知")
+            seeds[name] = seed
+        
+        unique_seeds = set(seeds.values())
+        if len(unique_seeds) == 1:
+            print(f"✅ seed: 所有方法一致 = {list(unique_seeds)[0]}")
+        else:
+            print(f"⚠️  seed: 不一致")
+            for name, seed in seeds.items():
+                print(f"   {name}: {seed}")
+        
+        # 检查k_runs（注意：SBI可能使用不同的k_runs）
+        k_runs_info = {}
+        for name in all_metrics:
+            # Try to get k_runs from metrics file
+            metrics_file = calibrator_files[name]
+            metrics = load_metrics(metrics_file)
+            if metrics and "k_runs" in metrics:
+                k_runs_info[name] = metrics["k_runs"]
+            elif name in all_configs and "k_runs" in all_configs[name]:
+                k_runs_info[name] = all_configs[name]["k_runs"]
+        
+        if k_runs_info:
+            unique_k_runs = set(k_runs_info.values())
+            if len(unique_k_runs) == 1:
+                print(f"✅ k_runs: 所有方法一致 = {list(unique_k_runs)[0]}")
+            else:
+                print(f"⚠️  k_runs: 不一致 (可能影响结果可靠性)")
+                for name, k_runs in k_runs_info.items():
+                    print(f"   {name}: {k_runs}")
+    
+    print("\n" + "=" * 80)
     
     print("\n" + "=" * 80)
     print("🏆 7种Calibrator性能全面比较分析")

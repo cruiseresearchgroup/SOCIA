@@ -1,0 +1,273 @@
+{
+  "summary": "The code runs but diverges significantly from the specified Mask Adoption Dynamics Simulation. It lacks many required entities, behaviors, parameters, and metrics; misuses parameter names; does not implement validation criteria; and has performance and reproducibility issues. Recent changes improved some structure and added a policy counterfactual effect estimate, but introduced a performance regression (O(N*L) visitor sampling) and did not address core alignment gaps. The next iteration should prioritize aligning parameters/entities/metrics, adding multiple retailers and dynamic supply constraints, implementing enforcement penalties/denials with violation tracking, fixing reproducibility, and adding validation checks.",
+  "critical_issues": [
+    {
+      "issue": "Parameter names and usage do not match the spec (e.g., seed vs random_seed, simulation_duration_days vs time_horizon_days).",
+      "impact": "Breaks reproducibility and external configuration expectations; simulations may not be comparable or repeatable with the given config.",
+      "solution": "Map spec parameter names to internal fields. Use params.get('seed', params.get('random_seed', 42)). Use simulation_duration_days, mandate_effect_size, risk_signal_period_days, etc.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing entities and behaviors per spec (Government, Media, multiple Retailers, Person attributes like sex, occupation, essential_worker, health_risk_level; behaviors like fatigue/habit decay and explicit policy compliance; subsidies and distribution).",
+      "impact": "Invalidates the intended dynamics (policies, social influence, and supply effects). Metrics that depend on these behaviors cannot be computed reliably.",
+      "solution": "Extend classes to include the missing attributes/behaviors. Add Government with subsidies and distribution, Media with targeting/frequency, multiple retailers with restock schedule and supply caps, fatigue and adoption decay without exposure.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Metrics required by the spec are missing.",
+      "impact": "It\u2019s impossible to evaluate the simulation against the specified metrics (time_to_50_percent_adoption, sustained adoption, compliance by location type, stockout rate, inequality, violations per capita, cost efficiency).",
+      "solution": "Track necessary daily aggregates during the step() loop and compute metrics in run() post-processing.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Enforcement doesn\u2019t deny entry or fine; violations are not tracked.",
+      "impact": "Policy effects are misrepresented; policy_monotonicity_sanity and policy_violations_per_capita cannot be validated.",
+      "solution": "In Location.enforce_mask_policy, deny entry and/or apply penalty_amount; keep per-person violation counts; add cost tracking.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Market availability is static and not tied to inventory.",
+      "impact": "Supply constraints do not influence adoption decisions as required, breaking extreme_case_checks and stockout rate metrics.",
+      "solution": "Instantiate multiple retailers, compute availability from current inventories (fraction of retailers with stock), and attempt purchases at stocked retailers only.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Performance regression in visitor sampling (O(N*L) per day).",
+      "impact": "For population_size=5000 and location_count=200, this can be slow or intractable for 120 days.",
+      "solution": "Pre-sample visits once per person per day and allocate to locations (O(N) + O(visits)), then enforce per location using admitted visitors.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Risk signal ignores risk_signal_period_days and risk_signal_mode; hard-coded 7-day sinusoid with decay.",
+      "impact": "Prevents controlled experiments and violates the spec\u2019s exogenous risk signal configuration.",
+      "solution": "Parameterize period and mode; implement exogenous sinusoid using risk_signal_period_days and risk_signal_amplitude; remove unrequested decay unless parameterized.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Household assignment uses O(N*HH) lookup.",
+      "impact": "Slows initialization significantly for larger populations.",
+      "solution": "Build a direct person_id -> household_id mapping during household construction.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Validation criteria are not implemented.",
+      "impact": "No automatic checks for bounded adoption, inventory non-negativity, S-curve behavior, policy monotonicity, extreme cases, or convergence stability.",
+      "solution": "Add a validation block after run() to compute and report these checks.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Supply and purchasing dynamics",
+      "current_approach": "Single retailer; availability passed as a static parameter; purchases not scheduled; no stockout rate tracking.",
+      "suggested_approach": "Create retailer_count retailers with restock_interval_days and supply_capacity_per_day; compute availability dynamically; track retailer-day stockouts.",
+      "expected_benefit": "Realistic coupling of supply constraints to adoption; enables extreme_case_checks and stockout_rate metric."
+    },
+    {
+      "aspect": "Policy enforcement",
+      "current_approach": "Policy increases compliance propensity; no fines or denial of entry; no violation tracking.",
+      "suggested_approach": "Implement deny entry or fines based on enforcement_strictness and penalty_amount; maintain violations per person; record public cost.",
+      "expected_benefit": "More realistic policy effects; enables policy_violations_per_capita and cost metrics; supports policy_monotonicity_sanity."
+    },
+    {
+      "aspect": "Social influence and fatigue",
+      "current_approach": "Peer attitudes update; basic habit effect when wearing; no fatigue rate, no adoption decay without exposure.",
+      "suggested_approach": "Add mask_fatigue and adoption_decay_without_exposure decrementing baseline compliance/attitude without positive exposure; incorporate peer and media weights from params.",
+      "expected_benefit": "More faithful long-run dynamics and convergence_stability validation."
+    },
+    {
+      "aspect": "Risk signal modeling",
+      "current_approach": "Hard-coded weekly sinusoid with decay.",
+      "suggested_approach": "Honor risk_signal_mode and risk_signal_period_days; for exogenous mode use A*sin(2pi*t/period) + baseline; optional noise via observation_error_std.",
+      "expected_benefit": "Better control over exogenous shocks; aligns with spec parameters."
+    },
+    {
+      "aspect": "Metrics",
+      "current_approach": "Only adoption/churn/enforcement count are tracked.",
+      "suggested_approach": "Compute time_to_50_percent_adoption, peak_adoption(day), sustained_adoption_last_30_days, compliance_by_location_type, stockout_rate, inequality_in_adoption (e.g., Gini by SES), policy_violations_per_capita, and cost_per_percentage_point_adoption.",
+      "expected_benefit": "Full coverage of evaluation_metrics and validation_criteria."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Map spec parameters (seed, simulation_duration_days, risk_signal_period_days) and maintain backward compatibility.",
+      "reason": "Fix reproducibility and parameter alignment with the task spec.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Replace single Retailer with a list of retailers and implement restock_interval_days and supply_capacity_per_day.",
+      "reason": "Implement supply constraints, stockout dynamics, and compliance with spec.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute market_availability from retailers\u2019 inventory and route purchases to a stocked retailer; apply subsidy_amount to effective price and track public subsidy spend.",
+      "reason": "Couple adoption to supply and enable cost metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement deny_entry_or_apply_penalty in Location.enforce_mask_policy and track violations, fines, and compliance by location type.",
+      "reason": "Realistic enforcement and necessary metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Fix visitor sampling performance: pre-sample visits per person and assign to locations (avoid O(N*L)).",
+      "reason": "Performance scalability for N=5000 and L=200.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add household person_id mapping to avoid O(N*HH) lookup.",
+      "reason": "Speed up initialization significantly.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement validation checks post-run and add them to the output.",
+      "reason": "Satisfy validation_criteria and catch regressions.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Post-process metrics to compute time_to_50_percent_adoption, peak_adoption, sustained_adoption_last_30_days, inequality_in_adoption (Gini), stockout_rate, policy_violations_per_capita, and cost_per_percentage_point_adoption.",
+      "reason": "Provide required evaluation metrics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use spec\u2019s risk_signal_period_days and risk_signal_mode in _risk_signal.",
+      "reason": "Align risk dynamics with spec.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Ensure counterfactual uses the same 'seed' and not only 'random_seed'.",
+      "reason": "Guarantee reproducibility in policy effect comparison.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "inequality_in_adoption",
+      "current_gap": "No SES-stratified adoption tracking.",
+      "suggestion": "Compute adoption by SES quintiles and report Gini; calibrate peer_influence and subsidy targeting_bias to reproduce observed disparities."
+    },
+    {
+      "metric": "stockout_rate",
+      "current_gap": "Single retailer, no per-day stockouts tracked.",
+      "suggestion": "Track retailer-day out-of-stock fraction; calibrate supply_capacity_per_day and restock_interval_days to match observed mask supply disruptions."
+    },
+    {
+      "metric": "policy_violations_per_capita",
+      "current_gap": "No violation tracking.",
+      "suggestion": "Log non-compliant entries (caught or denied) per visit; compare with enforcement data or proxies to calibrate enforcement_strictness."
+    },
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "Risk and media effects are not parameter-calibrated.",
+      "suggestion": "Tie exogenous risk signal to case or hospitalization rates; tune message_effectiveness and peer_influence_weight to match empirical S-curve diffusion speeds."
+    },
+    {
+      "metric": "cost_per_percentage_point_adoption",
+      "current_gap": "No cost tracking.",
+      "suggestion": "Record subsidies paid and enforcement costs; divide by adoption uplift against counterfactual to compute marginal cost effectiveness."
+    }
+  ],
+  "prioritized_actions": [
+    "Map seed and simulation_duration_days parameters; fix reproducibility (baseline and counterfactual).",
+    "Implement multiple retailers with restock intervals and supply caps; compute availability dynamically; track stockout_rate.",
+    "Implement enforcement penalties/denials and violations tracking; compute policy_violations_per_capita and compliance_by_location_type.",
+    "Add required metrics post-processing (time_to_50, peak, sustained last 30, inequality, cost per pp).",
+    "Fix performance by pre-sampling visits and household mapping.",
+    "Parameterize risk signal (risk_signal_period_days, mode) and add fatigue/adoption decay dynamics.",
+    "Add validation checks (bounded adoption, inventory non-negative, S-curve, monotonicity, extremes, convergence)."
+  ],
+  "additional_comments": "Keep the direct main() call to satisfy sandbox requirements. Consider adding configuration sanity checks with warnings when unsupported spec parameters are provided. Also, maintain backward compatibility with prior param names but prefer the spec\u2019s names and document the mapping.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "self.rng = random.Random(int(params.get(\"random_seed\", 42)))\nself.time_horizon_days = int(params.get(\"time_horizon_days\", 60))",
+      "after": "self.rng = random.Random(int(params.get(\"seed\", params.get(\"random_seed\", 42))))\nself.time_horizon_days = int(params.get(\"simulation_duration_days\", params.get(\"time_horizon_days\", 60)))\nself.risk_signal_period_days = int(params.get(\"risk_signal_period_days\", 30))\nself.risk_signal_mode = str(params.get(\"risk_signal_mode\", \"exogenous\"))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.retailer = Retailer(\n    id=0,\n    inventory_level=int(params.get(\"initial_inventory\", 1000)),\n    restock_rate=self.retailer_restock_rate,\n    price_per_mask=self.mask_price,\n    rationing_policy=int(params.get(\"rationing_policy\", 2)),\n)",
+      "after": "self.retailers: List[Retailer] = []\nretailer_count = int(params.get(\"retailer_count\", 50))\ninit_inv = int(params.get(\"initial_inventory\", 1000))\nfor rid in range(retailer_count):\n    self.retailers.append(\n        Retailer(\n            id=rid,\n            inventory_level=init_inv,\n            restock_rate=float(params.get(\"restock_interval_days\", 3)),  # see restock scheduler below\n            price_per_mask=float(params.get(\"mask_cost\", 2.0)),\n            rationing_policy=int(params.get(\"rationing_policy\", 2)),\n        )\n    )\nself.restock_interval_days = int(params.get(\"restock_interval_days\", 3))\nself.supply_capacity_per_day = int(params.get(\"supply_capacity_per_day\", 3000))\nself.subsidy_amount = float(params.get(\"subsidy_amount\", 0.0))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def _risk_signal(self, day: int) -> float:\n    # Simple decaying sinusoid around initial risk\n    amp = self.risk_signal_amplitude * math.exp(-self.risk_signal_decay * day)\n    return clamp01(self.risk_signal_initial + amp * math.sin(day / 7.0 * 2 * math.pi))",
+      "after": "def _risk_signal(self, day: int) -> float:\n    if self.risk_signal_mode == \"exogenous\":\n        period = max(1, self.risk_signal_period_days)\n        return clamp01(self.risk_signal_initial + self.risk_signal_amplitude * math.sin(2.0 * math.pi * day / period))\n    # default fallback\n    return clamp01(self.risk_signal_initial)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.retailer.adjust_prices()\nself.retailer.restock()",
+      "after": "# Restock retailers on schedule and cap by supply capacity\nif day % self.restock_interval_days == 0:\n    remaining_capacity = self.supply_capacity_per_day\n    for r in self.retailers:\n        r.adjust_prices()\n        if remaining_capacity <= 0:\n            continue\n        to_add = min(remaining_capacity, max(0, int(params.get(\"restock_lot_size\", 2000)) - r.inventory_level))\n        r.inventory_level += to_add\n        remaining_capacity -= to_add",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "if person.masks_inventory <= 0:\n    _, shortage = person.purchase_masks(self.retailer, max_purchase=2)\n    if shortage:\n        shortage_incidents += 1",
+      "after": "if person.masks_inventory <= 0:\n    stocked = [r for r in self.retailers if r.inventory_level > 0]\n    if stocked:\n        r = self.rng.choice(stocked)\n        # apply subsidy to effective price\n        effective_price = max(0.0, r.price_per_mask - self.subsidy_amount)\n        purchased, shortage = r.sell_masks(1)\n        person.masks_inventory += purchased\n        if purchased > 0 and self.subsidy_amount > 0:\n            self.public_cost_subsidies += self.subsidy_amount * purchased\n    else:\n        shortage = True\n    if shortage:\n        shortage_incidents += 1",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def enforce_mask_policy(self, visitor_persons: List[Person], authority: \"HealthAuthority\", rng: random.Random) -> int:\n    if self.mask_policy != \"mandate\" or self.enforcement_level <= 0.0:\n        return 0\n    actions = 0\n    inspect_prob = clamp01(self.enforcement_level * authority.enforcement_intensity)\n    for p in visitor_persons:\n        if not p.wearing_mask and rng.random() < inspect_prob:\n            actions += 1\n            p.baseline_compliance_propensity = clamp01(p.baseline_compliance_propensity + 0.05)\n            p.risk_perception = clamp01(p.risk_perception + 0.02)\n    return actions",
+      "after": "def enforce_mask_policy(self, visitor_persons: List[Person], authority: \"HealthAuthority\", rng: random.Random) -> Tuple[int, int]:\n    if self.mask_policy != \"mandate\" or self.enforcement_level <= 0.0:\n        return 0, 0\n    actions = 0\n    denials = 0\n    inspect_prob = clamp01(self.enforcement_level * authority.enforcement_intensity)\n    for p in visitor_persons:\n        if not p.wearing_mask:\n            # potential denial or fine\n            if rng.random() < inspect_prob:\n                actions += 1\n                p.violations = getattr(p, \"violations\", 0) + 1\n                authority.collected_fines += authority.fine_amount\n                # optional: mark denied entry with some probability based on strictness\n                if rng.random() < self.enforcement_level:\n                    denials += 1\n                p.baseline_compliance_propensity = clamp01(p.baseline_compliance_propensity + 0.05)\n                p.risk_perception = clamp01(p.risk_perception + 0.02)\n    return actions, denials",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "for loc in self.locations:\n    # sample visitors proportional to foot traffic\n    visitors: List[Person] = []\n    for person in self.people.values():\n        if person.daily_mobility_profile.get(loc.type, 0.0) > 0 and self.rng.random() < (0.05 * loc.foot_traffic_rate):\n            visitors.append(person)\n            if len(visitors) >= loc.capacity:\n                break\n    if visitors:\n        enforcement_actions += loc.enforce_mask_policy(visitors, self.authority, self.rng)",
+      "after": "# Pre-sample visits per person, then allocate to locations\nvisitors_by_type: Dict[str, List[Person]] = {t: [] for t in {loc.type for loc in self.locations}}\nfor person in self.people.values():\n    for t, prob in person.daily_mobility_profile.items():\n        if t != \"home\" and self.rng.random() < prob:\n            visitors_by_type.setdefault(t, []).append(person)\n# Enforce per location using admitted subsets\nfor loc in self.locations:\n    v_list = visitors_by_type.get(loc.type, [])\n    if not v_list:\n        continue\n    admitted = v_list[: loc.capacity]\n    actions, denials = loc.enforce_mask_policy(admitted, self.authority, self.rng)\n    self.metrics[\"enforcement_actions_count\"] += actions\n    self.metrics.setdefault(\"denials_count\", 0)\n    self.metrics[\"denials_count\"] += denials\n    # track compliance by location type\n    comp_key = f\"comp_{loc.type}\"\n    worn = sum(1 for p in admitted if p.wearing_mask)\n    self.metrics.setdefault(comp_key, {\"wearing\": 0, \"visits\": 0})\n    self.metrics[comp_key][\"wearing\"] += worn\n    self.metrics[comp_key][\"visits\"] += len(admitted)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "hid = next(h for h, hh in self.households.items() if pid in hh.member_ids)",
+      "after": "# Build mapping once during household creation\n# self.person_to_household: Dict[int, int]\nhid = self.person_to_household[pid]",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "cf_params['mandate_start_day'] = int(cf_params.get('time_horizon_days', sim.time_horizon_days)) + 1000\ncf_params['random_seed'] = int(params.get('random_seed', 42))",
+      "after": "cf_params['mandate_start_day'] = int(cf_params.get('simulation_duration_days', sim.time_horizon_days)) + 1000\ncf_params['seed'] = int(params.get('seed', params.get('random_seed', 42)))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "return {\n    \"metrics\": self.metrics,\n    \"retailer_inventory_history\": self.retailer_inventory_history,\n    \"time_horizon_days\": self.time_horizon_days,\n    \"population_size\": self.population_size,\n}",
+      "after": "# Post-process metrics\nseries = self.metrics[\"adoption_rate_over_time\"]\nself.metrics[\"time_to_50_percent_adoption\"] = next((i for i, v in enumerate(series) if v >= 0.5), None)\nself.metrics[\"peak_adoption\"] = {\"value\": max(series) if series else 0.0, \"day\": series.index(max(series)) if series else None}\nlast_window = series[-30:] if len(series) >= 30 else series\nself.metrics[\"sustained_adoption_last_30_days\"] = sum(last_window) / max(1, len(last_window))\n# stockout_rate across retailers\nstockout_days = getattr(self, \"stockout_days\", 0)\nretailer_count = len(getattr(self, \"retailers\", [])) or 1\nself.metrics[\"stockout_rate\"] = stockout_days / max(1, retailer_count * self.time_horizon_days)\n# compliance_by_location_type\nself.metrics[\"compliance_by_location_type\"] = {\n    t: (v[\"wearing\"] / max(1, v[\"visits\"])) for t, v in ((k.replace(\"comp_\", \"\"), val) for k, val in self.metrics.items() if k.startswith(\"comp_\"))\n}\n# inequality by SES (Gini)\nses = [p.socioeconomic_status for p in self.people.values()]\nwear = [1.0 if p.wearing_mask else 0.0 for p in self.people.values()]\nself.metrics[\"inequality_in_adoption\"] = self._gini_by_attribute(ses, wear)\n# policy violations per capita\nviolations = sum(getattr(p, \"violations\", 0) for p in self.people.values()) / max(1, len(self.people))\nself.metrics[\"policy_violations_per_capita\"] = violations\n# cost per percentage point adoption (subsidies only here)\nbase = getattr(self, \"baseline_cf_adoption\", None)\nif base is not None:\n    uplift = (sum(series)/max(1, len(series))) - base\n    self.metrics[\"cost_per_percentage_point_adoption\"] = (self.public_cost_subsidies / max(1e-9, uplift*100.0)) if uplift > 0 else None\nreturn {\n    \"metrics\": self.metrics,\n    \"time_horizon_days\": self.time_horizon_days,\n    \"population_size\": self.population_size,\n}",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The refactor improved structure (cleaned redundant passes/docstrings, added a simple policy effect comparison, and better-initialized internal state), but it still diverges from the spec and introduced a performance regression in visitor sampling.",
+    "positive_impacts": [
+      "Cleaner and more coherent step loop with combined media/government guidance.",
+      "Policy effect size via a simple counterfactual run.",
+      "More consistent metrics recording for adoption/churn and inventory history."
+    ],
+    "negative_impacts": [
+      "Reintroduced O(N*L) enforcement visitor sampling, which will not scale.",
+      "Still uses non-spec parameter names, breaking reproducibility with the provided 'seed'.",
+      "Risk signal remains hard-coded (7-day period, decay) and ignores spec.",
+      "No metrics or validations added despite structural changes."
+    ],
+    "suggestions": [
+      "Restore efficient visitor sampling (pre-sample per person, then allocate to locations).",
+      "Adopt spec parameter keys (seed, simulation_duration_days, risk_signal_period_days, etc.).",
+      "Add enforcement penalties/denials and violations tracking to support metrics.",
+      "Implement multiple retailers with restock scheduling and stockout tracking.",
+      "Add validation checks and full metrics post-processing."
+    ]
+  }
+}

@@ -1,0 +1,254 @@
+{
+  "summary": "The simulation scaffolding is solid but diverges from the specified Mask Adoption Dynamics Simulation in multiple critical areas. The most urgent fixes are: aligning entities/metrics with the spec (Retailer, Authority with free distribution, InformationChannel), repairing a critical bug in validate_replicate_consistency (stray 'mean'), safely handling a possibly null mandate_end_day, and implementing required metrics and validations. Adding free mask distribution, policy cost accounting, compliance in mandated locations, subgroup adoption gap, and masks purchased per capita will substantially improve fidelity. Several recent changes improved robustness (freeze_adoption, enforcement capacity, corrected new adopter calculation), but the empty main(), lack of spec validations, and spec misalignments block acceptance.",
+  "critical_issues": [
+    {
+      "issue": "Spec misalignment: missing/renamed entities (Retailer, Authority with free_mask_distribution_rate, InformationChannel) and required behaviors (free_mask_distribution, host_contacts). Required metrics are missing or misnamed.",
+      "impact": "Prevents evaluating the simulation against the required metrics and validation criteria; stockouts, policy_cost, and subgroup disparities are not measured as specified.",
+      "solution": "Reintroduce a minimal Retailer class with stock/price/restock/rationing; extend PolicyAuthority to include free_mask_distribution_rate, fine_amount, enforcement_budget/cost model, campaign_intensity; introduce InformationChannel with reliability/misinformation_rate. Compute exact metric names: adoption_rate_over_time, average_adoption_rate, sustained_adoption_last_14_days, compliance_in_mandated_locations, subgroup_adoption_gap_income, masks_purchased_per_capita, stockout_days, policy_cost.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Critical runtime bug in validate_replicate_consistency: stray 'mean' token at function end; function does not return.",
+      "impact": "Calling this validation raises a NameError and halts validation/evaluation.",
+      "solution": "Finish the function by computing mean, pstdev, coefficient of variation, compare to threshold, and return tuple.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Unsafe handling of mandate_end_day; the spec allows null (None) but the code casts to int.",
+      "impact": "TypeError when mandate_end_day is None. Also issue_mandates assumes integer bounds.",
+      "solution": "Make mandate_end_day Optional[int], accept None for open-ended mandates in issue_mandates.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Required validations are missing or differ from specification (adoption_bounds, convergence_last_14_days, mandate_effect_sanity_check, nonnegative_inventory, reproducibility_fixed_seed).",
+      "impact": "Cannot verify basic correctness and face-validity of outputs against spec.",
+      "solution": "Implement each specified validation exactly: bounds check; count of small changes among last 14 days; mandate effect delta >= 5pp within 14 days; inventory non-negativity for agents and retailers; reproducibility by exact time series match for fixed seed.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No policy cost modeling (enforcement spend, campaigns, fines) and no free mask distribution behavior.",
+      "impact": "policy_cost metric is missing; cannot simulate mitigation via free masks or evaluate budget implications.",
+      "solution": "Track enforcement incidents cost (per-incident or budget draw), campaign costs tied to campaign_intensity, fines collected, and compute policy_cost = enforcement + campaigns - fines. Implement daily free mask distribution to eligible persons, debiting a retailer/supply stock.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Retail supply replaced by a single SupplyChain; spec requires Retailer with stockout_days metric defined as retailer-days with zero stock.",
+      "impact": "stockout_days cannot be computed as spec; masks_purchased_per_capita is opaque without retailer linkage.",
+      "solution": "Add at least one Retailer entity (or a small set) and route buy flows through them. Track per-retailer stockouts, purchases, and prices.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Metrics naming mismatch (adoption_rate vs adoption_rate_over_time) and missing subgroup_adoption_gap_income.",
+      "impact": "Automated evaluation will fail to find required metrics.",
+      "solution": "Rename/alias keys in results; compute subgroup_adoption_gap_income (top quintile minus bottom quintile) and masks_purchased_per_capita = total_purchased / population_size.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "main() is empty; CLI is inert; although a direct main() call is required, doing nothing reduces usability.",
+      "impact": "Developers/users cannot run a quick demonstration or validation from the CLI.",
+      "solution": "Implement a minimal demo in main() that runs default params for a few days and prints key metrics, while preserving the direct call at end-of-file.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Retail supply chain and stockouts",
+      "current_approach": "Single SupplyChain with total stock and price adjustment; no retailers.",
+      "suggested_approach": "Introduce Retailer(s) with stock, price, daily_restock_rate, rationing_policy. Route Person.purchase_masks through a randomly selected retailer in their region; compute stockout_days as sum over retailers of days with stock == 0.",
+      "expected_benefit": "Enables accurate stockout_days metric, price rationing, and heterogeneity across regions/stores."
+    },
+    {
+      "aspect": "Policy authority levers and costs",
+      "current_approach": "PolicyAuthority with mandates and enforcement_level; no cost accounting or free distribution.",
+      "suggested_approach": "Add free_mask_distribution_rate, fine_amount (alias to penalty), enforcement_cost_per_incident, campaign_intensity and campaign_cost_per_day. Track fines_collected, enforcement_cost, campaign_cost to compute policy_cost.",
+      "expected_benefit": "Quantifies the budgetary trade-offs and enables policy optimization scenarios."
+    },
+    {
+      "aspect": "Information channels and misinformation",
+      "current_approach": "MediaChannel with bias and misinformation_probability; single channel aggregated.",
+      "suggested_approach": "Implement InformationChannel with reach_fraction, message_type, reliability, misinformation_rate per spec; allow multiple channels (e.g., government, social media) with different reliabilities.",
+      "expected_benefit": "Richer, spec-aligned information dynamics; supports experiments with misinformation campaigns."
+    },
+    {
+      "aspect": "Mandate scope and compliance measurement",
+      "current_approach": "Venue policy coverage flag; overall compliance rate and under mandate average tracked.",
+      "suggested_approach": "Compute compliance_in_mandated_locations: among visits to locations where mask_requirement is True, fraction wearing masks.",
+      "expected_benefit": "Directly measures the behavioral response in mandated settings as required."
+    },
+    {
+      "aspect": "Risk and prevalence signals",
+      "current_approach": "Endogenous prevalence based on previous-day adoption; optional external signal.",
+      "suggested_approach": "Add optional prevalence_series param; if provided, use it per day; otherwise fallback to endogenous. Utilize baseline_prevalence at t=0.",
+      "expected_benefit": "Better realism and closer calibration to real epidemic curves."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Make PolicyAuthority.mandate_end_day Optional[int] and update issue_mandates to handle None (open-ended). Update __init__ to not int-cast None.",
+      "reason": "Prevents TypeError when spec sets mandate_end_day to null.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Fix validate_replicate_consistency by removing stray 'mean' and returning (ok, msg) with computed CV.",
+      "reason": "Restores critical validation function and avoids runtime error.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add metrics with spec names in results: adoption_rate_over_time (alias of series), average_adoption_rate, sustained_adoption_last_14_days, compliance_in_mandated_locations, subgroup_adoption_gap_income, masks_purchased_per_capita, stockout_days, policy_cost. Keep backward-compatible keys.",
+      "reason": "Aligns outputs to specification and evaluation pipeline.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement free mask distribution step in Simulation.step before purchases; track free_masks_distributed and subtract from supply/retailer stock.",
+      "reason": "Implements required behavior; improves access equity and adoption under constraints.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add a minimal Retailer class and route Person.purchase_masks through it; compute stockout_days and masks_purchased_per_capita. If time-constrained, wrap SupplyChain as a single Retailer adapter.",
+      "reason": "Enables correct purchase_and_supply interaction and spec-aligned stockout metric.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add validations: adoption_bounds, convergence_last_14_days, mandate_effect_sanity_check, nonnegative_inventory, reproducibility_fixed_seed. Provide a run_validations utility to invoke them.",
+      "reason": "Meets specification's validation criteria and improves confidence in results.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add parameter aliases: average_degree -> avg_degree; enforcement_probability -> enforcement_level; fine_amount -> penalty_amount (already done).",
+      "reason": "Increases compatibility with provided parameter sets.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute compliance_in_mandated_locations per day: track visits/compliance only in locations with policy_requires_mask=True; expose as series and average metric.",
+      "reason": "Spec requires this metric explicitly.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement adoption_rate_over_time naming and adjust evaluation methods accordingly. Keep old keys for compatibility but prefer spec names.",
+      "reason": "Prevents evaluator from failing on missing key names.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Optional: make main() run a small default simulation and print JSON summary; retain direct main() call at EOF.",
+      "reason": "Improves usability without breaking the sandbox requirement.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "Dynamics driven mostly by generic weights and habit; lacks calibration to prevalence and policy timing from real data.",
+      "suggestion": "Use prevalence_series (if available) to drive risk perception; calibrate influence weights and habit rates to match observed adoption curves via simple grid search or gradient-free optimization (e.g., CMA-ES) minimizing RMSE to observed series."
+    },
+    {
+      "metric": "subgroup_adoption_gap_income",
+      "current_gap": "Not computed; adoption likely correlated with income only via affordability.",
+      "suggestion": "Introduce access_inequality_index by reducing procurement_access_fraction for low-income quintiles and increasing free distribution targeting the bottom quintile; calibrate to observed disparities."
+    },
+    {
+      "metric": "policy_cost",
+      "current_gap": "Not computed or calibrated.",
+      "suggestion": "Set enforcement_cost_per_incident and campaign_cost_per_day based on published estimates; collect fines_collected via fine_amount and enforcement actions; validate magnitude against real budgets where available."
+    },
+    {
+      "metric": "stockout_days",
+      "current_gap": "Supplier-level stockouts, not retailer-days; may under/overstate shortages.",
+      "suggestion": "Track per-retailer stock daily and compute stockout_days as sum over retailers and days with stock == 0; calibrate restock rate and price elasticity to observed shortages."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix validate_replicate_consistency by removing stray token and returning computed result.",
+    "Make mandate_end_day Optional[int] and handle None in issue_mandates.",
+    "Add/alias results to spec metric names and compute missing key metrics (average_adoption_rate, sustained_adoption_last_14_days, compliance_in_mandated_locations, subgroup_adoption_gap_income, masks_purchased_per_capita, stockout_days, policy_cost).",
+    "Implement free mask distribution in step using PolicyAuthority.free_mask_distribution_rate.",
+    "Introduce Retailer (or adapter) and route purchases; track stockout_days and per-capita purchases.",
+    "Implement spec validations: adoption_bounds, convergence_last_14_days, mandate_effect_sanity_check, nonnegative_inventory, reproducibility_fixed_seed.",
+    "Add parameter aliases for average_degree and enforcement_probability.",
+    "Optional: implement a minimal main() run for demo while preserving direct call."
+  ],
+  "additional_comments": "Recent changes improved stability (freeze_adoption for no-influence validation, enforcement capacity cap, preventing inflated new adopters by capturing prior-day flags, and better price adjustment). However, emptying main() and leaving an unfinished function ('mean') compromise usability and validation. Focus the next iteration on spec compliance and validation readiness; performance can be tuned afterward if needed.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "class PolicyAuthority:\n    ...\n    mandate_end_day: int\n    ...\n    def issue_mandates(self, day: int) -> bool:\n        ...\n        if not self.mandate_enabled:\n            return False\n        return self.mandate_start_day <= day <= self.mandate_end_day",
+      "after": "class PolicyAuthority:\n    ...\n    mandate_end_day: Optional[int]\n    ...\n    def issue_mandates(self, day: int) -> bool:\n        if not self.mandate_enabled:\n            return False\n        if self.mandate_end_day is None:\n            return day >= self.mandate_start_day\n        return self.mandate_start_day <= day <= self.mandate_end_day",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def __init__(...):\n    ...\n    self.policy = PolicyAuthority(\n        id=1,\n        mandate_enabled=bool(self.p.get(\"mandate_enabled\", False)),\n        mandate_start_day=int(self.p.get(\"mandate_start_day\", 30)),\n        mandate_end_day=int(self.p.get(\"mandate_end_day\", 120)),\n        ...\n    )",
+      "after": "def __init__(...):\n    ...\n    mend = self.p.get(\"mandate_end_day\", 120)\n    mend_opt = None if mend is None else int(mend)\n    self.policy = PolicyAuthority(\n        id=1,\n        mandate_enabled=bool(self.p.get(\"mandate_enabled\", False)),\n        mandate_start_day=int(self.p.get(\"mandate_start_day\", 30)),\n        mandate_end_day=mend_opt,\n        ...\n    )",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def validate_replicate_consistency(...):\n    finals = []\n    for r in range(runs):\n        ...\n        finals.append(res[\"adoption_rate\"][-1])\n    mean",
+      "after": "def validate_replicate_consistency(...):\n    finals = []\n    for r in range(runs):\n        ...\n        finals.append(res[\"adoption_rate\"][-1])\n    mean_val = statistics.mean(finals) if finals else 0.0\n    stdev_val = statistics.pstdev(finals) if len(finals) > 1 else 0.0\n    cv = (stdev_val / (mean_val + 1e-12)) if mean_val > 0 else float(\"inf\")\n    ok = cv <= cv_threshold\n    msg = f\"replicate_consistency: cv={cv:.3f}, mean={mean_val:.3f}, stdev={stdev_val:.3f}\"\n    return ok, msg",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "results = {\n    \"adoption_rate\": self.series[\"adoption_rate\"],\n    ...\n    \"mask_stockouts\": mask_stockouts,\n    ...\n    \"enforcement_actions_count\": int(total_incidents_all),\n}",
+      "after": "results = {\n    # Spec-aligned keys\n    \"adoption_rate_over_time\": self.series[\"adoption_rate\"],\n    \"average_adoption_rate\": statistics.mean(self.series[\"adoption_rate\"]) if self.series[\"adoption_rate\"] else 0.0,\n    \"sustained_adoption_last_14_days\": (statistics.mean(self.series[\"adoption_rate\"][-14:]) if len(self.series[\"adoption_rate\"]) >= 14 else (self.series[\"adoption_rate\"][-1] if self.series[\"adoption_rate\"] else 0.0)),\n    \"time_to_50_percent_adoption\": time_to_50,\n    \"compliance_in_mandated_locations\": float(self.series.get(\"compliance_in_mandated_locations_avg\", [0.0])[-1]) if self.series.get(\"compliance_in_mandated_locations_avg\") else 0.0,\n    \"subgroup_adoption_gap_income\": float(top_quintile_rate - bottom_quintile_rate),\n    \"stockout_days\": int(stockout_days),\n    \"masks_purchased_per_capita\": (self.cumulative_acquired / max(1, len(self.people))),\n    \"policy_cost\": float(self.cumulative_enforcement_cost + self.cumulative_campaign_cost - self.cumulative_fines_collected),\n    \"enforcement_actions_count\": int(total_incidents_all),\n    # Backward-compatible aliases\n    \"adoption_rate\": self.series[\"adoption_rate\"],\n    \"mask_stockouts\": stockout_days,\n    ...\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Person-level updates\nfor i, person in enumerate(self.people):\n    ...\n    # Purchase if needed or under mandate pressure\n    if person.mask_inventory <= 0 or mandate_active:\n        desired = person.purchase_masks(...)\n        if desired > 0:\n            bought = self.supply_chain.distribute_masks(desired)\n            person.mask_inventory += bought\n            self.cumulative_acquired += bought\n            ...",
+      "after": "# Free mask distribution before purchases\nfree_rate = int(self.p.get(\"free_mask_distribution_rate\", 0))\nif free_rate > 0 and self.supply_chain.total_stock > 0:\n    candidates = [p for p in self.people if p.mask_inventory == 0]\n    candidates.sort(key=lambda x: x.income)\n    give_n = min(free_rate, self.supply_chain.total_stock, len(candidates))\n    for rec in candidates[:give_n]:\n        rec.mask_inventory += 1\n    self.supply_chain.total_stock -= give_n\n    self.cumulative_free_distributed += give_n\n\n# Person-level updates\nfor i, person in enumerate(self.people):\n    ...\n    # Purchase if needed or under mandate pressure\n    if person.mask_inventory <= 0 or mandate_active:\n        desired = person.purchase_masks(...)\n        if desired > 0:\n            bought = self.supply_chain.distribute_masks(desired)\n            person.mask_inventory += bought\n            self.cumulative_acquired += bought\n            ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Visits and enforcement at public locations\npublic_incidents = 0\n...\nincident, compliant_now = ploc.enforce_mask_policy(...)\n...\n# Workplace visits and enforcement\n...",
+      "after": "# Visits and enforcement at public locations\npublic_incidents = 0\nmandated_visits = 0\nmandated_compliant = 0\n...\nincident, compliant_now = ploc.enforce_mask_policy(...)\nif ploc.policy_requires_mask:\n    mandated_visits += 1\n    if compliant_now or person.mask_adopted or person.current_mask_use:\n        mandated_compliant += 1\n...\n# Workplace visits and enforcement\n...\nif wloc.policy_requires_mask:\n    mandated_visits += 1\n    if compliant_now or person.mask_adopted or person.current_mask_use:\n        mandated_compliant += 1\n...\n# After visits\nmandated_comp_rate = (mandated_compliant / max(1, mandated_visits)) if mandated_visits > 0 else 0.0\nself.series.setdefault(\"compliance_in_mandated_locations_series\", []).append(mandated_comp_rate)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def initialize(self):\n    avg_deg = int(self.p.get(\"avg_degree\", 10))",
+      "after": "def initialize(self):\n    # Parameter aliases\n    if \"average_degree\" in self.p and \"avg_degree\" not in self.p:\n        self.p[\"avg_degree\"] = int(self.p[\"average_degree\"])\n    if \"enforcement_probability\" in self.p and \"enforcement_level\" not in self.p:\n        self.p[\"enforcement_level\"] = float(self.p[\"enforcement_probability\"])\n    avg_deg = int(self.p.get(\"avg_degree\", 10))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def main():\n    pass",
+      "after": "def main():\n    # Minimal demo to improve usability while keeping direct call\n    try:\n        params = {\"population_size\": 1000, \"time_horizon_days\": 30, \"mandate_enabled\": True}\n        sim = Simulation(params, seed=42)\n        res = sim.run(params[\"time_horizon_days\"])\n        summary = {k: res[k] for k in [\"average_adoption_rate\", \"time_to_50_percent_adoption\", \"stockout_days\", \"policy_cost\"] if k in res}\n        print(json.dumps({\"summary\": summary, \"final_adoption\": res.get(\"adoption_rate_over_time\", res.get(\"adoption_rate\", []))[-1] if res.get(\"adoption_rate_over_time\", res.get(\"adoption_rate\", [])) else 0.0}, indent=2))\n    except Exception as e:\n        print(f\"Demo run failed: {e}\", file=sys.stderr)",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration introduces several robustness improvements but also introduces a critical bug and further diverges from the spec by removing CLI functionality.",
+    "positive_impacts": [
+      "Added freeze_adoption flag and usage to stabilize no-influence validation.",
+      "Capped enforcement by capacity and reflected it in effective enforcement probability.",
+      "Corrected daily_new_adopters baseline by capturing previous-day usage before state reset.",
+      "Introduced supply price adjustment logic and tracked demand vs sold.",
+      "Household norm update and prevalence weighting improved risk perception dynamics."
+    ],
+    "negative_impacts": [
+      "validate_replicate_consistency ends with a stray 'mean' token, causing runtime errors.",
+      "main() emptied, removing CLI/demo functionality.",
+      "Spec-mandated entities and metrics (Retailer, Authority free distribution, policy_cost) remain unimplemented.",
+      "mandate_end_day remains unsafe for None values.",
+      "Spec validations (adoption_bounds, convergence_last_14_days, mandate_effect_sanity_check, nonnegative_inventory, reproducibility_fixed_seed) are not present."
+    ],
+    "suggestions": [
+      "Immediately fix the stray 'mean' bug and make mandate_end_day Optional.",
+      "Add result key aliases and missing metrics to match the spec.",
+      "Implement minimal Retailer adapter, free mask distribution, and policy cost accounting.",
+      "Add spec-aligned validations and a minimal main() demo while keeping the direct call for sandbox compatibility.",
+      "Add parameter aliasing for 'average_degree' and 'enforcement_probability' for better compatibility."
+    ]
+  }
+}

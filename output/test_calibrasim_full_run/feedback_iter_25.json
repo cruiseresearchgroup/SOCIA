@@ -1,0 +1,199 @@
+{
+  "summary": "The simulation is rich and generally well-structured, but a critical scheduling bug prevents purchases from being fulfilled because the RetailSupplyModule can run before DecisionAndAdoptionModule. In addition, several task-specified metrics and outputs are missing or only partially implemented. Risk updates are applied with a one-day lag without being documented or handled. Addressing module dependencies, filling metric gaps (sustained adoption, masks sold, adoption by group/disparity, policy effect contribution), and minor refactors will significantly improve correctness, fidelity, and alignment with the task specification.",
+  "critical_issues": [
+    {
+      "issue": "RetailSupplyModule runs before purchase requests are created",
+      "impact": "Purchase requests collected within the day are lost when buffers reset, so agents never receive purchased masks. This suppresses adoption driven by market transactions and invalidates stock, price, and demand dynamics.",
+      "solution": "Set RetailSupplyModule.dependencies = [\"DecisionAndAdoptionModule\"] so purchases are processed in the same day they are requested.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Missing key task metrics (sustained_adoption_rate, masks_sold, adoption_by_group, adoption_disparity_index, policy_effect_contribution)",
+      "impact": "Prevents evaluation against the stated goals and obscures important outcomes (e.g., persistence of adoption, inequality, policy impact).",
+      "solution": "Add daily masks_sold tracking in RetailSupplyModule; aggregate and persist adoption_by_group (income and age), sustained adoption rate (mean of last K days), an explicit adoption_disparity_index (alias existing inequality), and a counterfactual-based policy_effect_contribution in evaluate().",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Risk perception updates applied only next day without explicit handling",
+      "impact": "Decisions at day t ignore MessagingAndRiskModule\u2019s updates from the same day, potentially underestimating campaign/policy effects and slowing feedback loops.",
+      "solution": "Allow DecisionAndAdoptionModule to read risk perception from buffers if present (same-day effect) or document/parameterize the lag.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Redundant computations and minor performance overhead",
+      "impact": "Slightly increases run time (especially during calibration) and can complicate reasoning about code.",
+      "solution": "Cache income terciles once per day in DecisionAndAdoptionModule; keep calibration budget small by default, and/or add a CLI to skip calibration.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Broad exception handling masks errors",
+      "impact": "Suppresses diagnostics, making debugging harder when subtle logic or file I/O issues occur.",
+      "solution": "Narrow exception handlers, log messages with context, and re-raise critical failures.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Market transactions and supply-demand linkage",
+      "current_approach": "Purchases are requested by agents; RetailSupplyModule fulfills allocations and restocks, but a scheduling bug prevents same-day fulfillment.",
+      "suggested_approach": "Fix dependency order and track masks_sold, revenue, and unfulfilled demand. Consider an elastic demand response to price and availability and stratified access by income.",
+      "expected_benefit": "Corrects a major logic error and yields more realistic adoption dynamics driven by access and affordability."
+    },
+    {
+      "aspect": "Policy effect estimation",
+      "current_approach": "Policy mandate level affects decisions; no counterfactual estimation.",
+      "suggested_approach": "Implement policy_effect_contribution by running a counterfactual with mandate disabled for the same window/seed to estimate marginal policy impact on adoption.",
+      "expected_benefit": "Quantifies policy influence, supports model evaluation per requirements."
+    },
+    {
+      "aspect": "Risk messaging timing",
+      "current_approach": "Risk updates are committed at end-of-day; same-day decisions read prior risk.",
+      "suggested_approach": "Enable same-day risk via buffers in DecisionAndAdoptionModule or introduce a configurable lag parameter to test sensitivity.",
+      "expected_benefit": "More realistic feedback from messaging campaigns and mandates on daily decisions."
+    },
+    {
+      "aspect": "Equity/Disparity analysis",
+      "current_approach": "Computes an inequality index and equity gap across income terciles only.",
+      "suggested_approach": "Emit adoption_by_group across age bins and income terciles; export explicit adoption_disparity_index.",
+      "expected_benefit": "Better alignment with the task spec and improved interpretability of disparities."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Add dependency so RetailSupplyModule runs after DecisionAndAdoptionModule.",
+      "reason": "Fixes purchase request processing in the same day; prevents loss of purchase events.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use in-buffer risk updates in DecisionAndAdoptionModule and remove redundant income tercile computations.",
+      "reason": "Allows same-day effect of messaging/policy on decisions; streamlines performance.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Track masks_sold_daily in RetailSupplyModule and accumulate in results.",
+      "reason": "Adds required metric; improves supply-demand observability.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add adoption_by_group (income and age) to AdoptionAggregator outputs.",
+      "reason": "Fulfills task metrics and improves disparity analysis.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Enhance evaluate() to return sustained_adoption_rate (mean of last K days), adoption_disparity_index, masks_sold totals, and policy_effect_contribution via counterfactual.",
+      "reason": "Aligns evaluation with spec and offers policy impact insights.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Improve error handling: narrow exceptions and log messages for I/O and critical sections.",
+      "reason": "Better diagnostics and safer execution.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "overall_adoption_rate over time",
+      "current_gap": "Potential underestimation due to the purchase processing bug and next-day risk lag.",
+      "suggestion": "Fix module scheduling; use same-day risk updates; calibrate decision weights and risk decay to observed series using the provided calibrator with a small budget."
+    },
+    {
+      "metric": "sustained_adoption_rate",
+      "current_gap": "Not calculated; results lack persistence measurement.",
+      "suggestion": "Return mean adoption over last K days (K=14 by default) to match real-world persistence metrics."
+    },
+    {
+      "metric": "adoption_disparity_index",
+      "current_gap": "Computed inequality index but not labeled as disparity index; no age-stratified output.",
+      "suggestion": "Emit explicit adoption_disparity_index and add adoption_by_group by age and income to compare with demographic data."
+    },
+    {
+      "metric": "policy_effect_contribution",
+      "current_gap": "No counterfactual estimation.",
+      "suggestion": "Run an immediate counterfactual with mandate disabled; report marginal increase in adoption attributable to policy."
+    },
+    {
+      "metric": "masks_sold",
+      "current_gap": "Not tracked.",
+      "suggestion": "Track and report masks_sold_daily and cumulative; calibrate price sensitivity using sales data."
+    }
+  ],
+  "prioritized_actions": [
+    "Add dependency: RetailSupplyModule.dependencies = [\"DecisionAndAdoptionModule\"] to fix purchase processing",
+    "Enable same-day risk updates in DecisionAndAdoptionModule (or document/configure lag)",
+    "Track masks_sold_daily and cumulative; add to results and evaluation",
+    "Add adoption_by_group (income and age), adoption_disparity_index, and sustained_adoption_rate to outputs/evaluation",
+    "Implement policy_effect_contribution via counterfactual",
+    "Refactor duplicated income tercile computations; narrow exception handlers and add logging"
+  ],
+  "additional_comments": "Recent additions (SEIR dynamics, mandates schedule, subsidies, free distribution, compliance/equity metrics) are valuable and expand realism. Ensuring the module scheduling is correct and filling the remaining metrics will significantly improve the model's usefulness for policy-relevant analyses.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "class RetailSupplyModule(Module):\n    ...\n    dependencies = []",
+      "after": "class RetailSupplyModule(Module):\n    ...\n    dependencies = [\"DecisionAndAdoptionModule\"]",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class DecisionAndAdoptionModule(Module):\n    ...\n    def forward(...):\n        persons: List[Person] = state[\"persons\"]\n        N = len(persons)\n        social_signal = buffers.get(\"signals\", {}).get(\"social_norm_signal\", [0.0] * N)\n        household_signal = buffers.get(\"signals\", {}).get(\"household_norm_signal\", [0.0] * N)\n        ...\n        # Prepare income terciles for subsidy eligibility\n        incomes = [p.income for p in persons]\n        idx_sorted = sorted(range(N), key=lambda i: incomes[i])\n        tercile_size = max(1, N // 3)\n        low_income_set = set(idx_sorted[:tercile_size])\n        ...\n        # Iterate agents\n        # Apply subsidy for eligible agents (e.g., lowest income tercile)\n        min_price = retailer.price\n        subsidy = float(params.get(\"subsidy_amount\", 0.0))\n        # Precompute income terciles for eligibility\n        incomes = [p.income for p in persons]\n        idx_sorted = sorted(range(N), key=lambda i: incomes[i])\n        tercile_size = max(1, N // 3)\n        low_income_set = set(idx_sorted[:tercile_size])\n        retailer_stock_snapshot = int(retailer.stock)\n        subsidy = float(params.get(\"subsidy_amount\", 0.0))\n        for i, p in enumerate(persons):\n            policy_signal = authority.mandate_level\n            social = social_signal[i] + household_signal[i]\n            utility = (\n                w_social * p.social_influence_susceptibility * social\n                + w_risk * p.risk_perception\n                + w_policy * p.compliance_propensity * policy_signal\n                - disutility\n                - p.fatigue_level\n            )",
+      "after": "class DecisionAndAdoptionModule(Module):\n    ...\n    def forward(...):\n        persons: List[Person] = state[\"persons\"]\n        N = len(persons)\n        social_signal = buffers.get(\"signals\", {}).get(\"social_norm_signal\", [0.0] * N)\n        household_signal = buffers.get(\"signals\", {}).get(\"household_norm_signal\", [0.0] * N)\n        risk_buf = buffers.get(\"state_updates\", {}).get(\"risk_perception\", None)\n        ...\n        # Precompute income terciles once\n        incomes = [p.income for p in persons]\n        idx_sorted = sorted(range(N), key=lambda i: incomes[i])\n        tercile_size = max(1, N // 3)\n        low_income_set = set(idx_sorted[:tercile_size])\n        # Snapshot retailer state\n        min_price = retailer.price\n        subsidy = float(params.get(\"subsidy_amount\", 0.0))\n        retailer_stock_snapshot = int(retailer.stock)\n        for i, p in enumerate(persons):\n            policy_signal = authority.mandate_level\n            social = social_signal[i] + household_signal[i]\n            effective_risk = float(risk_buf[i]) if isinstance(risk_buf, list) and len(risk_buf) == N else p.risk_perception\n            utility = (\n                w_social * p.social_influence_susceptibility * social\n                + w_risk * effective_risk\n                + w_policy * p.compliance_propensity * policy_signal\n                - disutility\n                - p.fatigue_level\n            )",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class RetailSupplyModule(Module):\n    ...\n    def forward(...):\n        ...\n        # Emit stockout observable: 1 if stock==0 else 0\n        stockout_indicator = 1.0 if new_stock == 0 else 0.0\n        buffers.setdefault(\"observables\", {})[\"stockout_rate_daily\"] = stockout_indicator\n\n        # Write updates for commit\n        buffers.setdefault(\"state_updates\", {})[\"retailer_allocations\"] = allocations\n        buffers[\"state_updates\"][\"retailer\"] = {\"stock\": int(new_stock), \"price\": float(new_price)}",
+      "after": "class RetailSupplyModule(Module):\n    ...\n    def forward(...):\n        ...\n        total_sold = int(sum(allocations.values()))\n        # Emit observables\n        stockout_indicator = 1.0 if new_stock == 0 else 0.0\n        obs = buffers.setdefault(\"observables\", {})\n        obs[\"stockout_rate_daily\"] = stockout_indicator\n        obs[\"masks_sold_daily\"] = float(total_sold)\n\n        # Write updates for commit\n        s_upd = buffers.setdefault(\"state_updates\", {})\n        s_upd[\"retailer_allocations\"] = allocations\n        s_upd[\"retailer\"] = {\"stock\": int(new_stock), \"price\": float(new_price)}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.results: Dict[str, List[Any]] = {\n    \"adoption_rate\": [],\n    ...\n    \"npi_effectiveness_daily\": [],\n}",
+      "after": "self.results: Dict[str, List[Any]] = {\n    \"adoption_rate\": [],\n    ...\n    \"npi_effectiveness_daily\": [],\n    \"masks_sold_daily\": [],\n    \"masks_sold_cumulative\": [],\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Observables from aggregator\nobs = self.buffers.get(\"observables\", {})\n...\nif \"average_mask_availability_daily\" in obs:\n    self.results[\"average_mask_availability_daily\"].append(float(obs[\"average_mask_availability_daily\"]))",
+      "after": "# Observables from aggregator\nobs = self.buffers.get(\"observables\", {})\n...\nif \"average_mask_availability_daily\" in obs:\n    self.results[\"average_mask_availability_daily\"].append(float(obs[\"average_mask_availability_daily\"]))\n# Masks sold\nif \"masks_sold_daily\" in obs:\n    sold = float(obs[\"masks_sold_daily\"])\n    self.results[\"masks_sold_daily\"].append(sold)\n    cum = (self.results[\"masks_sold_cumulative\"][-1] if self.results[\"masks_sold_cumulative\"] else 0.0) + sold\n    self.results[\"masks_sold_cumulative\"].append(cum)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class AdoptionAggregator(Module):\n    ...\n    outputs = [\n        \"observable.adoption_rate_daily\",\n        ...\n        \"observable.average_mask_use_days_per_person\",\n    ]\n    ...\n    def forward(...):\n        ...\n        buffers.setdefault(\"observables\", {})[\"adoption_rate_daily\"] = adoption_rate\n        buffers[\"observables\"][\"enforcement_incidents_rate_per_1k_pd\"] = incidents_rate\n        buffers[\"observables\"][\"inequality_index_of_adoption\"] = inequality_index\n        buffers[\"observables\"][\"equity_gap_in_adoption_daily\"] = equity_gap\n        buffers[\"observables\"][\"compliance_rate_in_mandated_locations_daily\"] = compliance_rate_mandated\n        buffers[\"observables\"][\"average_mask_availability_daily\"] = avg_inventory\n        buffers[\"observables\"][\"average_mask_use_days_per_person\"] = average_days",
+      "after": "class AdoptionAggregator(Module):\n    ...\n    outputs = [\n        \"observable.adoption_rate_daily\",\n        ...\n        \"observable.average_mask_use_days_per_person\",\n        \"observable.adoption_by_group_daily\",\n    ]\n    ...\n    def forward(...):\n        ...\n        # Adoption by income terciles\n        group_metrics = {\n            \"income_terciles\": {\"low\": means[0] if len(means)>0 else 0.0,\n                                  \"mid\": means[1] if len(means)>1 else 0.0,\n                                  \"high\": means[2] if len(means)>2 else 0.0}\n        }\n        # Adoption by age bins\n        age_bins = {\"0_17\": [], \"18_64\": [], \"65_plus\": []}\n        for i, p in enumerate(persons):\n            if p.age <= 17: age_bins[\"0_17\"].append(decisions[i])\n            elif p.age <= 64: age_bins[\"18_64\"].append(decisions[i])\n            else: age_bins[\"65_plus\"].append(decisions[i])\n        age_means = {k: (sum(v)/float(len(v)) if v else 0.0) for k, v in age_bins.items()}\n        group_metrics[\"age_bins\"] = age_means\n\n        obs = buffers.setdefault(\"observables\", {})\n        obs[\"adoption_rate_daily\"] = adoption_rate\n        obs[\"enforcement_incidents_rate_per_1k_pd\"] = incidents_rate\n        obs[\"inequality_index_of_adoption\"] = inequality_index\n        obs[\"equity_gap_in_adoption_daily\"] = equity_gap\n        obs[\"compliance_rate_in_mandated_locations_daily\"] = compliance_rate_mandated\n        obs[\"average_mask_availability_daily\"] = avg_inventory\n        obs[\"average_mask_use_days_per_person\"] = average_days\n        obs[\"adoption_by_group_daily\"] = group_metrics",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate(...):\n    ...\n    t50 = time_to_threshold(adoption, 0.5)\n    t80 = time_to_threshold(adoption, 0.8)\n    peak_adoption_rate = max(adoption) if adoption else 0.0\n    ...\n    metrics = {\n        \"time_to_50_percent_adoption\": t50,\n        \"time_to_80_percent_adoption\": t80,\n        \"peak_adoption_rate\": float(peak_adoption_rate),\n        ...\n    }",
+      "after": "def evaluate(...):\n    ...\n    t50 = time_to_threshold(adoption, 0.5)\n    t80 = time_to_threshold(adoption, 0.8)\n    peak_adoption_rate = max(adoption) if adoption else 0.0\n    # Sustained adoption over last K days\n    K = int(self.params.get(\"sustained_window_days\", 14))\n    sustained_slice = adoption[-K:] if len(adoption) >= K else adoption\n    sustained_adoption_rate = float(sum(sustained_slice)/max(1, len(sustained_slice))) if sustained_slice else 0.0\n\n    # Counterfactual policy effect (mandate disabled)\n    policy_effect_contribution = None\n    try:\n        cf_params = copy.deepcopy(self.get_params())\n        cf_params[\"mandate_level\"] = 0.0\n        cf_params[\"enforcement_probability\"] = 0.0\n        cf_params[\"location_mask_requirement_rate\"] = 0.0\n        cf_sim = Simulation(cf_params)\n        cf_sim.run(start, end)\n        cf_adoption = cf_sim.results.get(\"adoption_rate\", [])[start:end]\n        n = min(len(adoption), len(cf_adoption))\n        if n > 0:\n            policy_effect_contribution = float(sum(adoption[:n]) - sum(cf_adoption[:n])) / float(n)\n    except Exception:\n        policy_effect_contribution = None\n\n    metrics = {\n        \"time_to_50_percent_adoption\": t50,\n        \"time_to_80_percent_adoption\": t80,\n        \"peak_adoption_rate\": float(peak_adoption_rate),\n        \"sustained_adoption_rate\": sustained_adoption_rate,\n        ...,\n        \"adoption_disparity_index\": float(sum(inequality[-7:]) / max(1, len(inequality[-7:]))) if inequality else 0.0,\n        \"masks_sold_total\": float(sum(self.results.get(\"masks_sold_daily\", [])[start:end])) if self.results.get(\"masks_sold_daily\") else 0.0,\n        \"policy_effect_contribution\": policy_effect_contribution,\n    }",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The recent iteration added significant features (SEIR module, subsidies, free distribution, compliance/equity metrics, policy scheduling). However, the combination of topological sorting with missing dependencies caused RetailSupplyModule to execute before purchases are created, breaking the market transaction loop. The new metrics are a step forward but still miss several outputs required by the spec.",
+    "positive_impacts": [
+      "Introduced SEIR dynamics with NPI effectiveness estimation",
+      "Added policy schedule (mandate window) and distribution/subsidy programs",
+      "Expanded metrics (compliance rate, equity gap, availability, policy cost)",
+      "Improved robustness (buffers/commit pattern, topological scheduling)"
+    ],
+    "negative_impacts": [
+      "Critical scheduling bug for RetailSupplyModule due to missing dependency",
+      "Some metrics from the spec remain unimplemented (sustained adoption, masks sold total, policy contribution, adoption by group)",
+      "Broad exception handling can hide issues"
+    ],
+    "suggestions": [
+      "Add RetailSupplyModule dependency on DecisionAndAdoptionModule to restore purchase processing",
+      "Implement remaining metrics and outputs with minimal performance overhead",
+      "Allow same-day risk updates in the decision module or document the lag",
+      "Tighten exception handling and add logging where appropriate"
+    ]
+  }
+}

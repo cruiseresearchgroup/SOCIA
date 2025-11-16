@@ -1,0 +1,238 @@
+{
+  "summary": "The simulation is syntactically sound and adds meaningful improvements (SIR coupling, penalty-aware decision utility, richer outputs). However, it diverges from the specification in several core areas: missing Household entity and norms/sharing dynamics, placeholder Location behavior not integrated into the flow, insufficient PolicyMaker messaging, missing key metrics (sustained compliance, switching rate, peer exposure index), and several naming/parameter mismatches. There is also a minor but important epidemic logic issue using previous-day masking for infectious agents. Addressing these issues will improve fidelity, interpretability, and alignment with the task spec.",
+  "critical_issues": [
+    {
+      "issue": "Missing Household entity and 'household_norms' interaction",
+      "impact": "Understates within-household influence and resource sharing, biases adoption dynamics, and prevents implementing the required interaction. Limits realism and prevents compliance persistence via norms.",
+      "solution": "Add a Household dataclass (id, size, norm_strength, mask_stock) and assign each Person to a household. Implement discuss_norms (adjust attitudes/compliance_propensity) and share_masks (allocate inventory to members with adoption intent). Integrate into step(): households update norms, share stock before daily decisions.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Location behaviors are placeholders and not integrated",
+      "impact": "Enforcement is handled ad hoc, preventing accurate compliance_by_location metrics and policy effect heterogeneity. Limits ability to model capacity-limited admission, on-site observation, and fines tied to location policies.",
+      "solution": "Implement Location.admit_agents, enforce_policy, broadcast_norms, record_compliance; restructure daily flow to assign visits per agent daily_schedule and process admissions/enforcement at the location level. Track per-location compliance and sanctions.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Missing core metrics (sustained_compliance_duration, switching_rate, peer_exposure_index) and final_adoption_rate; naming mismatches",
+      "impact": "Prevents evaluation per spec and hinders model validation against intended outcomes; impedes analysis of persistence and volatility.",
+      "solution": "Track per-agent consecutive wearing days and switching events. Compute peer_exposure_index as average masked share of each agent\u2019s neighborhood per day. Add final_adoption_rate, sustained_compliance_duration, switching_rate, peer_exposure_index to results; add aliases compliance_by_location and policy_effect_size.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "PolicyMaker messaging and publish_case_counts not implemented; external perceived_cases_series not integrated",
+      "impact": "Information_campaign interaction is not represented, limiting the model\u2019s ability to simulate case-driven messaging and trust-mediated compliance. Reduces policy realism and counterfactual interpretability.",
+      "solution": "Implement PolicyAuthority.adjust_messaging and publish_case_counts. Add campaign_schedule and messaging_intensity parameters. Update persons\u2019 perceived_local_cases and risk_perception blending trust_in_authorities. Support external perceived_cases_series to override/blend simulated prevalence.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Epidemic coupling uses previous-day masking for infectious individuals (f_inf_wear) instead of current-day wearing",
+      "impact": "Biases effective transmission estimation by misaligning source control to the wrong day. Can over/under-estimate infections especially when adoption is rapidly changing.",
+      "solution": "Compute f_inf_wear from current-day wearing states (wearing_now) restricted to infectives when calculating source-control effects.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Homophily strength parameter unused; hard-coded rewiring preference",
+      "impact": "Reduces controllability and misaligns with spec parameter (homophily_strength). May alter peer influence topology significantly.",
+      "solution": "Replace hard-coded 0.7 with float(self.params.get('homophily_strength', 0.7)) when selecting homophilous rewiring target.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Per-location enforcement probability and fine amount not implemented",
+      "impact": "Cannot model variation across locations; spec includes location-level enforcement and fines. Limits policy and environment heterogeneity.",
+      "solution": "Add Location.fine_amount and enforcement_probability; use them in enforcement decisions (denied entry vs fine) instead of global-only parameters.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Person attributes not aligned with spec and visit behavior not explicit",
+      "impact": "Decision logic misses key determinants (age, health risk, adoption_intent, compliance_propensity). No explicit visit flow prevents location-based observation and norms shaping.",
+      "solution": "Extend Person with missing attributes and implement visit_location behavior tied to daily_schedule and location mix. Use these in decide_mask_use (e.g., risk_perception, economic_constraint, compliance_propensity).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Output naming and wrapper changes reduce compatibility",
+      "impact": "Removed wrapper and naming mismatches (e.g., compliance_by_location, policy_effect_size) may hinder downstream evaluation and consistency with the spec.",
+      "solution": "Add aliases to match spec and consider restoring a minimal wrapper with summaries while keeping the callable main() requirement intact.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Household norms and mask sharing",
+      "current_approach": "No household representation; no within-household influence or mask stock sharing.",
+      "suggested_approach": "Introduce Household entity and assign persons to households. Implement norm_strength-mediated updates to mask_attitude and compliance_propensity, plus mask stock pooling and sharing subject to availability.",
+      "expected_benefit": "More realistic diffusion and persistence through strong-tie influence; captures equity and access dynamics via shared stock."
+    },
+    {
+      "aspect": "Location-based interactions and enforcement",
+      "current_approach": "Policy enforcement computed in the person loop without admission capacity or per-location fines; Location methods are no-ops.",
+      "suggested_approach": "Model admissions (capacity), enforcement per location (enforcement_probability, fine_amount), and recording of observed compliance to broadcast norms next day.",
+      "expected_benefit": "Aligns with spec, enables compliance_by_location metric, and introduces heterogeneity in policy effects."
+    },
+    {
+      "aspect": "Information campaign (PolicyMaker messaging)",
+      "current_approach": "MediaOutlets simulate messaging; PolicyAuthority has placeholders, and external case series not considered.",
+      "suggested_approach": "PolicyAuthority.publish_case_counts updates persons\u2019 perceived_local_cases; adjust_messaging modifies risk_perception and adoption_intent via trust_in_authorities and messaging_intensity; blend in external perceived_cases_series.",
+      "expected_benefit": "Captures policy-driven compliance shifts and better ties risk perception to data/signals."
+    },
+    {
+      "aspect": "Behavioral persistence and volatility",
+      "current_approach": "Habit_strength and fatigue modeled, but not explicitly tracked as persistence metrics.",
+      "suggested_approach": "Track sustained_compliance_duration per agent and daily switching_rate; include in outputs.",
+      "expected_benefit": "Improves interpretability and validation of persistence vs fatigue dynamics."
+    },
+    {
+      "aspect": "Network homophily controllability",
+      "current_approach": "Homophilous rewiring probability hard-coded.",
+      "suggested_approach": "Parameterize rewiring homophily using homophily_strength.",
+      "expected_benefit": "Enables experimental design on how homophily affects diffusion and clustering."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Compute infectious source-control using current-day wearing states",
+      "reason": "Fixes day misalignment in transmission calculation; reduces bias when adoption is changing quickly.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use homophily_strength parameter in rewiring instead of hard-coded 0.7",
+      "reason": "Aligns with spec and improves model configurability.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add tracking for sustained_compliance_duration, switching_rate, and peer_exposure_index; output final_adoption_rate; add metric aliases",
+      "reason": "Completes required metrics and aligns naming with the specification.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement PolicyAuthority.publish_case_counts and adjust_messaging; ingest external perceived_cases_series",
+      "reason": "Implements information_campaign interaction and improves data alignment with external case signals.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add Household dataclass and integrate household_norms and share_masks into the daily step",
+      "reason": "Implements required entity and interaction; improves realism of norms and access.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement Location methods and refactor step to process visits/admissions/enforcement at locations with per-location fine_amount/enforcement_probability",
+      "reason": "Aligns with spec, enables compliance_by_location, and clarifies enforcement flow.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add Person attributes from spec (age, health_risk_level, social_influence_susceptibility, economic_constraint, adoption_intent, compliance_propensity, info_sources, daily_schedule, perceived_local_cases) and use them in decision and observation",
+      "reason": "Brings agent state in line with specification and improves behavioral depth.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add optional wrapper/aliases in output and evaluation to match spec metric names (compliance_by_location, policy_effect_size) and restore a minimal summary if required by downstream tools",
+      "reason": "Improves compatibility and reduces friction in evaluation.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "adoption_rate_over_time",
+      "current_gap": "Risk perception currently tied to simulated prevalence alone; external case series not used.",
+      "suggestion": "Blend simulated prevalence with external perceived_cases_series weighted by trust_in_authorities and messaging_intensity; calibrate sensitivity to match historical adoption patterns."
+    },
+    {
+      "metric": "compliance_by_location",
+      "current_gap": "Per-location enforcement and fines are not modeled explicitly; location visits not explicit.",
+      "suggestion": "Introduce per-location enforcement_probability and fine_amount, admission capacity, and record compliance per visit to match observed differences (e.g., transit vs retail)."
+    },
+    {
+      "metric": "inequality_index",
+      "current_gap": "Income is the only socio-economic factor used; age/health risk absent.",
+      "suggestion": "Incorporate age and health_risk_level into decision utility and compute inequality across multiple dimensions (age, risk). Compare with real surveys for calibration."
+    },
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "Only DiD variant implemented and named differently; messaging effect not isolated.",
+      "suggestion": "Provide both pre/post difference and DiD; add an estimate isolating messaging vs enforcement by toggling penalty_benefit and policy_influence_weight in a counterfactual run."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement Household entity and household_norms/share_masks interactions; assign persons to households.",
+    "Refactor Location to handle admit_agents/enforce_policy/broadcast_norms/record_compliance and integrate explicit visit flow by daily_schedule.",
+    "Add missing metrics (sustained_compliance_duration, switching_rate, peer_exposure_index, final_adoption_rate) and alias keys to spec names (compliance_by_location, policy_effect_size).",
+    "Fix epidemic source-control to use current-day infectious wearing (wearing_now).",
+    "Implement PolicyAuthority.publish_case_counts/adjust_messaging and support external perceived_cases_series blending with trust/messaging.",
+    "Parameterize homophily_strength in rewiring and remove hard-coded probability.",
+    "Add per-location enforcement_probability and fine_amount and use them in enforcement decisions."
+  ],
+  "additional_comments": "The recent changes significantly improve internal consistency and observability (SIR metrics, penalties, supply), and the code remains deterministic and CLI-friendly. The main gaps are conceptual alignment with the specified entities/interactions and the missing metrics. Addressing these will make the simulation more realistic and evaluable without fundamentally altering the current structure.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "f_inf_wear = (sum(wearing_prev[i] for i, s in enumerate(self._inf_status) if s == 1) / max(1, I)) if I > 0 else 0.0",
+      "after": "f_inf_wear = (sum(wearing_now[i] for i, s in enumerate(self._inf_status) if s == 1) / max(1, I)) if I > 0 else 0.0",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "if self.rng.random() < 0.7:\n    best = new_j\n    best_gap = abs(self.people[new_j].mask_attitude - att_i)",
+      "after": "hom = float(self.params.get('homophily_strength', 0.7))\nif self.rng.random() < hom:\n    best = new_j\n    best_gap = abs(self.people[new_j].mask_attitude - att_i)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "// no sustained compliance tracking\n# self.daily_adoption exists only",
+      "after": "# Initialize\nself._streak = [0 for _ in range(len(self.people))]\nself.daily_switching_rate = []\nself.daily_peer_exposure_index = []\n\n# In step(), after computing wearing_now\nswitches = sum(1 for i, p in enumerate(self.people) if wearing_prev[i] != wearing_now[i])\nself.daily_switching_rate.append(switches / max(1, len(self.people)))\nfor i, p in enumerate(self.people):\n    self._streak[i] = self._streak[i] + 1 if wearing_now[i] == 1.0 else 0\n# peer exposure index\npeer_shares = []\nfor i, p in enumerate(self.people):\n    neigh = p.neighbors\n    if neigh:\n        peer_shares.append(sum(wearing_now[j] for j in neigh) / len(neigh))\nself.daily_peer_exposure_index.append(sum(peer_shares) / len(peer_shares) if peer_shares else 0.0)\n\n# In run(), add to results\n\"sustained_compliance_duration\": sum(self._streak)/len(self._streak) if self._streak else 0.0,\n\"switching_rate\": self.daily_switching_rate,\n\"peer_exposure_index\": self.daily_peer_exposure_index,",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "\"adoption_rate_by_location_type\": by_loc,\n\"policy_effect_size_DiD\": policy_effect_did,",
+      "after": "\"adoption_rate_by_location_type\": by_loc,\n\"compliance_by_location\": by_loc,\n\"policy_effect_size_DiD\": policy_effect_did,\n\"policy_effect_size\": policy_effect_did,",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "class PolicyAuthority:\n    ...\n    def communicate_guidance(self) -> None:\n        pass\n\n    def adjust_enforcement(self) -> None:\n        pass",
+      "after": "class PolicyAuthority:\n    ...\n    def publish_case_counts(self, day: int, external_series: Optional[list], people: list) -> None:\n        value = None\n        if external_series and 0 <= day < len(external_series):\n            value = float(external_series[day])\n        # Fallback to internal prevalence if not provided\n        # The caller should pass current prevalence if external is None\n        for person in people:\n            person.perceived_local_cases = value if value is not None else person.perceived_local_cases\n\n    def adjust_messaging(self, people: list, intensity: float) -> None:\n        for person in people:\n            k = float(intensity) * person.trust_in_authorities\n            # Nudge risk perception toward perceived cases\n            if hasattr(person, 'perceived_local_cases') and person.perceived_local_cases is not None:\n                person.risk_perception = max(0.0, min(1.0, (1 - k) * person.risk_perception + k * person.perceived_local_cases))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class Location:\n    def __init__(...):\n        ...\n        self.policy_enforcement_level = lev",
+      "after": "class Location:\n    def __init__(...):\n        ...\n        self.policy_enforcement_level = lev\n        self.enforcement_probability = lev\n        self.fine_amount = float(params.get('fine_amount', 50.0))\n\n    def admit_agents(self, agent_ids: list) -> list:\n        return agent_ids[: self.capacity]\n\n    def enforce_policy(self, rng, people: list) -> tuple:\n        fines = 0; denied = 0\n        for pid in people:\n            p = people[pid]\n            if self.mask_requirement and p.mask_adoption_state != 'wearing':\n                if rng.random() < self.enforcement_probability:\n                    if rng.random() < 0.5:\n                        fines += self.fine_amount\n                    else:\n                        denied += 1\n        return fines, denied",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "if self.epidemic is not None:\n    self.epidemic.prevalence = current_prevalence\n    self.epidemic_prevalence_daily.append(current_prevalence)\n    alpha = float(self.params.get(\"risk_perception_sensitivity\", 0.6))\n    for person in self.people:\n        person.risk_perception = max(0.0, min(1.0, (1 - alpha) * person.risk_perception + alpha * current_prevalence))",
+      "after": "# Blend external perceived cases if provided\next_series = self.params.get('perceived_cases_series_resolved')\nperceived_signal = current_prevalence\nif isinstance(ext_series, list) and 0 <= day < len(ext_series):\n    w = float(self.params.get('external_cases_weight', 0.5))\n    perceived_signal = (1 - w) * current_prevalence + w * float(ext_series[day])\nself.epidemic.prevalence = perceived_signal\nself.epidemic_prevalence_daily.append(perceived_signal)\nalpha = float(self.params.get('risk_perception_sensitivity', 0.6))\nfor person in self.people:\n    person.perceived_local_cases = perceived_signal\n    person.risk_perception = max(0.0, min(1.0, (1 - alpha) * person.risk_perception + alpha * perceived_signal))",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The diff introduces substantial improvements: SIR-style epidemic coupling to behavior, richer series tracking (Rt, incident cases, infections averted, masks purchased), and better parameter extraction and IO. However, it also introduces a minor epidemic logic slip and leaves core spec elements unimplemented.",
+    "positive_impacts": [
+      "Added penalty-aware utility in mask decisions, improving mandate responsiveness.",
+      "Integrated a minimal SIR process coupled to masking, enabling infection-related metrics.",
+      "Enhanced configuration parsing and robust JSON IO with detailed error handling.",
+      "Added more observable outputs (Rt, incident cases, masks purchased, stockout flags)."
+    ],
+    "negative_impacts": [
+      "Source-control uses previous-day masking for infectious individuals, misaligning transmission timing.",
+      "Output wrapper and metric naming changed, reducing compatibility with the specification.",
+      "Still no implementation of required entities/interactions (Household, Location methods, PolicyMaker messaging).",
+      "Homophily strength remains hard-coded instead of parameterized."
+    ],
+    "suggestions": [
+      "Fix f_inf_wear to use wearing_now for infectious individuals.",
+      "Add metric aliases and final_adoption_rate to outputs and consider restoring a minimal summary wrapper.",
+      "Prioritize implementing Household and Location behaviors and PolicyMaker messaging before further enhancements.",
+      "Parameterize homophily_strength and integrate external perceived_cases_series."
+    ]
+  }
+}

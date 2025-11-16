@@ -1,0 +1,227 @@
+{
+  "summary": "The current simulation runs and includes several behavioral components, but it diverges significantly from the task specification in three critical ways: there is no epidemic transmission model (so Rt/cases/peak incidence/infections averted are not meaningful), parameter names from the spec are only loosely mapped (causing scenarios not to reflect inputs), and required metrics/entities are incomplete (e.g., masks_purchased, stockout_events, subgroup_adoption_gap, multi-retailer/households/social network entity). Addressing these issues will greatly improve validity, alignment with the specification, and interpretability.",
+  "critical_issues": [
+    {
+      "issue": "Missing epidemic transmission dynamics",
+      "impact": "Rt, incident cases, peak incidence, and infections averted are either zero or empty, making key evaluation metrics meaningless and preventing analysis of health impacts of mask adoption.",
+      "solution": "Implement a minimal incidence model coupled to mask wearing (e.g., discrete-time SIR/SEIR). Use baseline_transmission_rate, infectious_period_days, asymptomatic_fraction, and mask efficacy parameters (mask_source_control_efficacy, mask_wearer_protection_efficacy). Track incident_cases daily, compute Rt, peak_incidence, and cumulative_infections_averted versus a no-mask counterfactual.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Spec parameter names not mapped to internal parameters",
+      "impact": "User-provided scenarios are not respected (e.g., simulation_duration_days, initial_mask_adoption_rate, rewiring_rate, enforcement_probability, retail_restock_rate_per_day, retailer_initial_stock_per_1000), leading to unexpected behavior and misinterpretation of results.",
+      "solution": "Add explicit mapping in _extract_parameters and in main() steps to translate spec keys to internal names. Use values from data['parameters'] primarily.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Required metrics missing or misaligned",
+      "impact": "masks_purchased, stockout_events, and subgroup_adoption_gap are not reported, limiting analysis of supply dynamics and equity gaps.",
+      "solution": "Track purchases (attempted - unmet), add daily stockout detection independent of attempts, and compute subgroup_adoption_gap (e.g., top vs bottom income quintile). Expose these in run() observable and evaluate().",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Stockout flag only set when a purchase attempt finds zero stock",
+      "impact": "Underestimates stockout_days because it misses days with zero inventory but no attempts (e.g., due to price or behavior).",
+      "solution": "Set retailer_stockout_today if supply.available_mask_stock == 0 at any point during the day (before decisions and after updates).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Watts\u2013Strogatz degree off-by-one for odd average_degree",
+      "impact": "Average degree becomes k-1 for odd k, slightly changing social influence dynamics and affecting diffusion speed.",
+      "solution": "Add an extra neighbor to half of nodes when k is odd to ensure degree k, or construct a symmetric ring with k neighbors per node.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "CLI steps selection ignores parameters.simulation_duration_days",
+      "impact": "Simulations run with an unintended horizon unless the user passes --steps. This reduces reproducibility and spec conformance.",
+      "solution": "When --steps is not provided, read steps from data['parameters']['simulation_duration_days'] before defaulting.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Epidemic coupling",
+      "current_approach": "Only a prevalence random walk; no infections, no Rt, no incidence.",
+      "suggested_approach": "Implement a minimal discrete-time SIR model with infectious_period_days and baseline_transmission_rate. Compute daily new infections based on current I, S, contact multipliers by location, and mask efficacies. Add a no-mask counterfactual path to estimate infections averted.",
+      "expected_benefit": "Enables accurate health impact metrics (Rt, incident_cases, peak_incidence, cumulative_infections_averted) and realistic feedback between risk perception and adoption."
+    },
+    {
+      "aspect": "Parameter mapping to spec",
+      "current_approach": "Partial mapping; many spec keys are not read or are aliased to different names.",
+      "suggested_approach": "Map simulation_duration_days, initial_mask_adoption_rate, rewiring_rate, enforcement_probability, retailer_initial_stock_per_1000, retail_restock_rate_per_day, mandate_active to internal names. Use data['parameters'] as canonical source.",
+      "expected_benefit": "Scenario inputs will correctly shape model behavior, improving validity and reproducibility."
+    },
+    {
+      "aspect": "Supply metrics",
+      "current_approach": "Track attempts and unmet demand; stockout flag tied to attempts.",
+      "suggested_approach": "Track masks_purchased daily and cumulatively. Set stockout_events whenever stock is zero regardless of attempts. Report both.",
+      "expected_benefit": "Improved insight into supply bottlenecks and intervention effects."
+    },
+    {
+      "aspect": "Equity metrics",
+      "current_approach": "Compute Gini and SES disparity; the requested subgroup_adoption_gap not explicitly reported.",
+      "suggested_approach": "Compute subgroup_adoption_gap as top vs bottom income quintile difference (and optionally by age or SES) and expose under the exact metric name.",
+      "expected_benefit": "Direct alignment with specification and clearer interpretation of disparities."
+    },
+    {
+      "aspect": "Network construction",
+      "current_approach": "Degree k//2 per side; odd k yields degree k-1.",
+      "suggested_approach": "For odd k, add one extra neighbor for half the nodes or otherwise ensure exact k neighbors.",
+      "expected_benefit": "Closer match to desired network structure and influence dynamics."
+    },
+    {
+      "aspect": "Entities per spec",
+      "current_approach": "No explicit Household, Retailer list, or SocialNetwork entity.",
+      "suggested_approach": "Incrementally add: (1) SocialNetwork wrapper providing rewiring/propagation methods around the adjacency list. (2) Multiple Retailer instances with heterogenous stock/price/restock. (3) Households to share resources and norms. Integrate gradually.",
+      "expected_benefit": "Better fidelity to spec and more realistic adoption/supply dynamics."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Map spec parameters to internal names in _extract_parameters and main() steps selection.",
+      "reason": "Ensures the simulation respects user-provided scenario parameters from the specification.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement minimal SIR-like epidemic dynamics in SocialSimulation (initialize state arrays; compute daily incident_cases, Rt, peak_incidence, cumulative_infections_averted).",
+      "reason": "Enables key health metrics and coupling between adoption and disease spread.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Track masks_purchased and stockout_events correctly; set stockout flag if inventory reaches zero at any time during the day.",
+      "reason": "Accurate supply metrics and alignment with spec.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute subgroup_adoption_gap (top vs bottom income quintile) and return in run() observable and evaluate().",
+      "reason": "Aligns metrics with spec; improves equity analysis.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Ensure exact average_degree for odd k in network construction.",
+      "reason": "Avoid off-by-one degree leading to unexpected diffusion behavior.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Update main() steps fallback to check data['parameters']['simulation_duration_days'] and parameters['time_step_days'].",
+      "reason": "Honor spec inputs when CLI --steps is not provided.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Rt, incident_cases, peak_incidence, cumulative_infections_averted",
+      "current_gap": "Not computed or returned as zeros/empty arrays.",
+      "suggestion": "Implement the epidemic model and compute these metrics daily; validate with simple SIR baselines and sensitivity to mask efficacies."
+    },
+    {
+      "metric": "masks_purchased and stockout_events",
+      "current_gap": "Not tracked as specified; stockout only flagged on attempted purchase.",
+      "suggestion": "Record successful purchases explicitly and detect stock zero regardless of attempts."
+    },
+    {
+      "metric": "subgroup_adoption_gap",
+      "current_gap": "Compute related but differently named metrics (Gini, SES disparity) instead of the requested metric name.",
+      "suggestion": "Add subgroup_adoption_gap as the top vs bottom quintile difference, and expose it under the spec-defined name."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement minimal epidemic dynamics and associated metrics (Rt, incident_cases, peak_incidence, cumulative_infections_averted).",
+    "Add parameter mapping for spec keys (simulation_duration_days, initial_mask_adoption_rate, rewiring_rate, enforcement_probability, retailer_initial_stock_per_1000, retail_restock_rate_per_day, mandate_active) and honor data['parameters'] in main() steps.",
+    "Track masks_purchased and stockout_events correctly; fix stockout flag logic.",
+    "Compute subgroup_adoption_gap explicitly and expose it in observable/evaluate().",
+    "Fix odd-degree network construction to ensure exact average_degree.",
+    "Plan incremental introduction of Retailer list, Household, and a SocialNetwork entity in subsequent iteration."
+  ],
+  "additional_comments": "The recent refactor improved robustness (stable JSON parsing, deterministic hashing, rewiring logic complexity) and added useful behavior (mandate penalty effect, media exposure, purchase elasticity). However, full alignment with the specification requires implementing the epidemic coupling and a few metrics and parameter mappings. Performance is acceptable for N ~ 10k and 120 days; if needed, future optimization can focus on vectorizing influence computations.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "steps = int(data.get(\"simulation_days\") or data.get(\"time_horizon_days\") or 30)",
+      "after": "params = data.get(\"parameters\", {}) if isinstance(data.get(\"parameters\"), dict) else {}\nsteps = (\n    args.steps\n    if args.steps is not None\n    else int(\n        params.get(\"simulation_duration_days\")\n        or data.get(\"simulation_days\")\n        or data.get(\"time_horizon_days\")\n        or 30\n    )\n)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "params.setdefault(\"simulation_days\", int(params.get(\"time_horizon_days\", 30)))\nparams.setdefault(\"initial_adoption_rate\", 0.2)\nparams.setdefault(\"rewire_prob\", float(params.get(\"network_rewire_prob\", 0.05)))\nparams.setdefault(\"enforcement_strength\", 0.5)\nparams.setdefault(\"penalty_amount\", float(params.get(\"fine_amount\", 50.0)))",
+      "after": "# Spec key mappings\nif \"simulation_duration_days\" in params: params[\"simulation_days\"] = int(params[\"simulation_duration_days\"]) \nif \"initial_mask_adoption_rate\" in params: params[\"initial_adoption_rate\"] = float(params[\"initial_mask_adoption_rate\"]) \nif \"rewiring_rate\" in params: params[\"rewire_prob\"] = float(params[\"rewiring_rate\"]) \nif \"enforcement_probability\" in params: params[\"enforcement_strength\"] = float(params[\"enforcement_probability\"]) \nif \"mandate_active\" in params: params[\"mandate_enabled\"] = bool(params[\"mandate_active\"]) \nif \"retailer_initial_stock_per_1000\" in params:\n    # Convert per-1000 to per-capita for internal use\n    params[\"retailer_initial_inventory_per_capita\"] = float(params[\"retailer_initial_stock_per_1000\"]) / 1000.0\nif \"retail_restock_rate_per_day\" in params:\n    params[\"restock_rate_per_day\"] = float(params[\"retail_restock_rate_per_day\"]) \n# Preserve existing defaults\nparams.setdefault(\"simulation_days\", int(params.get(\"time_horizon_days\", 30)))\nparams.setdefault(\"initial_adoption_rate\", params.get(\"initial_adoption_rate\", 0.2))\nparams.setdefault(\"rewire_prob\", float(params.get(\"rewire_prob\", params.get(\"network_rewire_prob\", 0.05))))\nparams.setdefault(\"enforcement_strength\", float(params.get(\"enforcement_strength\", 0.5)))\nparams.setdefault(\"penalty_amount\", float(params.get(\"fine_amount\", params.get(\"penalty_amount\", 50.0))))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "half_k = k // 2\nfor i in range(N):\n    for d in range(1, half_k + 1):\n        j = (i + d) % N\n        adj[i].add(j)\n        adj[j].add(i)",
+      "after": "half_k = k // 2\nfor i in range(N):\n    for d in range(1, half_k + 1):\n        j = (i + d) % N\n        adj[i].add(j)\n        adj[j].add(i)\n# If k is odd, add one more neighbor to half the nodes to achieve exact k\nif k % 2 == 1:\n    for i in range(0, N, 2):\n        j = (i + half_k + 1) % N\n        if j != i:\n            adj[i].add(j)\n            adj[j].add(i)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "retailer_stockout_today = False\n...\nif self.supply.available_mask_stock <= 0:\n    retailer_stockout_today = True",
+      "after": "# Detect stockout at day start\nretailer_stockout_today = (self.supply.available_mask_stock == 0) if self.supply else False\n...\n# Inside purchase logic remains the same\nif self.supply and self.supply.available_mask_stock <= 0:\n    retailer_stockout_today = True\n...\n# Detect stockout at end of step as well\nif self.supply and self.supply.available_mask_stock == 0:\n    retailer_stockout_today = True",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "self.daily_unmet_demand.append(unmet_demand_today)\nself.daily_attempted_purchases.append(attempted_purchases_today)\nself.daily_stockout_flag.append(bool(retailer_stockout_today))",
+      "after": "self.daily_unmet_demand.append(unmet_demand_today)\nself.daily_attempted_purchases.append(attempted_purchases_today)\nself.daily_stockout_flag.append(bool(retailer_stockout_today))\n# New: masks_purchased tracking\npurchases_today = max(0, attempted_purchases_today - unmet_demand_today)\nself.cumulative_masks_purchased = getattr(self, \"cumulative_masks_purchased\", 0) + purchases_today",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def __init__(...):\n    ...\n    self.epidemic: Optional[EpidemicEnvironment] = None\n    self.daily_adoption: List[float] = []",
+      "after": "def __init__(...):\n    ...\n    self.epidemic: Optional[EpidemicEnvironment] = None\n    self.daily_adoption: List[float] = []\n    # Epidemic series\n    self.daily_incident_cases: List[int] = []\n    self.daily_Rt: List[float] = []\n    self.peak_incidence: int = 0\n    self.cumulative_infections_averted: float = 0.0\n    # Internal SIR state (0 susceptible, 1 infectious, 2 removed)\n    self._inf_status: List[int] = []\n    self._days_infected_left: List[int] = []",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Initialize epidemic\nself.epidemic = EpidemicEnvironment(region_id=\"region_1\", prevalence=0.01, trend=\"stable\")",
+      "after": "# Initialize epidemic\nself.epidemic = EpidemicEnvironment(region_id=\"region_1\", prevalence=float(self.params.get(\"initial_infected_fraction\", 0.005)), trend=\"stable\")\n# Initialize SIR states\ninit_inf_frac = float(self.params.get(\"initial_infected_fraction\", 0.005))\ninf_period = int(self.params.get(\"infectious_period_days\", 7))\nself._inf_status = [1 if self.rng.random() < init_inf_frac else 0 for _ in range(N)]\nself._days_infected_left = [inf_period if s == 1 else 0 for s in self._inf_status]",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# end of step return {...}",
+      "after": "# Epidemic update (minimal SIR with mask coupling)\nS = sum(1 for s in self._inf_status if s == 0)\nI = sum(1 for s in self._inf_status if s == 1)\nNpop = len(self._inf_status) or 1\nbeta = float(self.params.get(\"baseline_transmission_rate\", 0.08))\ninf_period = int(self.params.get(\"infectious_period_days\", 7))\n# Effective mask reduction\nsrc_eff = float(self.params.get(\"mask_source_control_efficacy\", 0.5))\nprot_eff = float(self.params.get(\"mask_wearer_protection_efficacy\", 0.3))\nwearing_now = [1 if p.mask_adoption_state == \"wearing\" else 0 for p in self.people]\nf_wear = sum(wearing_now) / max(1, len(wearing_now))\n# Approx fraction of infectious wearing (use previous-day wearing_prev for stability)\nf_inf_wear = (sum(wearing_prev[i] for i, s in enumerate(self._inf_status) if s == 1) / max(1, I)) if I > 0 else 0.0\nbeta_eff = beta * (1 - src_eff * f_inf_wear) * (1 - prot_eff * f_wear)\nlam = beta_eff * (I / Npop)\n# New infections (Poisson/Binomial approx)\nnew_infections = sum(1 for _ in range(S) if self.rng.random() < (1 - math.exp(-lam))) if S > 0 else 0\n# Counterfactual without masks\nbeta_nomask = beta\nlam_nomask = beta_nomask * (I / Npop)\nci_nomask = sum(1 for _ in range(S) if self.rng.random() < (1 - math.exp(-lam_nomask))) if S > 0 else 0\nself.cumulative_infections_averted += max(0, ci_nomask - new_infections)\n# Progress disease states\nfor idx, s in enumerate(list(self._inf_status)):\n    if s == 1:\n        self._days_infected_left[idx] -= 1\n        if self._days_infected_left[idx] <= 0:\n            self._inf_status[idx] = 2\nfor idx, s in enumerate(list(self._inf_status)):\n    if s == 0 and new_infections > 0:\n        # Infect uniformly at random among susceptibles\n        if self.rng.random() < (new_infections / max(1, S)):\n            self._inf_status[idx] = 1\n            self._days_infected_left[idx] = inf_period\n# Record metrics\nself.daily_incident_cases.append(new_infections)\nself.peak_incidence = max(self.peak_incidence, new_infections)\nRt_est = (new_infections / max(1, I)) * inf_period if I > 0 else 0.0\nself.daily_Rt.append(Rt_est)\nreturn {\n    ...,\n    \"incident_cases_today\": new_infections,\n    \"Rt_today\": Rt_est,\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "observable = {\n    \"overall_adoption_rate\": overall,\n    ...\n    \"mask_access_shortages\": {\"unmet_demand_fraction\": unmet_fraction, \"stockout_days\": stockout_days},\n}",
+      "after": "observable = {\n    \"overall_adoption_rate\": overall,\n    ...\n    \"mask_access_shortages\": {\"unmet_demand_fraction\": unmet_fraction, \"stockout_days\": stockout_days},\n    # New epidemic and supply metrics\n    \"incident_cases\": self.daily_incident_cases,\n    \"peak_incidence\": self.peak_incidence,\n    \"Rt\": self.daily_Rt,\n    \"cumulative_infections_averted\": self.cumulative_infections_averted,\n    \"masks_purchased\": getattr(self, \"cumulative_masks_purchased\", 0),\n}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "elif name == \"effective_reproduction_number_Rt\" or name == \"Rt\":\n    results[name] = []\nelif name == \"peak_incidence\":\n    results[name] = 0",
+      "after": "elif name in (\"effective_reproduction_number_Rt\", \"Rt\"):\n    results[name] = self.daily_Rt\nelif name == \"peak_incidence\":\n    results[name] = self.peak_incidence\nelif name == \"incident_cases\":\n    results[name] = self.daily_incident_cases\nelif name in (\"infections_averted\", \"cumulative_infections_averted\"):\n    results[name] = self.cumulative_infections_averted\nelif name == \"masks_purchased\":\n    results[name] = getattr(self, \"cumulative_masks_purchased\", 0)\nelif name == \"subgroup_adoption_gap\":\n    # top vs bottom income quintile at final day\n    incomes = sorted([p.income for p in self.people])\n    quint = [incomes[int(len(incomes) * q / 5)] for q in range(1, 5)] if incomes else []\n    groups = {i: [] for i in range(5)}\n    for idx, p in enumerate(self.people):\n        g = 0\n        while g < 4 and p.income > quint[g]: g += 1\n        groups[g].append(1.0 if p.mask_adoption_state == \"wearing\" else 0.0)\n    top = sum(groups[4]) / len(groups[4]) if groups[4] else 0.0\n    bottom = sum(groups[0]) / len(groups[0]) if groups[0] else 0.0\n    results[name] = top - bottom",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes improved the robustness and breadth of the minimal simulation, adding penalty effects, media exposure, purchase elasticity, and more comprehensive outputs. However, gaps remain relative to the specification, particularly the lack of epidemic dynamics and full parameter/metric mapping.",
+    "positive_impacts": [
+      "Robust JSON parsing and stable hashing improve reproducibility and diagnostics.",
+      "Network rewiring implemented efficiently using adjacency sets with homophily bias.",
+      "Mandate logic includes expected penalty utility; access control and enforcement are modeled.",
+      "Supply chain has basic restock and price adjustments; unmet demand is tracked."
+    ],
+    "negative_impacts": [
+      "CLI steps fallback ignores parameters.simulation_duration_days, potentially confusing users.",
+      "Stockout flag logic undercounts stockout events.",
+      "No epidemic dynamics, rendering several evaluation metrics empty.",
+      "Some spec parameters and metrics remain unmapped or misnamed."
+    ],
+    "suggestions": [
+      "Implement a minimal epidemic module first; then revisit media/network/household depth.",
+      "Add explicit parameter mapping from spec keys and prefer data['parameters'] in defaults.",
+      "Add masks_purchased, stockout_events, and subgroup_adoption_gap metrics.",
+      "Fix odd-k network construction to ensure exact average degree.",
+      "Consider reintroducing a richer CLI (optional) while keeping the direct main() call to satisfy sandbox constraints."
+    ]
+  }
+}

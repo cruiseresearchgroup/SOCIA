@@ -1,0 +1,245 @@
+{
+  "summary": "The simulation is syntactically solid and substantially expanded with new modules and calibration pathways. However, there are several critical logic and performance issues: purchases are double-counted, initialization is redone during evaluation (negating reuse and risking uninitialized runs when start_day>0), the advertised Brier score is never computed, policy-effect counterfactual runs are heavy, and gini() can be biased if negative values occur. Addressing these will improve correctness, speed, and robustness. Additional small changes can prevent stdout contamination and make evaluation more aligned with real-world metrics.",
+  "critical_issues": [
+    {
+      "issue": "Purchases double-counted in counters",
+      "impact": "Inflated purchase and enforcement metrics distort downstream evaluation, calibration signals, and any policy effect conclusions that rely on counts.",
+      "solution": "Treat event.purchases as the single source of truth, and only increment counters from that event; if it is missing, derive counts from delta.mask_inventory. Remove the redundant increment in the delta.mask_inventory block.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Ineffective state reuse in evaluation; initialization re-runs and overwrites provided state",
+      "impact": "Calibration becomes slower and inconsistent. evaluate_params() attempts to reuse network and agents but NetworkBuilder and AgentInitializer still rebuild at t==0. Also, runs starting at start_day>0 may never initialize the network, causing failures.",
+      "solution": "Add guards in NetworkBuilder.forward and AgentInitializer.forward to no-op if state already contains neighbors/agents. Add a bootstrap path in Simulation.run so if start_day>0 and state is uninitialized, it runs an initialization tick at t=0 first.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Brier score is documented but never computed",
+      "impact": "Reported metrics include a placeholder, reducing trust in outputs and preventing users from relying on a familiar metric.",
+      "solution": "If per-agent probabilities aren\u2019t available, compute an aggregate Brier equivalent (mean squared error between sim and ground-truth adoption rate series over common timestamps). Otherwise, output None and remove from docs.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Counterfactual policy effect spawns full simulation with heavy artifact I/O",
+      "impact": "Expensive evaluation inside evaluate() increases runtime significantly (especially during calibration) and can lead to excessive disk writes.",
+      "solution": "Use a lightweight artifacts_dir (None or a temp dir) and guard all artifact writes inside Simulation when artifacts_dir is falsy. Avoid plan snapshots for internal counterfactual runs.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "gini() uses original n after filtering, biasing the coefficient",
+      "impact": "If any negatives slip into values, the metric is biased. While not likely with current usage (rates 0..1), this is a correctness bug.",
+      "solution": "Set n = len(sorted_vals) after filtering.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Potential stdout contamination leading to JSON parse errors for the host system",
+      "impact": "The host expects a single well-formed JSON object on stdout. Any stray prints cause 'Extra data' parse errors.",
+      "solution": "Ensure all diagnostic logging uses eprint (stderr) and guard any optional print paths. No other print to stdout except the final JSON.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Initialization reuse during calibration",
+      "current_approach": "Rebuilds network/agents even if provided by evaluate_params().",
+      "suggested_approach": "Make NetworkBuilder/AgentInitializer no-op if state already contains neighbors/agents; add bootstrap in Simulation.run for start_day>0.",
+      "expected_benefit": "Substantial speedup and consistent calibration runs; no risk of uninitialized runs when start_day>0."
+    },
+    {
+      "aspect": "Policy effect evaluation",
+      "current_approach": "Runs a full counterfactual simulation writing artifacts to disk.",
+      "suggested_approach": "Run counterfactual in-memory with artifacts_dir=None and guard artifact writes.",
+      "expected_benefit": "Much faster evaluations and less disk I/O."
+    },
+    {
+      "aspect": "Brier score",
+      "current_approach": "Reported as None.",
+      "suggested_approach": "Compute aggregate MSE between sim and GT adoption rates as a proxy Brier; document it clearly.",
+      "expected_benefit": "Provides a familiar metric for users; better evaluation transparency."
+    },
+    {
+      "aspect": "Group inequality robustness",
+      "current_approach": "Gini uses original n.",
+      "suggested_approach": "Use filtered list length.",
+      "expected_benefit": "Correct inequality metric even in edge cases."
+    },
+    {
+      "aspect": "Run start-day flexibility",
+      "current_approach": "If run() is called with start_day>0, init modules won\u2019t run at t==0 and may leave state uninitialized.",
+      "suggested_approach": "Add a run bootstrap (t=0 init pass) when needed.",
+      "expected_benefit": "Robustness to custom windows and improved usability."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "Simulation._commit_buffers",
+      "modification": "Remove the counter updates from delta.mask_inventory path or gate them to avoid double counting; prefer using event.purchases as single source of truth.",
+      "reason": "Prevents inflated counters and ensures consistent counting.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "NetworkBuilder.forward",
+      "modification": "If t==0 and state already has neighbors/graph, return no-op.",
+      "reason": "Enables reuse optimizations during evaluation/calibration.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "AgentInitializer.forward",
+      "modification": "If t==0 and state already has agents, return no-op.",
+      "reason": "Prevents overwriting reused agents and speeds up calibration.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "Simulation.run",
+      "modification": "Bootstrap initialization when start_day>0 by running an initialization tick at t=0 if state is empty.",
+      "reason": "Avoids uninitialized runs and makes calibration windows flexible.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "Simulation.__init__ and evaluate",
+      "modification": "Guard artifact writes when artifacts_dir is falsy; don't write plan snapshots or metrics files in that case.",
+      "reason": "Allows lightweight internal simulations (counterfactuals, evaluator copies) without heavy I/O.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "Simulation._compute_policy_effect",
+      "modification": "Create counterfactual Simulation with artifacts_dir=None to avoid heavy writes.",
+      "reason": "Speeds up evaluation and reduces clutter.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "evaluate_params",
+      "modification": "Instantiate evaluation sims with artifacts_dir=None to reduce I/O; ensure initialization reuse works via module guards.",
+      "reason": "Speeds calibration loops.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "Simulation.evaluate",
+      "modification": "Compute Brier as MSE between sim and GT adoption rate series on common days (else None).",
+      "reason": "Stop outputting placeholder; provide actionable metric.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "gini",
+      "modification": "Set n = len(sorted_vals) after filtering negatives.",
+      "reason": "Correctness for edge cases.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Adoption rate over time",
+      "current_gap": "Calibration focuses mainly on RMSE/MAE without utilizing disaggregated patterns (e.g., group differences, enforcement periods).",
+      "suggestion": "Introduce separate calibration targets for low_income/high_income rates, and incorporate policy period matching (pre/post slope) into the score."
+    },
+    {
+      "metric": "Policy effect size",
+      "current_gap": "Effect is estimated but not validated against an external GT policy period.",
+      "suggestion": "If GT includes policy windows, compute difference-in-differences and calibrate enforcement_strength and compliance_prob_base accordingly."
+    },
+    {
+      "metric": "New adoptions (incidence)",
+      "current_gap": "Aggregate adoption level is smoothed; incidence not directly matched to any GT.",
+      "suggestion": "If GT provides daily new adoptions, calibrate adoption_slope and noise to match incidence peaks and durations."
+    },
+    {
+      "metric": "Inequality",
+      "current_gap": "Gini computed on final snapshot only.",
+      "suggestion": "Track and compare group disparity trajectories over time if GT available; adjust group_target policy or misinfo parameters by group."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix purchase counter double counting (use event.purchases as single source of truth).",
+    "Add no-op guards to NetworkBuilder and AgentInitializer; add bootstrap init in Simulation.run for start_day>0.",
+    "Guard artifact writes when artifacts_dir is None and use None for internal counterfactual/evaluator sims.",
+    "Implement Brier as MSE between sim and GT adoption rate series.",
+    "Correct gini() to use filtered length.",
+    "Audit stdout to ensure only the final JSON is printed; route any other logs to stderr.",
+    "Optionally, add per-agent probability outputs for more granular scoring later."
+  ],
+  "additional_comments": "The recent refactor made the architecture more extensible and simulation dynamics richer (households, retailer, misinformation, policy). The primary remaining concerns are correctness in counters, init flow across windows, and performance of evaluation. Addressing these will stabilize calibration and improve metric fidelity.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "        if \"delta.mask_inventory\" in buffers:\n            for i, delta in enumerate(buffers[\"delta.mask_inventory\"]):\n                self.state[\"agents\"][i][\"mask_inventory\"] = int(self.state[\"agents\"][i].get(\"mask_inventory\", 0) + int(delta))\n            # Update counters\n            total_sold = int(sum(d for d in buffers[\"delta.mask_inventory\"] if d > 0))\n            self.state[\"counters\"][\"total_masks_purchased\"] += total_sold\n            dayc = self.state[\"daily_counters\"].setdefault(t, {\"purchases\": 0, \"enforcements\": 0, \"misinfo_exposures\": 0})\n            dayc[\"purchases\"] += total_sold\n        ...\n        if \"event.purchases\" in buffers:\n            self.state[\"counters\"][\"total_masks_purchased\"] += int(buffers[\"event.purchases\"])\n            dayc = self.state[\"daily_counters\"].setdefault(t, {\"purchases\": 0, \"enforcements\": 0, \"misinfo_exposures\": 0})\n            dayc[\"purchases\"] += int(buffers[\"event.purchases\"])",
+      "after": "        if \"delta.mask_inventory\" in buffers:\n            for i, delta in enumerate(buffers[\"delta.mask_inventory\"]):\n                self.state[\"agents\"][i][\"mask_inventory\"] = int(self.state[\"agents\"][i].get(\"mask_inventory\", 0) + int(delta))\n        # Prefer single source of truth for purchases\n        if \"event.purchases\" in buffers:\n            purchases = int(buffers[\"event.purchases\"])\n        else:\n            purchases = int(sum(d for d in buffers.get(\"delta.mask_inventory\", []) if d > 0))\n        if purchases:\n            self.state[\"counters\"][\"total_masks_purchased\"] += purchases\n            dayc = self.state[\"daily_counters\"].setdefault(t, {\"purchases\": 0, \"enforcements\": 0, \"misinfo_exposures\": 0})\n            dayc[\"purchases\"] += purchases",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], t: int) -> Dict[str, Any]:\n        \"\"\"\n        Build network at t==0 according to plan and parameters; no-op afterwards.\n        \"\"\"\n        pass\n        out: Dict[str, Any] = {}\n        if t != 0:\n            self.io_log[t] = {\"note\": \"no-op\"}\n            return out\n        n = int(self.registry.get_param_or(\"population_size\", 1000))",
+      "after": "    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], t: int) -> Dict[str, Any]:\n        out: Dict[str, Any] = {}\n        # Skip if already built (supports evaluation reuse)\n        if t == 0 and state.get(\"neighbors\"):\n            self.io_log[t] = {\"note\": \"reuse existing network\"}\n            return out\n        if t != 0:\n            self.io_log[t] = {\"note\": \"no-op\"}\n            return out\n        n = int(self.registry.get_param_or(\"population_size\", 1000))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], t: int) -> Dict[str, Any]:\n        \"\"\"\n        Initialize agents at t==0 using parameters; no-op after.\n        \"\"\"\n        pass\n        out: Dict[str, Any] = {}\n        if t != 0:\n            self.io_log[t] = {\"note\": \"no-op\"}\n            return out\n        n = int(self.registry.get_param_or(\"population_size\", 1000))",
+      "after": "    def forward(self, state: Dict[str, Any], buffers: Dict[str, Any], t: int) -> Dict[str, Any]:\n        out: Dict[str, Any] = {}\n        # Skip if agents already exist (supports evaluation reuse)\n        if t == 0 and state.get(\"agents\"):\n            self.io_log[t] = {\"note\": \"reuse existing agents\"}\n            return out\n        if t != 0:\n            self.io_log[t] = {\"note\": \"no-op\"}\n            return out\n        n = int(self.registry.get_param_or(\"population_size\", 1000))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def run(self, start_day: int, end_day: int) -> None:\n        pass\n        T = end_day\n        for t in range(start_day, T + 1):",
+      "after": "    def run(self, start_day: int, end_day: int) -> None:\n        # Bootstrap initialization if starting mid-run\n        if start_day > 0 and not self.state.get(\"agents\"):\n            buffers: Dict[str, Any] = {}\n            for mod in self.modules:\n                out = mod.forward(self.state, buffers, 0)\n                if isinstance(out, dict):\n                    buffers.update(out)\n                self.state.setdefault(\"io\", {}).setdefault(mod.name, {})[0] = mod.io_log.get(0, {})\n            self._commit_buffers(buffers, 0)\n        T = end_day\n        for t in range(start_day, T + 1):",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        safe_makedirs(self.artifacts_dir)\n        with open(os.path.join(self.artifacts_dir, \"plan_snapshot.json\"), \"w\", encoding=\"utf-8\") as f:\n            json.dump(self.plan, f, indent=2)",
+      "after": "        if self.artifacts_dir:\n            safe_makedirs(self.artifacts_dir)\n            with open(os.path.join(self.artifacts_dir, \"plan_snapshot.json\"), \"w\", encoding=\"utf-8\") as f:\n                json.dump(self.plan, f, indent=2)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "    def _compute_policy_effect(self) -> float:\n        ...\n        try:\n            sim_copy = Simulation(self.plan, ParameterRegistry.from_plan(self.plan), seed=self.seed,\n                                  artifacts_dir=os.path.join(self.artifacts_dir, \"policy_cf\"))",
+      "after": "    def _compute_policy_effect(self) -> float:\n        ...\n        try:\n            sim_copy = Simulation(self.plan, ParameterRegistry.from_plan(self.plan), seed=self.seed,\n                                  artifacts_dir=None)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "        results_dir = os.path.join(self.artifacts_dir, \"results\")\n        safe_makedirs(results_dir)\n        with open(os.path.join(results_dir, \"metrics.json\"), \"w\", encoding=\"utf-8\") as f:\n            json.dump(metrics, f, indent=2)",
+      "after": "        if self.artifacts_dir:\n            results_dir = os.path.join(self.artifacts_dir, \"results\")\n            safe_makedirs(results_dir)\n            with open(os.path.join(results_dir, \"metrics.json\"), \"w\", encoding=\"utf-8\") as f:\n                json.dump(metrics, f, indent=2)",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "def gini(values: List[float]) -> float:\n    pass\n    n = len(values)\n    if n == 0:\n        return 0.0\n    sorted_vals = sorted(v for v in values if v >= 0)\n    if not sorted_vals:\n        return 0.0",
+      "after": "def gini(values: List[float]) -> float:\n    pass\n    sorted_vals = sorted(v for v in values if v >= 0)\n    n = len(sorted_vals)\n    if n == 0:\n        return 0.0",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        rmse = None\n        mae = None\n        peak_error = None\n        ttp = None\n        if ground_truth and \"observable.adoption_rate_daily\" in ground_truth:\n            gt_series_full = ground_truth[\"observable.adoption_rate_daily\"]\n            gt_by_t = {pt[\"t\"]: pt[\"value\"] for pt in gt_series_full}\n            common_ts = sorted(set(sim_by_t.keys()) & set(gt_by_t.keys()))\n            if common_ts:\n                diffs = [sim_by_t[t] - gt_by_t[t] for t in common_ts]\n                L = len(diffs)\n                rmse = math.sqrt(sum(d * d for d in diffs) / L)\n                mae = sum(abs(d) for d in diffs) / L",
+      "after": "        rmse = None\n        mae = None\n        brier = None\n        peak_error = None\n        ttp = None\n        if ground_truth and \"observable.adoption_rate_daily\" in ground_truth:\n            gt_series_full = ground_truth[\"observable.adoption_rate_daily\"]\n            gt_by_t = {pt[\"t\"]: pt[\"value\"] for pt in gt_series_full}\n            common_ts = sorted(set(sim_by_t.keys()) & set(gt_by_t.keys()))\n            if common_ts:\n                diffs = [sim_by_t[t] - gt_by_t[t] for t in common_ts]\n                L = len(diffs)\n                mse = sum(d * d for d in diffs) / L\n                rmse = math.sqrt(mse)\n                mae = sum(abs(d) for d in diffs) / L\n                brier = mse",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    ...\n    sim_copy = Simulation(simulator.plan, ParameterRegistry.from_plan(simulator.plan), seed=simulator.seed,\n                          artifacts_dir=os.path.join(simulator.artifacts_dir, \"eval_tmp\"))",
+      "after": "def evaluate_params(simulator: Simulation, params: FittedParams, window: Tuple[int, int]) -> Dict[str, Any]:\n    ...\n    sim_copy = Simulation(simulator.plan, ParameterRegistry.from_plan(simulator.plan), seed=simulator.seed,\n                          artifacts_dir=None)",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes introduced substantial functionality (households, retailer, media misinformation, policy maker, adapters, calibrators). They also added schema flexibility and better seeding/error handling. However, they introduced double counting of purchases, heavier evaluation due to counterfactual artifact writes, and state reuse optimizations that are not yet effective.",
+    "positive_impacts": [
+      "Schema adapter and validation improvements.",
+      "New domain modules supporting richer dynamics.",
+      "Evaluator metrics extended with policy/misinformation metrics.",
+      "Calibrators now use a standardized evaluator callback.",
+      "More robust network IO and seeding."
+    ],
+    "negative_impacts": [
+      "Double counting purchases in counters.",
+      "State reuse during calibration is ineffective.",
+      "Counterfactual evaluation is heavy on I/O.",
+      "Potential uninitialized runs when start_day>0 in custom windows."
+    ],
+    "suggestions": [
+      "Finalize the reuse path by guarding init modules and bootstrapping run() for mid-start.",
+      "Consolidate purchase counting to a single source.",
+      "Guard all artifact writes and use artifacts_dir=None for internal runs.",
+      "Add basic Brier calculation or remove it from reported metrics if not applicable."
+    ]
+  }
+}

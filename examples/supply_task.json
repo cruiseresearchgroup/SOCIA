@@ -1,0 +1,51 @@
+{
+  "task_objective": {
+    "description": "Develop a supply chain simulation system that models a single-stage Beer Game supply chain environment. The simulator should automatically generate and calibrate parameters using simulation-based inference (SBI) or gradient-free optimization methods to optimize parameters on observed training state-action trajectories. The environment models inventory management dynamics, including on-hand inventory, pipeline shipments with lead times, backlog (unfilled demand), and demand generation. The goal is to generate a calibrated simulator that can accurately predict supply chain dynamics and generalize to out-of-distribution scenarios, such as different lead times or demand parameters.",
+    "simulation_focus": [
+      "Generate and calibrate simulator parameters using simulation-based inference (SBI) or gradient-free optimization to optimize parameters on observed training state-action trajectories",
+      "Model supply chain dynamics including inventory, pipeline (shipments with lead times), backlog, and stochastic demand generation",
+      "Optimize parameters to minimize Wasserstein distance between simulated and observed state distributions",
+      "Evaluate simulator performance using Wasserstein distance, MMD (Maximum Mean Discrepancy), and MSE (Mean Squared Error) on validation and test sets",
+      "Test out-of-distribution (OOD) generalization with different lead times and demand parameters"
+    ]
+  },
+  "data_folder": "data_fitting/supply_data/",
+  "data_files": {
+    "train_data.csv": "Training trajectory data containing state-action sequences for supply chain simulation. Each row represents a state at a specific time step in a trajectory. Columns include: trajectory_id (unique identifier for each trajectory), time_step (time step index within trajectory, 0-60), inventory (on-hand units, integer), backlog (unfilled demand units, integer), pipeline_len (number of shipments in pipeline, integer), pipeline_items (JSON array of pipeline shipments, each shipment is a tuple [quantity, time_remaining]), action (order quantity placed with supplier, constant=4), t (current time step, integer). The data contains 100 trajectories, each with 61 time steps (t=0 to t=60). Each trajectory starts with a random initial inventory between 15-51 units, and evolves according to supply chain dynamics including demand generation, inventory fulfillment, pipeline shipments, and backlog accumulation.",
+    "val_data.csv": "Validation trajectory data with the same structure as training data. Used for parameter calibration and model selection. Contains 100 trajectories, each with 61 time steps. The validation set is generated using the same ground-truth simulator parameters as the training set, but with different random seeds to ensure independent evaluation.",
+    "test_data.csv": "Test trajectory data with the same structure as training data. Used for final evaluation of the calibrated simulator. Contains 100 trajectories, each with 61 time steps. The test set is generated using the same ground-truth simulator parameters as the training set, but with different random seeds to ensure independent evaluation. This set can also be used for out-of-distribution (OOD) evaluation by generating test data with different parameters (e.g., different lead times).",
+    "metadata.json": "Metadata file containing data statistics, description, and configuration information. Includes: description (SupplyChain), n_trajectories (100 per set), trajectory_length (61 time steps), seed (0 for reproducibility), state_variables (inventory, backlog, pipeline_len, t), action (4), and statistics (mean and std for inventory and backlog for each dataset)."
+  },
+  "evaluation_metrics": {
+    "Wasserstein_distance_in_distribution": {
+      "description": "In-distribution Wasserstein distance (also known as Earth Mover's Distance) measuring distribution-level fitting accuracy between simulated and observed state distributions on test set with same parameters as training. This is computed by the _wass_and_mmd_distance function which samples 200 states from both simulated and observed distributions at each time step, then computes the optimal transport distance using POT (Python Optimal Transport) library. The test_losses dictionary returned by evaluate_simulator_code_using_sbi contains 'wass' key with this metric.",
+      "interpretation": "Lower values indicate better distribution alignment. Typical values range from 0.5 to 10.0. Values below 1.0 indicate good fitting, values between 1.0 and 3.0 indicate moderate fitting, and values above 5.0 indicate poor fitting.",
+      "formula": "Wasserstein distance is computed using optimal transport theory. For each trajectory and time step, 200 samples are generated from both the simulated simulator (with optimized parameters) and the ground-truth simulator (SimulatorStep with default parameters: demand_lambda=5.0, lead_time=2). The optimal transport cost between the two distributions is computed using ot.emd() from POT library.",
+      "code_reference": "Computed in _wass_and_mmd_distance() function, which is called by _compute_all_losses_with_states() with full=True. The result is stored in test_losses['wass'] dictionary returned by evaluate_simulator_code_using_sbi()."
+    },
+    "Wasserstein_distance_OOD": {
+      "description": "Out-of-distribution (OOD) Wasserstein distance measuring distribution-level fitting accuracy on test set with different parameters than training. To compute OOD Wasserstein distance, generate test data with different parameters (e.g., lead_time=5 instead of default lead_time=2) using the ground-truth simulator, then evaluate the calibrated simulator (with same optimized parameters from training) on this OOD test data. This tests the simulator's generalization capability to distribution shifts.",
+      "interpretation": "Lower values indicate better OOD generalization. OOD Wasserstein distance is typically higher than in-distribution Wasserstein distance. The ratio of OOD to in-distribution Wasserstein distance indicates generalization capability. A ratio close to 1.0 indicates good generalization, while a ratio above 1.5 indicates poor generalization.",
+      "formula": "Same as in-distribution Wasserstein distance, but computed on test data generated with different parameters. The ground-truth simulator (SimulatorStep) uses different parameters (e.g., lead_time=5) to generate OOD test data, while the calibrated simulator uses the same optimized parameters from training.",
+      "code_reference": "Computed using the same _wass_and_mmd_distance() function, but with test data generated using different parameters. The ground-truth simulator parameters can be modified (e.g., SimulatorStep().parameters[3] = 5 for lead_time=5) before generating OOD test data."
+    },
+    "MMD": {
+      "description": "Maximum Mean Discrepancy (MMD) measuring distribution-level fitting accuracy using kernel methods. MMD is computed using a Gaussian kernel with sigma parameter (default: 1.0, configurable via config.run.mmd_sigma). This metric is computed alongside Wasserstein distance in the _wass_and_mmd_distance() function and provides a complementary measure for evaluating distribution alignment.",
+      "interpretation": "Lower values indicate better distribution alignment. MMD is less sensitive to outliers than Wasserstein distance but may be less interpretable. Typical values range from 0.1 to 10.0. Values below 0.5 indicate good fitting.",
+      "formula": "MMD is computed using a Gaussian kernel: MMD(X, Y) = E[k(x_i, x_j)] + E[k(y_i, y_j)] - 2*E[k(x_i, y_j)], where k is a Gaussian kernel with parameter sigma (default: 1.0). Computed in compute_mmd() function.",
+      "code_reference": "Computed in _wass_and_mmd_distance() function, which calls compute_mmd() function. The result is stored in test_losses['mmd'] dictionary returned by evaluate_simulator_code_using_sbi()."
+    },
+    "MSE": {
+      "description": "Mean Squared Error (MSE) measuring trajectory-level fitting accuracy. MSE is computed as the average squared difference between predicted and observed state values across all trajectories and time steps. This is computed in _compute_all_losses_with_states() function by comparing predicted trajectories from the calibrated simulator with observed trajectories from the ground-truth simulator.",
+      "interpretation": "Lower values indicate better trajectory-level prediction accuracy. MSE is useful for debugging and fine-tuning, but may not capture distribution-level properties. Typical values range from 1.0 to 100.0. Values below 10.0 indicate good fitting.",
+      "formula": "MSE = mean((predicted_state - observed_state)^2) across all trajectories and time steps. Computed in _compute_all_losses_with_states() function by comparing true_x (observed trajectories) and predicted_x (simulated trajectories).",
+      "code_reference": "Computed in _compute_all_losses_with_states() function. The result is stored in test_losses['mse'] dictionary returned by evaluate_simulator_code_using_sbi()."
+    },
+    "MSE_per_dimension": {
+      "description": "Mean Squared Error per dimension, measuring trajectory-level fitting accuracy for each state variable separately. For SUPPLY environment, the four dimensions are: inventory, backlog, pipeline_len, and t. This is computed in _compute_mse_per_dimension_with_states() function and returned as val_loss_per_dim in evaluate_simulator_code_using_sbi().",
+      "interpretation": "Lower values indicate better prediction accuracy for each dimension. This metric helps identify which state variables are more difficult to predict. Typical values range from 0.1 to 100.0 per dimension.",
+      "formula": "MSE per dimension = mean((predicted_state_dim - observed_state_dim)^2) for each dimension separately. Computed in _compute_mse_per_dimension_with_states() function.",
+      "code_reference": "Computed in _compute_mse_per_dimension_with_states() function. The result is returned as val_loss_per_dim (numpy array of shape [4]) in evaluate_simulator_code_using_sbi(), which is then converted to a dictionary with keys: inventory, backlog, pipeline_len, t."
+    }
+  }
+}

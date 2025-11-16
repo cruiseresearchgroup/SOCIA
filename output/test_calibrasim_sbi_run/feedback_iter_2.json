@@ -1,0 +1,268 @@
+{
+  "summary": "The simulation runs but diverges significantly from the Mask Adoption Diffusion Simulation specification. Core entities/attributes/behaviors are misaligned, critical metrics and validation criteria are missing, and several logic issues (e.g., handling null mandates) can lead to incorrect outputs. Recent changes improved module ordering, inventory gating, and O(1) lookups, but introduced code duplication and left key spec elements unimplemented. The next iteration should prioritize aligning entities and parameters with the spec, implement adherence dynamics and required metrics (masked_interaction_fraction, supply_adequacy, policy_effect_size), and harden logic for null policy parameters.",
+  "critical_issues": [
+    {
+      "issue": "Entities and parameters diverge from the task specification",
+      "impact": "Misaligned entities (PolicyCampaign vs PolicyMaker, InformationChannel vs MediaSource) and missing attributes (adherence_prob, fatigue, mask_quality, etc.) prevent implementing the required behaviors and metrics, reducing validity and preventing verification against validation criteria.",
+      "solution": "Extend or refactor dataclasses and parameters to include fields specified in the Task Specification (adherence_prob, mask_quality, fatigue_level, workplace_id, daily_contacts, price_elasticity_of_demand, etc.). Map PolicyCampaign to PolicyMaker semantics and InformationChannel to MediaSource, or rename for clarity. Update all modules to use these parameters.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "No adherence probability or fatigue dynamics implemented",
+      "impact": "Wearing is deterministic based on a decision threshold. The model cannot represent partial compliance or fatigue decay, leading to unrealistic adherence trajectories and preventing computation of average_adherence.",
+      "solution": "Add adherence_prob to Person and implement fatigue decay via adherence_decay_rate. Sample wearing as Bernoulli(adherence_prob) when the agent decides to wear; update adherence_prob over time.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Mandate dates do not handle null values",
+      "impact": "Comparisons like day >= None raise errors or force mandates when unset. Validation scenario 'sanity_no_policy_no_supply_increase' cannot be tested.",
+      "solution": "Guard against None when computing mandate_active using safe boolean logic. Default to no mandate when start or end is None.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Required metrics missing (masked_interaction_fraction, supply_adequacy, policy_effect_size, final_adoption_rate, time_to_50_percent_adoption, average_adherence, sustained_adoption_rate)",
+      "impact": "The simulation cannot be evaluated against the provided validation criteria. Policy and supply effects are unquantified.",
+      "solution": "Compute and record per-day masked_interaction_fraction, daily supply fraction, and implement summary metrics: final_adoption_rate, time_to_50_percent_adoption, average_adherence (among adopters), policy_effect_size (diff-in-diff or simple before/after), sustained_adoption_rate after policy ends.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Duplicate summarize_metrics method and redundant metric aggregation calls",
+      "impact": "Code duplication increases maintenance burden and risks inconsistent outputs; evaluate() calls summarize twice redundantly.",
+      "solution": "Remove the duplicate summarize_metrics method and consolidate into a single function that returns all required summary metrics. Call it once from evaluate().",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Price elasticity of demand not used in purchasing behavior",
+      "impact": "Demand does not respond correctly to price changes, undermining the price_sensitivity_direction validation.",
+      "solution": "Use price_elasticity_of_demand in purchase intent probability or quantity (e.g., qty ~ (price / baseline_price)^elasticity) and honor income/SES constraints.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Network neighbor mapping relies on ID == index assumption",
+      "impact": "If IDs are not contiguous or equal to indices, peer influence will break. This is fragile for future refactors.",
+      "solution": "Create an explicit mapping between graph nodes and agent IDs in SocialNetworkBuilder and propagate neighbor IDs accordingly.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Contact generation ignores max_contacts_per_day and workplace_contact_multiplier",
+      "impact": "Inflated or misallocated contact opportunities lead to unrealistic social influence exposure and masked interaction estimates.",
+      "solution": "Cap contacts per agent by max_contacts_per_day and multiply contact rate for workplaces via workplace_contact_multiplier.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Adherence modeling and fatigue",
+      "current_approach": "Binary mask_use_state decided deterministically by a utility threshold; no adherence probability or fatigue.",
+      "suggested_approach": "Introduce adherence_prob per agent; when an agent decides to wear, draw from Bernoulli(adherence_prob). Apply adherence_decay_rate to model fatigue and partial recovery via habit formation.",
+      "expected_benefit": "More realistic compliance dynamics and ability to compute average_adherence; better alignment with observed behavior."
+    },
+    {
+      "aspect": "Policy semantics and null handling",
+      "current_approach": "PolicyCampaign uses fixed numeric dates; does not accept None.",
+      "suggested_approach": "Map to PolicyMaker semantics with None/default values; compute mandate_active robustly. Add free_mask_distribution_rate.",
+      "expected_benefit": "Supports validation scenarios and prevents runtime errors; improves policy effect measurement."
+    },
+    {
+      "aspect": "Contacts and masked interaction fraction",
+      "current_approach": "Contacts are sampled per location without clamping per agent and without computing masked_interaction_fraction.",
+      "suggested_approach": "Track contacts per agent capped by max_contacts_per_day. Compute masked_interaction_fraction daily from contact pairs and mask states.",
+      "expected_benefit": "Accurate measurement of masking in interactions; supports validation and policy effect analysis."
+    },
+    {
+      "aspect": "Supply adequacy tracking",
+      "current_approach": "Retail stock is updated but no per-day supply adequacy metric is computed.",
+      "suggested_approach": "Record daily fraction of retailers with stock > 0 and compute supply_adequacy as mean across days or share of days above a threshold.",
+      "expected_benefit": "Quantifies availability constraints; supports supply-related validations."
+    },
+    {
+      "aspect": "Price sensitivity and purchasing",
+      "current_approach": "Purchase intents are fixed quantities with minimal affordability term.",
+      "suggested_approach": "Use price_elasticity_of_demand to adjust purchase probability/quantity; consider SES and budget constraints explicitly.",
+      "expected_benefit": "Correct demand response to price changes; satisfies validation on price sensitivity direction."
+    },
+    {
+      "aspect": "Parameter alignment",
+      "current_approach": "Custom parameters under MODEL_PLAN; missing those specified in the task.",
+      "suggested_approach": "Adopt the task parameter names and defaults (population_size=10000, simulation_days=180, etc.) and map existing logic to them.",
+      "expected_benefit": "Consistency with spec and validation harness; easier scenario testing."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Handle None for mandate_start_day and mandate_end_day in PolicyCampaignModule.update and avoid forcing numeric defaults at entity creation.",
+      "reason": "Prevents TypeError and supports no-policy scenarios per validation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add adherence_prob and fatigue_level to Person; implement adherence decay and Bernoulli wearing in BehaviorDecisionModule.update.",
+      "reason": "Enables average_adherence metric and realistic compliance dynamics.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Compute masked_interaction_fraction in AdoptionAggregator.update using signals['contacts'] and signals['person']['mask_use_state'].",
+      "reason": "Required metric; ensures interaction masking is measured.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Track supply adequacy per day from signals['retail']['stock_levels'] and compute overall supply_adequacy in summarize_metrics.",
+      "reason": "Required metric; quantifies availability constraints.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Remove duplicate summarize_metrics and redundant calls in evaluate(); compute additional required metrics (final_adoption_rate, time_to_50_percent_adoption, policy_effect_size, sustained_adoption_rate).",
+      "reason": "Avoid duplication and satisfy spec metrics.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Use price_elasticity_of_demand for purchase intent quantity as a function of expected price.",
+      "reason": "Aligns with spec and ensures correct direction of price sensitivity.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Cap per-agent contacts by max_contacts_per_day and apply workplace_contact_multiplier for 'workplaces' locations.",
+      "reason": "Aligns contacts with spec and avoids inflated interaction counts.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Future-proof SocialNetworkBuilder by mapping graph indices to agent IDs explicitly.",
+      "reason": "Removes fragile assumption ID == index.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Align MODEL_PLAN parameters with the Task Specification and propagate to modules.",
+      "reason": "Consistency with required inputs and validation harness.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "average_adherence",
+      "current_gap": "No adherence probability or fatigue; cannot compute.",
+      "suggestion": "Record and update adherence_prob per agent; average among adopters or those with adherence >= threshold."
+    },
+    {
+      "metric": "policy_effect_size",
+      "current_gap": "No causal effect estimation; only raw adoption rate.",
+      "suggestion": "Compute difference-in-differences or before/after change around mandate_start_day with a defined pre- and post-window (e.g., 14 days)."
+    },
+    {
+      "metric": "supply_adequacy",
+      "current_gap": "Not tracked.",
+      "suggestion": "Record daily fraction of retailers with stock > 0; supply_adequacy as mean across days or proportion of days above a threshold."
+    },
+    {
+      "metric": "masked_interaction_fraction",
+      "current_gap": "Contacts exist but fraction not computed.",
+      "suggestion": "For each contact, mark masked if any party wore a mask; compute daily fraction and track over time."
+    },
+    {
+      "metric": "price sensitivity direction",
+      "current_gap": "No elasticity; hard to validate direction.",
+      "suggestion": "Implement price_elasticity_of_demand and run A/B scenarios with lower and higher mask_price to confirm non-positive elasticity."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement adherence_prob and adherence fatigue; adjust BehaviorDecisionModule to sample wearing and update fatigue.",
+    "Fix mandate None handling and refactor policy semantics to match PolicyMaker; include free_mask_distribution_rate.",
+    "Compute masked_interaction_fraction and supply_adequacy; extend AdoptionAggregator and evaluate() to return all required metrics.",
+    "Align MODEL_PLAN parameters with the Task Specification and propagate to modules (simulation_days=180, price_elasticity_of_demand, retailer_restock_rate, etc.).",
+    "Remove duplicate summarize_metrics and redundant calls; centralize metric computation.",
+    "Introduce price elasticity into purchase behavior.",
+    "Cap per-agent contacts and apply workplace_contact_multiplier; integrate max_contacts_per_day.",
+    "Harden SocialNetworkBuilder with explicit ID mapping."
+  ],
+  "additional_comments": "Recent refactors improved runtime and logic order (behavior before mobility), added O(1) lookups, inventory gating, and enforcement fine deduction. These are strong steps. The main gaps now are alignment with the Task Specification and metric coverage for validation. Once adherence and metrics are implemented, you can iterate on calibration and scenario testing.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "mandate_active = (day >= self.policy.mandate_start_day) and (day <= self.policy.mandate_end_day)",
+      "after": "start = self.policy.mandate_start_day\nend = self.policy.mandate_end_day\nmandate_active = bool((start is not None) and (end is not None) and (start <= day <= end))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "@dataclass\nclass Person:\n    ...\n    mask_use_state: int\n    compliance_threshold: float\n    network_neighbors: List[int] = field(default_factory=list)\n    ...",
+      "after": "@dataclass\nclass Person:\n    ...\n    mask_use_state: int\n    compliance_threshold: float\n    adherence_prob: float = 0.8  # new\n    fatigue_level: float = 0.0   # new in [0,1]\n    mask_quality: float = 0.7    # new in [0,1]\n    network_neighbors: List[int] = field(default_factory=list)\n    ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "# Utility-based decision\nutility = 0.0\n...\nwill_wear = (decision_score >= threshold) and can_wear\n...\nnew_state = 1 if will_wear else 0",
+      "after": "# Utility-based decision\nutility = 0.0\n...\nwill_wear_intent = (decision_score >= threshold) and can_wear\n# Adherence with fatigue dynamics\nadherence = clamp(p.adherence_prob * (1.0 - p.fatigue_level), 0.0, 1.0)\nwore_today = 1 if (will_wear_intent and (self.rng.random() < adherence)) else 0\n# Fatigue update\nfatigue_decay = float(self.params.get('adherence_decay_rate', 0.01))\np.fatigue_level = clamp(p.fatigue_level + (1 if will_wear_intent else -1)*0.5*fatique_decay, 0.0, 1.0)\n# Optional habit recovery when wearing\nif wore_today:\n    p.adherence_prob = clamp(p.adherence_prob + 0.05*(1 - p.adherence_prob), 0.0, 1.0)\nnew_state = wore_today",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "contact_rate_mean = float(self.params.get(\"contact_rate_per_location_mean\", 5.0))\n...\nexpected_contacts = poisson(est_rate, rng=self.rng)\natt = L.attendees.copy()\nif len(att) >= 2:\n    for _ in range(expected_contacts):\n        i, j = self.rng.choice(att), self.rng.choice(att)\n        if i != j:\n            contacts.append({\"a\": i, \"b\": j, \"location_id\": L.id})",
+      "after": "contact_rate_mean = float(self.params.get('contact_rate_per_location_mean', 5.0))\nmax_contacts = int(self.params.get('max_contacts_per_day', 20))\nwork_mult = float(self.params.get('workplace_contact_multiplier', 1.0))\n...\nbase_rate = max(0.0, contact_rate_mean + safe_normal(0.0, contact_rate_sd, rng=self.rng))\nif L.type == 'workplaces':\n    base_rate *= work_mult\nexpected_contacts = min(poisson(base_rate, rng=self.rng), max_contacts)\natt = L.attendees.copy()\nif len(att) >= 2:\n    for _ in range(expected_contacts):\n        i, j = self.rng.choice(att), self.rng.choice(att)\n        if i != j:\n            contacts.append({'a': i, 'b': j, 'location_id': L.id})",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "rec = {\n    'day': day,\n    'adoption_rate': adoption_rate,\n    'churn_rate': churn_rate,\n    'adoption_disparity_index': adoption_disparity_index,\n    'location_compliance_rate': location_compliance_rate,\n    'avg_price': avg_price,\n}\nself.daily_records.append(rec)",
+      "after": "# Compute masked interaction fraction\ncontacts = signals.get('contacts', [])\nmask_map = mask_use_map\nmasked_contacts = 0\nfor c in contacts:\n    ai, bi = c['a'], c['b']\n    if mask_map.get(ai, 0) == 1 or mask_map.get(bi, 0) == 1:\n        masked_contacts += 1\nmasked_interaction_fraction = (masked_contacts / len(contacts)) if contacts else 0.0\n# Supply fraction\nstock_levels = signals.get('retail', {}).get('stock_levels', {})\ndaily_supply_fraction = np.mean([1.0 if v > 0 else 0.0 for v in stock_levels.values()]) if stock_levels else 0.0\n# Average adherence among adopters\navg_adherence = float(np.mean([getattr(a, 'adherence_prob', 0.0) for a in self.agents if mask_map.get(a.id, a.mask_use_state) == 1])) if self.agents else 0.0\nrec = {\n    'day': day,\n    'adoption_rate': adoption_rate,\n    'churn_rate': churn_rate,\n    'adoption_disparity_index': adoption_disparity_index,\n    'location_compliance_rate': location_compliance_rate,\n    'avg_price': avg_price,\n    'masked_interaction_fraction': masked_interaction_fraction,\n    'daily_supply_fraction': daily_supply_fraction,\n    'average_adherence': avg_adherence\n}\nself.daily_records.append(rec)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def summarize_metrics(self) -> Dict[str, Any]:\n    df = self.to_dataframe()\n    peak_adoption = float(df['adoption_rate'].max()) if not df.empty else 0.0\n    mandate_end = int(self.params.get('mandate_end_day', 90))\n    post = df[df['day'] > mandate_end] if not df.empty else pd.DataFrame()\n    sustained_adoption = float(post['adoption_rate'].mean()) if not post.empty else None\n    return {'peak_adoption': peak_adoption, 'sustained_adoption_post_mandate': sustained_adoption}",
+      "after": "def summarize_metrics(self) -> Dict[str, Any]:\n    df = self.to_dataframe()\n    out = {}\n    if df.empty:\n        return {\n            'peak_adoption': 0.0,\n            'final_adoption_rate': 0.0,\n            'time_to_50_percent_adoption': None,\n            'sustained_adoption_rate': None,\n            'policy_effect_size': None,\n            'supply_adequacy': None,\n            'average_adherence': None\n        }\n    out['peak_adoption'] = float(df['adoption_rate'].max())\n    out['final_adoption_rate'] = float(df['adoption_rate'].iloc[-1])\n    over50 = df[df['adoption_rate'] >= 0.5]\n    out['time_to_50_percent_adoption'] = int(over50['day'].iloc[0]) if not over50.empty else None\n    # Sustained adoption after mandate end\n    mandate_end = self.params.get('mandate_end_day', None)\n    if mandate_end is not None:\n        post = df[df['day'] > int(mandate_end)]\n        out['sustained_adoption_rate'] = float(post['adoption_rate'].mean()) if not post.empty else None\n    else:\n        out['sustained_adoption_rate'] = None\n    # Simple policy effect size: 14-day before vs 14-day after start\n    start = self.params.get('mandate_start_day', None)\n    if start is not None:\n        pre = df[(df['day'] >= max(0, int(start) - 14)) & (df['day'] < int(start))]\n        post = df[(df['day'] > int(start)) & (df['day'] <= int(start) + 14)]\n        if not pre.empty and not post.empty:\n            out['policy_effect_size'] = float(post['adoption_rate'].mean() - pre['adoption_rate'].mean())\n        else:\n            out['policy_effect_size'] = None\n    else:\n        out['policy_effect_size'] = None\n    # Supply adequacy: mean of daily_supply_fraction across days\n    out['supply_adequacy'] = float(df['daily_supply_fraction'].mean()) if 'daily_supply_fraction' in df.columns else None\n    # Average adherence across period\n    out['average_adherence'] = float(df['average_adherence'].mean()) if 'average_adherence' in df.columns else None\n    return out",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "if \"adoption_rate_over_time\" in metrics_to_compute:\n    metrics[\"adoption_rate_over_time\"] = self.results_df[[\"day\", \"adoption_rate\"]].copy()\n...\nsummary = self.aggregator.summarize_metrics()\nmetrics.update(summary)\n# FIXED: Add peak and sustained adoption metrics for completeness\nsummary = self.aggregator.summarize_metrics()\nmetrics.update(summary)",
+      "after": "if \"adoption_rate_over_time\" in metrics_to_compute:\n    metrics[\"adoption_rate_over_time\"] = self.results_df[[\"day\", \"adoption_rate\"]].copy()\n# Additional required metrics\nsummary = self.aggregator.summarize_metrics()\nmetrics.update({\n    'peak_adoption': summary.get('peak_adoption'),\n    'final_adoption_rate': summary.get('final_adoption_rate'),\n    'time_to_50_percent_adoption': summary.get('time_to_50_percent_adoption'),\n    'sustained_adoption_rate': summary.get('sustained_adoption_rate'),\n    'policy_effect_size': summary.get('policy_effect_size'),\n    'supply_adequacy': summary.get('supply_adequacy'),\n    'average_adherence': summary.get('average_adherence')\n})",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "expected_retail_price = self.prev_avg_price\nif expected_retail_price is None or (isinstance(expected_retail_price, float) and np.isnan(expected_retail_price)):\n    expected_retail_price = mask_cost * (1.0 + price_markup_mean)\n...\nif (decision_score >= threshold) and not can_wear:\n    purchase_intents.append({\"agent_id\": p.id, \"qty\": 5})",
+      "after": "expected_retail_price = self.prev_avg_price\nif expected_retail_price is None or (isinstance(expected_retail_price, float) and np.isnan(expected_retail_price)):\n    expected_retail_price = mask_cost * (1.0 + price_markup_mean)\nprice_elasticity = float(self.params.get('price_elasticity_of_demand', -0.8))\nbase_qty = 5\nprice_ratio = max(0.1, expected_retail_price / max(0.1, mask_cost))\nqty_adj = base_qty * (price_ratio ** price_elasticity)\nqty = int(max(0, round(qty_adj)))\nif (decision_score >= threshold) and not can_wear and qty > 0:\n    purchase_intents.append({'agent_id': p.id, 'qty': qty})",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "G = nx.watts_strogatz_graph(n, k, rewiring, seed=seed)\n...\nfor i, agent in enumerate(agents):\n    neighbors = list(G.neighbors(i))\n    agent.network_neighbors = neighbors",
+      "after": "G = nx.watts_strogatz_graph(n, k, rewiring, seed=seed)\n# Map graph node index -> agent.id\nidx_to_id = {idx: agent.id for idx, agent in enumerate(agents)}\nid_to_idx = {agent.id: idx for idx, agent in enumerate(agents)}\nfor idx, agent in enumerate(agents):\n    neighbors_idx = list(G.neighbors(idx))\n    neighbors_ids = [idx_to_id[n] for n in neighbors_idx]\n    agent.network_neighbors = neighbors_ids",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "\"parameters\": {\n    \"seed\": 42, \"time_horizon_days\": 120, ...\n}",
+      "after": "\"parameters\": {\n    \"random_seed\": 42,\n    \"population_size\": 10000,\n    \"simulation_days\": 180,\n    \"time_step_days\": 1,\n    \"network_topology\": \"small_world\",\n    \"average_degree\": 12,\n    \"initial_adoption_rate\": 0.1,\n    \"social_influence_strength\": 0.5,\n    \"risk_sensitivity\": 0.4,\n    \"misinformation_rate\": 0.05,\n    \"trust_in_authority_mean\": 0.6,\n    \"adherence_decay_rate\": 0.01,\n    \"mask_price\": 1.0,\n    \"price_elasticity_of_demand\": -0.8,\n    \"retailer_restock_rate\": 0.1,\n    \"initial_inventory_per_retailer\": 500,\n    \"mandate_start_day\": null,\n    \"enforcement_strength\": 0.7,\n    \"fine_amount\": 50.0,\n    \"messaging_intensity\": 0.5,\n    \"free_mask_distribution_rate\": 0.0,\n    \"workplace_contact_multiplier\": 1.2,\n    \"household_norm_strength\": 0.5,\n    \"mask_quality_mean\": 0.7,\n    \"max_contacts_per_day\": 20\n}",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "Recent changes substantially improved performance and correctness in several areas (module ordering, enforcement, O(1) lookups, honoring locations_count_by_type). However, key spec requirements remain unimplemented, and code duplication was introduced.",
+    "positive_impacts": [
+      "Behavior decisions are now made before mobility/enforcement, producing coherent daily states.",
+      "Inventory gating and household sharing prevent wearing without stock.",
+      "Enforcement now deducts fines from household budget and sets a next-day prompt flag.",
+      "Use of O(1) maps reduces complexity and improves performance.",
+      "locations_count_by_type parameter is now honored."
+    ],
+    "negative_impacts": [
+      "Duplicate summarize_metrics method and redundant calls in evaluate(), adding maintenance risk.",
+      "No handling of None for mandate dates, risking runtime issues in validation scenarios.",
+      "Metrics required by the spec remain missing, so evaluation cannot validate the model."
+    ],
+    "suggestions": [
+      "Remove duplicate summarize_metrics and centralize metric computation; update evaluate() accordingly.",
+      "Implement adherence probability/fatigue, masked_interaction_fraction, supply_adequacy, and policy_effect_size.",
+      "Align parameters and entities with the Task Specification, and map existing fields as needed.",
+      "Harden mandate handling for null and compute pre/post windows safely."
+    ]
+  }
+}

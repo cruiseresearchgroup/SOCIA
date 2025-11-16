@@ -1,0 +1,1017 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based social adoption model on a homophilous small-world network with opinion dynamics (Friedkin-Johnsen), policy nudges, media influence, and habit/fatigue, designed to forecast daily adoption and related observables.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age_group",
+        "income_quantile",
+        "community_id",
+        "degree_preference",
+        "opinion",
+        "opinion_initial",
+        "risk_perception",
+        "adoption",
+        "adopted_day",
+        "fatigue",
+        "compliance_propensity",
+        "policy_sensitivity",
+        "peer_influence_weight",
+        "media_influence_weight",
+        "threshold",
+        "media_preference"
+      ],
+      "behaviors": [
+        "form_contacts",
+        "consume_media",
+        "update_opinion",
+        "decide_adoption",
+        "update_fatigue"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "opinion_distribution": "Beta(2,2) scaled to [0,1]",
+          "risk_perception_distribution": "Beta(2.5,2.0)",
+          "compliance_propensity_distribution": "Beta(3,2)",
+          "policy_sensitivity_distribution": "Normal(0.6, 0.15) truncated to [0,1]",
+          "peer_influence_weight_distribution": "Normal(0.7, 0.1) truncated to [0,1]",
+          "media_influence_weight_distribution": "Normal(0.4, 0.1) truncated to [0,1]",
+          "threshold_distribution": "Normal(0.5, 0.15) truncated to [0,1]",
+          "media_preference_categories": [
+            "public_service",
+            "commercial",
+            "social_media"
+          ],
+          "initial_adoption_rate": 0.05
+        }
+      }
+    },
+    {
+      "name": "MediaSource",
+      "attributes": [
+        "id",
+        "bias",
+        "reach_prob",
+        "message_intensity",
+        "credibility"
+      ],
+      "behaviors": [
+        "broadcast_message"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "count": 3,
+          "bias_values": [
+            -0.2,
+            0.0,
+            0.2
+          ],
+          "reach_probs": [
+            0.15,
+            0.25,
+            0.35
+          ],
+          "message_intensities": [
+            0.3,
+            0.5,
+            0.6
+          ],
+          "credibilities": [
+            0.7,
+            0.8,
+            0.6
+          ]
+        }
+      }
+    },
+    {
+      "name": "PolicyAuthority",
+      "attributes": [
+        "id",
+        "policy_level",
+        "incentive_amount",
+        "mandate_flag",
+        "enforcement_prob",
+        "campaign_intensity",
+        "active"
+      ],
+      "behaviors": [
+        "set_policy_level",
+        "run_campaign"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_level": 0.0,
+          "incentive_amount": 10.0,
+          "mandate_flag": false,
+          "enforcement_prob": 0.2,
+          "campaign_intensity": 0.4
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the social network with homophily and community structure; initializes Person attributes.",
+      "inputs": [],
+      "outputs": [
+        "graph.G",
+        "population.persons"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "steps",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "if step == 0:\n  set RNG with rng_seed\n  assign community_id to each person ~ Categorical(community_count, equal)\n  assign age_group, income_quantile per specified distributions\n  build base ring lattice with population_size nodes and avg_degree\n  for each edge: with probability rewiring_prob, rewire to random node\n  adjust edge formation probabilities to increase within-community and similar age_group links using homophily_strength and assortativity_by_age\n  add household cliques by sampling cluster sizes ~ Poissonish around household_cluster_size_mean\n  initialize person attributes (opinion ~ Beta, etc.)\n  set initial adopters by sampling initial_adoption_rate fraction; set adopted_day=0 for adopters\n  output graph.G and population.persons",
+        "notes": [
+          "Uses Watts-Strogatz small-world as base, modified by homophily reweighting.",
+          "Household cliques boost clustering and within-household contact probability."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "rng",
+        "distributions"
+      ],
+      "module_parameters": [
+        "population_size",
+        "avg_degree",
+        "rewiring_prob",
+        "homophily_strength",
+        "community_count",
+        "assortativity_by_age",
+        "household_cluster_size_mean",
+        "network_type",
+        "initial_adoption_rate",
+        "rng_seed"
+      ]
+    },
+    {
+      "name": "PolicyNudge",
+      "description": "Schedules and applies policy interventions (mandates, incentives, campaigns) and produces daily policy signals.",
+      "inputs": [
+        "time.day_index"
+      ],
+      "outputs": [
+        "signals.policy_level",
+        "signals.incentive_amount",
+        "signals.mandate_flag",
+        "signals.enforcement_prob",
+        "signals.campaign_intensity"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day_index in [policy_start_day, policy_end_day]:\n  policy_level = base_policy_level\n  incentive = incentive_amount\n  mandate = mandate\n  enforcement = enforcement_prob\n  campaign = information_campaign_intensity\nelse:\n  policy_level = 0.0\n  incentive = 0.0\n  mandate = false\n  enforcement = 0.0\n  campaign = 0.0\nbroadcast signals.*",
+        "notes": [
+          "Policy level is an aggregate of interventions and used as a scalar in adoption utility.",
+          "Can be extended to piecewise schedules via additional arrays."
+        ]
+      },
+      "requirements": [
+        "calendar"
+      ],
+      "module_parameters": [
+        "policy_start_day",
+        "policy_end_day",
+        "base_policy_level",
+        "incentive_amount",
+        "mandate",
+        "enforcement_prob",
+        "information_campaign_intensity"
+      ]
+    },
+    {
+      "name": "ContactGenerator",
+      "description": "Generates daily contact events along the network edges, with household and community bias.",
+      "inputs": [
+        "graph.G",
+        "population.persons",
+        "time.day_index"
+      ],
+      "outputs": [
+        "events.contacts_today"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "contacts_today = []\nfor each person i:\n  k = Poisson(contact_rate_per_day)\n  candidate_neighbors = neighbors(i)\n  weight neighbors by [household_bias if same household else 1.0] * [community_bias if same community else 1.0]\n  sample min(k, deg(i)) unique neighbors without replacement by weights\n  for each sampled neighbor j: append (i,j) to contacts_today\noutput contacts_today",
+        "notes": [
+          "Symmetrize contacts by adding (j,i) if needed for exposure averaging.",
+          "Biases increase within-household/community contact frequency."
+        ]
+      },
+      "requirements": [
+        "graph",
+        "numpy.random"
+      ],
+      "module_parameters": [
+        "contact_rate_per_day",
+        "household_contact_bias",
+        "community_contact_bias"
+      ]
+    },
+    {
+      "name": "OpinionUpdater",
+      "description": "Updates individual opinions using a Friedkin-Johnsen process with peer and media exposures and memory decay.",
+      "inputs": [
+        "events.contacts_today",
+        "population.persons",
+        "signals.campaign_intensity"
+      ],
+      "outputs": [
+        "state.opinion",
+        "state.risk_perception"
+      ],
+      "dependencies": [
+        "ContactGenerator",
+        "PolicyNudge"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  peer_opinion = mean(opinion[j] for (i,j) in contacts_today) if any else opinion[i]\n  media_signal = signals.campaign_intensity * media_effectiveness\n  combined_signal = person[i].peer_influence_weight * peer_opinion + person[i].media_influence_weight * media_signal\n  noise = Normal(0, noise_std)\n  o0 = person[i].opinion_initial\n  oi = person[i].opinion\n  oi_new = stubbornness_phi * o0 + (1 - stubbornness_phi) * ( (1 - memory_decay_lambda) * oi + memory_decay_lambda * (combined_signal + noise) )\n  oi_new = clip(oi_new, 0, 1)\n  rp_new = risk_perception_weight_opinion * oi_new + (1 - risk_perception_weight_opinion) * person[i].risk_perception\n  set person[i].opinion = oi_new\n  set person[i].risk_perception = clip(rp_new, 0, 1)\noutput updated opinions and risk perceptions",
+        "notes": [
+          "memory_decay_lambda derived from half-life: lambda = 1 - 0.5^(1/half_life_days)",
+          "FJ model anchors on initial opinion via stubbornness_phi."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "random"
+      ],
+      "module_parameters": [
+        "stubbornness_phi",
+        "memory_decay_half_life_days",
+        "noise_std",
+        "media_effectiveness",
+        "risk_perception_weight_opinion"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Chooses adoption based on utility from norms, risk perception, policy, incentives, fatigue, and habit persistence.",
+      "inputs": [
+        "population.persons",
+        "events.contacts_today",
+        "signals.policy_level",
+        "signals.incentive_amount",
+        "signals.mandate_flag",
+        "signals.enforcement_prob"
+      ],
+      "outputs": [
+        "state.adoption",
+        "state.new_adoptions_count"
+      ],
+      "dependencies": [
+        "OpinionUpdater",
+        "PolicyNudge"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "new_adoptions = 0\nfor each person i:\n  peer_adoption_rate = mean(adoption[j] for (i,j) in contacts_today) if any else 0\n  utility = baseline_utility\n  utility += social_norm_weight * peer_adoption_rate\n  utility += risk_perception_weight * person[i].risk_perception\n  utility += policy_weight * signals.policy_level * person[i].policy_sensitivity\n  utility += incentive_slope * signals.incentive_amount\n  if signals.mandate_flag:\n    utility += mandate_bonus * signals.enforcement_prob * person[i].compliance_propensity\n  utility -= fatigue_penalty_weight * person[i].fatigue\n  p_adopt = sigmoid(logistic_temp_beta * (utility - person[i].threshold))\n  if not person[i].adoption:\n    adopt_today = Bernoulli(p_adopt)\n    if adopt_today:\n      person[i].adoption = True\n      person[i].adopted_day = current_day\n      new_adoptions += 1\n  else:\n    # retention with habit persistence and fatigue\n    retain_p = habit_persistence - fatigue_decay_on_retention * person[i].fatigue\n    retain_p = clip(retain_p, 0, 1)\n    stay = Bernoulli(retain_p)\n    if not stay:\n      person[i].adoption = False\n  # update fatigue\n  person[i].fatigue = max(0.0, person[i].fatigue + fatigue_increment_per_day - fatigue_recovery_per_day * (1 if not person[i].adoption else 0))\noutput adoption states and new_adoptions",
+        "notes": [
+          "Utility-based threshold with logistic decision noise.",
+          "Mandates shift utility; enforcement interacts with compliance."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "math"
+      ],
+      "module_parameters": [
+        "baseline_utility",
+        "social_norm_weight",
+        "risk_perception_weight",
+        "policy_weight",
+        "incentive_slope",
+        "mandate_bonus",
+        "fatigue_penalty_weight",
+        "fatigue_increment_per_day",
+        "fatigue_recovery_per_day",
+        "habit_persistence",
+        "fatigue_decay_on_retention",
+        "logistic_temp_beta"
+      ]
+    },
+    {
+      "name": "ObservationAggregator",
+      "description": "Aggregates daily observables for comparison to data and downstream metrics.",
+      "inputs": [
+        "population.persons",
+        "state.adoption",
+        "state.opinion",
+        "state.new_adoptions_count",
+        "signals.policy_level"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adoptions_daily",
+        "observable.mean_opinion_daily",
+        "observable.policy_level_daily"
+      ],
+      "dependencies": [
+        "AdoptionDecision",
+        "PolicyNudge"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "N = population_size\nadoption_rate = mean(person.adoption for person in persons)\nnew_adoptions_daily = state.new_adoptions_count\nmean_opinion = mean(person.opinion for person in persons)\npolicy_level_daily = signals.policy_level\nif smoothing_window_days > 1:\n  apply trailing mean smoothing to above series\nemit observables",
+        "notes": [
+          "Observable smoothing optional; default window=1 (no smoothing).",
+          "Ensure correct alignment of day indices for metrics."
+        ]
+      },
+      "requirements": [
+        "pandas_optional",
+        "numpy"
+      ],
+      "module_parameters": [
+        "smoothing_window_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 500,
+        "high": 200000
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of person agents in the simulation.",
+      "frozen": false
+    },
+    {
+      "key": "avg_degree",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 100.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Average degree for the base small-world network.",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Probability of rewiring each edge in the small-world generator.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_strength",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Multiplier for edge formation probability among similar attributes (community, age).",
+      "frozen": false
+    },
+    {
+      "key": "community_count",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 2,
+        "high": 200
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of communities for label assignment.",
+      "frozen": false
+    },
+    {
+      "key": "assortativity_by_age",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Strength of preferential connection among same age group.",
+      "frozen": false
+    },
+    {
+      "key": "household_cluster_size_mean",
+      "dtype": "float",
+      "default": 3.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 7.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Mean household size for clique augmentation.",
+      "frozen": false
+    },
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "small_world_homophily",
+      "bounds": null,
+      "owner_module": "NetworkBuilder",
+      "description": "Network generator type: small_world_homophily | SBM_homophily.",
+      "frozen": true
+    },
+    {
+      "key": "initial_adoption_rate",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Fraction of population initially adopting at day 0.",
+      "frozen": false
+    },
+    {
+      "key": "rng_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 2147483646
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Random seed for reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "policy_start_day",
+      "dtype": "int",
+      "default": 20,
+      "bounds": {
+        "low": 0,
+        "high": 180
+      },
+      "owner_module": "PolicyNudge",
+      "description": "First day when policy is active.",
+      "frozen": false
+    },
+    {
+      "key": "policy_end_day",
+      "dtype": "int",
+      "default": 50,
+      "bounds": {
+        "low": 1,
+        "high": 365
+      },
+      "owner_module": "PolicyNudge",
+      "description": "Last day (inclusive) when policy is active.",
+      "frozen": false
+    },
+    {
+      "key": "base_policy_level",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyNudge",
+      "description": "Scalar summarizing overall policy strength during active period.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_amount",
+      "dtype": "float",
+      "default": 10.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 100.0
+      },
+      "owner_module": "PolicyNudge",
+      "description": "Monetary or utility-equivalent incentive amount.",
+      "frozen": false
+    },
+    {
+      "key": "mandate",
+      "dtype": "bool",
+      "default": false,
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "PolicyNudge",
+      "description": "Whether a mandate is in effect during policy window.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_prob",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyNudge",
+      "description": "Probability of enforcement upon non-compliance under mandate.",
+      "frozen": false
+    },
+    {
+      "key": "information_campaign_intensity",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyNudge",
+      "description": "Intensity of policy-driven information campaign (media signal).",
+      "frozen": false
+    },
+    {
+      "key": "contact_rate_per_day",
+      "dtype": "float",
+      "default": 10.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 40.0
+      },
+      "owner_module": "ContactGenerator",
+      "description": "Expected number of contacts per person per day.",
+      "frozen": false
+    },
+    {
+      "key": "household_contact_bias",
+      "dtype": "float",
+      "default": 2.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 5.0
+      },
+      "owner_module": "ContactGenerator",
+      "description": "Multiplicative weight for sampling contacts within household cliques.",
+      "frozen": false
+    },
+    {
+      "key": "community_contact_bias",
+      "dtype": "float",
+      "default": 1.3,
+      "bounds": {
+        "low": 1.0,
+        "high": 3.0
+      },
+      "owner_module": "ContactGenerator",
+      "description": "Multiplicative weight for sampling contacts within same community.",
+      "frozen": false
+    },
+    {
+      "key": "stubbornness_phi",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.9
+      },
+      "owner_module": "OpinionUpdater",
+      "description": "Weight on initial opinion in Friedkin-Johnsen update (anchoring).",
+      "frozen": false
+    },
+    {
+      "key": "memory_decay_half_life_days",
+      "dtype": "float",
+      "default": 14.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 60.0
+      },
+      "owner_module": "OpinionUpdater",
+      "description": "Half-life of opinion memory mixing with new signals.",
+      "frozen": false
+    },
+    {
+      "key": "noise_std",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.3
+      },
+      "owner_module": "OpinionUpdater",
+      "description": "Standard deviation of Gaussian noise in opinion update.",
+      "frozen": false
+    },
+    {
+      "key": "media_effectiveness",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionUpdater",
+      "description": "Effectiveness of media campaign signal in shaping opinions.",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_weight_opinion",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionUpdater",
+      "description": "Weight on new opinion when updating risk perception.",
+      "frozen": false
+    },
+    {
+      "key": "baseline_utility",
+      "dtype": "float",
+      "default": -0.1,
+      "bounds": {
+        "low": -2.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Baseline net utility of adoption absent other drivers.",
+      "frozen": false
+    },
+    {
+      "key": "social_norm_weight",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on peer adoption rate in utility.",
+      "frozen": false
+    },
+    {
+      "key": "risk_perception_weight",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on risk perception in utility.",
+      "frozen": false
+    },
+    {
+      "key": "policy_weight",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Weight on policy level in utility.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_slope",
+      "dtype": "float",
+      "default": 0.03,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Utility increase per unit incentive.",
+      "frozen": false
+    },
+    {
+      "key": "mandate_bonus",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Additional utility from a mandate weighted by enforcement and compliance.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_penalty_weight",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Negative utility weight due to fatigue.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_increment_per_day",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Daily increase in fatigue while adopting.",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_recovery_per_day",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Daily recovery in fatigue while not adopting.",
+      "frozen": false
+    },
+    {
+      "key": "habit_persistence",
+      "dtype": "float",
+      "default": 0.9,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Probability to retain adoption status due to habit (before fatigue effect).",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_decay_on_retention",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Reduction in retention probability per unit fatigue.",
+      "frozen": false
+    },
+    {
+      "key": "logistic_temp_beta",
+      "dtype": "float",
+      "default": 5.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 20.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Inverse temperature parameter for logistic decision rule.",
+      "frozen": false
+    },
+    {
+      "key": "smoothing_window_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "ObservationAggregator",
+      "description": "Trailing window for smoothing observables.",
+      "frozen": false
+    },
+    {
+      "key": "sim_duration_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 10,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.adoption)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adoptions_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "sum(Person.adopted_today)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:new_adoptions"
+    },
+    {
+      "id": "observable.mean_opinion_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.opinion)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:sentiment_index"
+    },
+    {
+      "id": "observable.policy_level_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "signals.policy_level",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "policy_data.csv:policy_level"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "RMSE_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_new_adoptions",
+      "inputs": [
+        "observable.new_adoptions_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeakError",
+        "config": {
+          "window": [
+            0,
+            59
+          ]
+        }
+      }
+    },
+    {
+      "name": "MAE_mean_opinion",
+      "inputs": [
+        "observable.mean_opinion_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": true
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "sim_duration_days": 60,
+    "warmup_days": 0
+  },
+  "algorithms": {
+    "graph_generation": "Watts-Strogatz small-world with homophily reweighting and household cliques",
+    "opinion_dynamics": "Friedkin-Johnsen model with memory decay and media signal",
+    "contact_sampling": "Weighted sampling of neighbors with Poisson contact counts",
+    "adoption_decision": "Utility-threshold with logistic stochastic choice and habit persistence",
+    "smoothing": "Trailing moving average for observables"
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and evaluation of daily adoption and opinion proxies.",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "new_adoptions",
+        "sentiment_index"
+      ]
+    },
+    {
+      "name": "policy_data.csv",
+      "purpose": "External policy timeline for validation of policy signals.",
+      "fields_used": [
+        "date",
+        "policy_level"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point; parses config, orchestrates simulation loop, runs modules in dependency order, computes metrics."
+      },
+      {
+        "name": "entities.py",
+        "description": "Definitions for Person, MediaSource, PolicyAuthority classes and attribute initialization helpers."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder module."
+      },
+      {
+        "name": "modules/policy_nudge.py",
+        "description": "Implements PolicyNudge module."
+      },
+      {
+        "name": "modules/contact_generator.py",
+        "description": "Implements ContactGenerator module."
+      },
+      {
+        "name": "modules/opinion_updater.py",
+        "description": "Implements OpinionUpdater module."
+      },
+      {
+        "name": "modules/adoption_decision.py",
+        "description": "Implements AdoptionDecision module."
+      },
+      {
+        "name": "modules/observation_aggregator.py",
+        "description": "Implements ObservationAggregator module."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric calculators (RMSE, MAE, TimeToPeakError) and evaluation pipeline."
+      },
+      {
+        "name": "config_schema.py",
+        "description": "Schema and validation for parameters; SBI priors and bounds."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Load and align data sources; map observables to target fields."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "scipy",
+      "networkx",
+      "pandas",
+      "pydantic",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "RMSE_new_adoptions",
+    "TimeToPeak_new_adoptions",
+    "MAE_mean_opinion"
+  ]
+}

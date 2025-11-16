@@ -1,0 +1,822 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion and behavior adoption model on a community-structured contact network with policy interventions and misinformation dynamics. The model simulates daily contacts, information spread (true and misinformation), policy effects, and individual adoption decisions.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "community_id",
+        "income",
+        "trust_neighbors",
+        "adoption_state",
+        "belief_true",
+        "belief_misinfo",
+        "adoption_threshold",
+        "susceptibility",
+        "degree",
+        "last_update_day"
+      ],
+      "behaviors": [
+        "form_contacts",
+        "transmit_information",
+        "update_beliefs",
+        "decide_adoption"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "num_agents": 5000,
+          "income_distribution": {
+            "type": "lognormal",
+            "mu": 3.5,
+            "sigma": 0.7,
+            "min": 1000,
+            "max": 200000
+          },
+          "initial_adoption_rate": 0.1,
+          "initial_belief_true_mean": 0.4,
+          "initial_belief_true_std": 0.2,
+          "initial_belief_misinfo_mean": 0.2,
+          "initial_belief_misinfo_std": 0.2,
+          "initial_trust_neighbors_mean": 0.6,
+          "initial_trust_neighbors_std": 0.15,
+          "adoption_threshold_mean": 0.35,
+          "adoption_threshold_std": 0.1,
+          "susceptibility_mean": 1.0,
+          "susceptibility_std": 0.3,
+          "communities": 5
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs a stochastic block model (community-structured) contact network with income-based homophily.",
+      "inputs": [],
+      "outputs": [
+        "network.graph",
+        "agents.population"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  create N=param.num_agents Person agents with attributes per initialization settings\n  assign each agent to a community c in [0, param.num_communities-1] uniformly\n  for each pair of agents (i,j):\n    p = param.intra_community_p if community[i]==community[j] else param.inter_community_p\n    # adjust for income homophily\n    income_similarity = 1 - min(1, abs(income[i]-income[j]) / max_income_range)\n    p_eff = p * (1 - param.homophily_by_income + param.homophily_by_income * income_similarity)\n    add edge (i,j) with probability p_eff\n  compute degree for each agent\n  output network.graph and agents.population\nelse:\n  pass",
+        "notes": [
+          "Executed only at t=0; subsequent ticks do nothing.",
+          "Use vectorized or sparse methods to sample edges for performance.",
+          "Income-based homophily rescales edge probabilities."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy"
+      ],
+      "module_parameters": [
+        "num_agents",
+        "num_communities",
+        "intra_community_p",
+        "inter_community_p",
+        "homophily_by_income"
+      ]
+    },
+    {
+      "name": "MobilityScheduler",
+      "description": "Generates daily contact events from the static network plus random mixing spillovers with durations.",
+      "inputs": [
+        "network.graph",
+        "agents.population"
+      ],
+      "outputs": [
+        "contacts.today"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "contacts = []\nfor each agent i:\n  base_contacts = Poisson(param.daily_contacts_mean)\n  # Sample from neighbors in network\n  neighbors = sample_without_replacement(neighbors(i), k = floor(base_contacts * (1 - param.mobility_mixing_rate)))\n  for j in neighbors:\n    duration = Exponential(mean=param.contact_duration_mean_min)\n    contacts.append((i, j, duration))\n  # Random mixing across network\n  k_mix = base_contacts - len(neighbors)\n  for m in 1..k_mix:\n    j = uniform_random_agent_except(i)\n    duration = Exponential(mean=param.contact_duration_mean_min)\n    contacts.append((i, j, duration))\n# Cap total extra contacts if needed\nif len(contacts) > param.max_daily_new_edges:\n  contacts = random_sample(contacts, param.max_daily_new_edges)\noutput contacts.today = contacts",
+        "notes": [
+          "Durations are in minutes and feed into effective transmission.",
+          "Random mixing approximates mobility outside static ties."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "random"
+      ],
+      "module_parameters": [
+        "daily_contacts_mean",
+        "mobility_mixing_rate",
+        "max_daily_new_edges",
+        "contact_duration_mean_min"
+      ]
+    },
+    {
+      "name": "PolicyModule",
+      "description": "Determines policy levers (incentives, enforcement, and media campaigns) active each day and exposes their effects.",
+      "inputs": [],
+      "outputs": [
+        "policy.effects"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "effects = {}\nif t >= param.campaign_start_day:\n  effects.media_strength = param.media_campaign_strength\nelse:\n  effects.media_strength = 0.0\n# Incentives and enforcement are active throughout (modifiable via scenario)\neffects.incentive = param.incentive_amount\n# For enforcement, compute per-contact penalty probability proxy\neffects.enforcement = param.enforcement_rate\n# Policy can reduce misinfo transmission multiplicatively\neffects.mitigation_on_transmission = 1.0 - param.mitigation_effect_on_transmission\noutput policy.effects = effects",
+        "notes": [
+          "Downstream modules read effects to adjust probabilities and utilities.",
+          "Mitigation scales transmission probabilities."
+        ]
+      },
+      "requirements": [],
+      "module_parameters": [
+        "incentive_amount",
+        "enforcement_rate",
+        "media_campaign_strength",
+        "campaign_start_day",
+        "mitigation_effect_on_transmission"
+      ]
+    },
+    {
+      "name": "InformationTransmission",
+      "description": "Spreads true information and misinformation across contacts; updates continuous belief levels with forgetting.",
+      "inputs": [
+        "contacts.today",
+        "agents.population",
+        "policy.effects"
+      ],
+      "outputs": [
+        "agents.population"
+      ],
+      "dependencies": [
+        "MobilityScheduler",
+        "PolicyModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "# optional exogenous misinformation shock\nif t == param.misinfo_shock_day:\n  for each agent i:\n    agents[i].belief_misinfo = min(1.0, agents[i].belief_misinfo + param.misinfo_shock_magnitude)\n# forgetting\nfor each agent i:\n  agents[i].belief_true = max(0.0, agents[i].belief_true * (1 - param.forgetting_rate))\n  agents[i].belief_misinfo = max(0.0, agents[i].belief_misinfo * (1 - param.forgetting_rate))\n# transmission over contacts\nfor (i, j, duration) in contacts.today:\n  dur_factor = duration / max(1e-6, mean_duration_reference)\n  policy_scale = policy.effects.mitigation_on_transmission\n  p_true = clamp(param.info_transmission_prob * dur_factor * policy_scale, 0, 1)\n  p_mis  = clamp(param.misinfo_transmission_prob * dur_factor * policy_scale, 0, 1)\n  # i to j\n  if Bernoulli(p_true):\n    delta = param.evidence_update_weight * agents[i].trust_neighbors\n    agents[j].belief_true = min(1.0, agents[j].belief_true + delta)\n  if Bernoulli(p_mis):\n    delta = param.trust_neighbor_weight * agents[i].trust_neighbors\n    agents[j].belief_misinfo = min(1.0, agents[j].belief_misinfo + delta)\n  # j to i (symmetric)\n  if Bernoulli(p_true):\n    delta = param.evidence_update_weight * agents[j].trust_neighbors\n    agents[i].belief_true = min(1.0, agents[i].belief_true + delta)\n  if Bernoulli(p_mis):\n    delta = param.trust_neighbor_weight * agents[j].trust_neighbors\n    agents[i].belief_misinfo = min(1.0, agents[i].belief_misinfo + delta)\noutput agents.population",
+        "notes": [
+          "mean_duration_reference should be computed as the running mean of contact_duration_mean_min upstream and passed implicitly; here modeled as constant = contact_duration_mean_min.",
+          "Belief updates are additive and bounded in [0,1]."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "info_transmission_prob",
+        "misinfo_transmission_prob",
+        "forgetting_rate",
+        "misinfo_shock_day",
+        "misinfo_shock_magnitude",
+        "trust_neighbor_weight",
+        "evidence_update_weight"
+      ]
+    },
+    {
+      "name": "BehaviorAdoption",
+      "description": "Updates each agent's adoption state using social influence, beliefs, income-modulated compliance, and policy incentives/enforcement.",
+      "inputs": [
+        "agents.population",
+        "network.graph",
+        "policy.effects"
+      ],
+      "outputs": [
+        "agents.population"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "PolicyModule",
+        "InformationTransmission"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each agent i:\n  neighbors = neighbors(i)\n  if len(neighbors) > 0:\n    s_i = mean(adoption_state[n] for n in neighbors)\n  else:\n    s_i = 0.0\n  evidence_signal = clamp(agents[i].belief_true - agents[i].belief_misinfo, -1, 1)\n  income_norm = clamp((agents[i].income - income_min)/(income_max - income_min + 1e-9), 0, 1)\n  compliance_modifier = 1 + param.compliance_sensitivity_income * (1 - income_norm)\n  policy_utility = policy.effects.incentive - policy.effects.enforcement\n  utility = param.peer_influence_weight * s_i + evidence_signal - param.intrinsic_cost_adoption + policy_utility\n  threshold = agents[i].adoption_threshold\n  prob_adopt = 1 / (1 + exp(-(utility - threshold) / max(1e-6, param.logistic_temperature)))\n  agents[i].adoption_state = Bernoulli(prob_adopt * compliance_modifier)\noutput agents.population",
+        "notes": [
+          "Thresholds are heterogeneous and assigned at initialization.",
+          "Compliance increases among lower-income agents via compliance_modifier."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "adoption_threshold_mean",
+        "adoption_threshold_std",
+        "intrinsic_cost_adoption",
+        "peer_influence_weight",
+        "logistic_temperature",
+        "compliance_sensitivity_income"
+      ]
+    },
+    {
+      "name": "ObservationAggregator",
+      "description": "Aggregates agent states into observable time series used for calibration and evaluation.",
+      "inputs": [
+        "agents.population",
+        "network.graph"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.misinformation_prevalence_daily",
+        "observable.mean_belief_true_daily"
+      ],
+      "dependencies": [
+        "BehaviorAdoption"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "N = len(agents)\nadoption_rate = mean(agents[i].adoption_state for i in agents)\nmisinfo_prevalence = mean(1.0 if agents[i].belief_misinfo > 0.5 else 0.0 for i in agents)\nmean_belief_true = mean(agents[i].belief_true for i in agents)\n# optional observation noise\nif param.observation_noise_std > 0:\n  adoption_rate = clamp(Normal(adoption_rate, param.observation_noise_std), 0, 1)\n  misinfo_prevalence = clamp(Normal(misinfo_prevalence, param.observation_noise_std), 0, 1)\n  mean_belief_true = clamp(Normal(mean_belief_true, param.observation_noise_std), 0, 1)\noutput observable.adoption_rate_daily = adoption_rate\noutput observable.misinformation_prevalence_daily = misinfo_prevalence\noutput observable.mean_belief_true_daily = mean_belief_true",
+        "notes": [
+          "Aggregations are population means.",
+          "Noise emulates measurement error in data."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "observation_noise_std"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "sim_duration_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Number of days to simulate.",
+      "frozen": true
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 7.0
+      },
+      "owner_module": "global",
+      "description": "Simulation time step in days.",
+      "frozen": true
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Random seed for reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "num_agents",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 200000
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Population size.",
+      "frozen": false
+    },
+    {
+      "key": "num_communities",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 1,
+        "high": 50
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of communities (blocks) in the SBM network.",
+      "frozen": false
+    },
+    {
+      "key": "intra_community_p",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.001,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Edge probability within the same community before homophily adjustment.",
+      "frozen": false
+    },
+    {
+      "key": "inter_community_p",
+      "dtype": "float",
+      "default": 0.005,
+      "bounds": {
+        "low": 1e-05,
+        "high": 0.1
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Edge probability across communities before homophily adjustment.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_by_income",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Weight of income similarity in scaling edge probabilities.",
+      "frozen": false
+    },
+    {
+      "key": "daily_contacts_mean",
+      "dtype": "float",
+      "default": 12.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 40.0
+      },
+      "owner_module": "MobilityScheduler",
+      "description": "Mean number of daily contacts per agent.",
+      "frozen": false
+    },
+    {
+      "key": "mobility_mixing_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "MobilityScheduler",
+      "description": "Fraction of daily contacts formed outside the static network.",
+      "frozen": false
+    },
+    {
+      "key": "max_daily_new_edges",
+      "dtype": "int",
+      "default": 100,
+      "bounds": {
+        "low": 0,
+        "high": 10000
+      },
+      "owner_module": "MobilityScheduler",
+      "description": "Cap on number of random-mixing contacts generated per day (for performance).",
+      "frozen": false
+    },
+    {
+      "key": "contact_duration_mean_min",
+      "dtype": "float",
+      "default": 20.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 120.0
+      },
+      "owner_module": "MobilityScheduler",
+      "description": "Mean contact duration in minutes for exponential sampling.",
+      "frozen": false
+    },
+    {
+      "key": "incentive_amount",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Daily incentive amount increasing adoption utility.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_rate",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Effective enforcement intensity, reducing adoption utility if non-compliant.",
+      "frozen": false
+    },
+    {
+      "key": "media_campaign_strength",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Strength of pro-adoption media campaign.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_start_day",
+      "dtype": "int",
+      "default": 15,
+      "bounds": {
+        "low": 0,
+        "high": 300
+      },
+      "owner_module": "PolicyModule",
+      "description": "Day on which the media campaign starts.",
+      "frozen": false
+    },
+    {
+      "key": "mitigation_effect_on_transmission",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Fractional reduction in both info and misinfo transmission due to policies.",
+      "frozen": false
+    },
+    {
+      "key": "info_transmission_prob",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationTransmission",
+      "description": "Base per-contact probability to transmit true information at mean duration.",
+      "frozen": false
+    },
+    {
+      "key": "misinfo_transmission_prob",
+      "dtype": "float",
+      "default": 0.12,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationTransmission",
+      "description": "Base per-contact probability to transmit misinformation at mean duration.",
+      "frozen": false
+    },
+    {
+      "key": "forgetting_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "InformationTransmission",
+      "description": "Daily decay rate applied to both true and misinformation beliefs.",
+      "frozen": false
+    },
+    {
+      "key": "misinfo_shock_day",
+      "dtype": "int",
+      "default": 10,
+      "bounds": {
+        "low": 0,
+        "high": 300
+      },
+      "owner_module": "InformationTransmission",
+      "description": "Day of an exogenous misinformation shock.",
+      "frozen": false
+    },
+    {
+      "key": "misinfo_shock_magnitude",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InformationTransmission",
+      "description": "Additive bump to belief_misinfo on shock day (bounded to 1).",
+      "frozen": false
+    },
+    {
+      "key": "trust_neighbor_weight",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InformationTransmission",
+      "description": "Weight of neighbor trust in updating misinformation belief from a contact.",
+      "frozen": false
+    },
+    {
+      "key": "evidence_update_weight",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "InformationTransmission",
+      "description": "Weight of neighbor trust in updating true information belief from a contact.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold_mean",
+      "dtype": "float",
+      "default": 0.35,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Mean of agent-specific adoption thresholds assigned at initialization.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold_std",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Std dev of adoption thresholds (truncated to [0,1]).",
+      "frozen": false
+    },
+    {
+      "key": "intrinsic_cost_adoption",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Intrinsic disutility of adopting (e.g., cost, inconvenience).",
+      "frozen": false
+    },
+    {
+      "key": "peer_influence_weight",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight assigned to neighbor adoption rate in utility.",
+      "frozen": false
+    },
+    {
+      "key": "logistic_temperature",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.05,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Softness of the adoption logistic (lower is more step-like).",
+      "frozen": false
+    },
+    {
+      "key": "compliance_sensitivity_income",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Increase in adoption probability for lower-income agents.",
+      "frozen": false
+    },
+    {
+      "key": "observation_noise_std",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "ObservationAggregator",
+      "description": "Std dev of Gaussian noise added to observables to emulate measurement error.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.adoption_state)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_adoption.csv:adoption_rate"
+    },
+    {
+      "id": "observable.misinformation_prevalence_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.belief_misinfo > 0.5)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_misinfo.csv:misinfo_rate"
+    },
+    {
+      "id": "observable.mean_belief_true_daily",
+      "source_module": "ObservationAggregator",
+      "formula_or_field": "mean(Person.belief_true)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "auxiliary.csv:mean_belief_true"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "RMSE_misinfo",
+      "inputs": [
+        "observable.misinformation_prevalence_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "PeakError_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "direction": "max",
+          "unit": "days"
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeak",
+        "config": {
+          "direction": "max",
+          "unit": "days"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1.0,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "initial_adoption_rate": 0.1,
+    "initial_belief_true_mean": 0.4,
+    "initial_belief_misinfo_mean": 0.2,
+    "num_communities": 5
+  },
+  "algorithms": {
+    "StochasticBlockModel": "Generates a community-structured undirected graph with specified intra/inter probabilities and homophily scaling.",
+    "PoissonContactSampling": "Samples daily contacts per agent from a Poisson distribution and mixes across communities.",
+    "IndependentCascadeVariant": "Per-contact probabilistic transmission for true and misinformation adjusted by duration and policy.",
+    "LogisticAdoption": "Sigmoid adoption probability based on social signal, beliefs, costs, and policy incentives.",
+    "GaussianObservationNoise": "Adds bounded Gaussian noise to observables."
+  },
+  "data_sources": [
+    {
+      "name": "train_adoption.csv",
+      "purpose": "Calibration and evaluation of daily adoption rate.",
+      "fields_used": [
+        "date",
+        "adoption_rate"
+      ]
+    },
+    {
+      "name": "train_misinfo.csv",
+      "purpose": "Calibration and evaluation of misinformation prevalence.",
+      "fields_used": [
+        "date",
+        "misinfo_rate"
+      ]
+    },
+    {
+      "name": "auxiliary.csv",
+      "purpose": "Optional comparison series for average true-belief levels.",
+      "fields_used": [
+        "date",
+        "mean_belief_true"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: parses configs, initializes modules, runs simulation loop, triggers evaluation."
+      },
+      {
+        "name": "entities.py",
+        "description": "Defines Person class and helper data structures."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder module."
+      },
+      {
+        "name": "modules/mobility_scheduler.py",
+        "description": "Implements MobilityScheduler module."
+      },
+      {
+        "name": "modules/policy_module.py",
+        "description": "Implements PolicyModule."
+      },
+      {
+        "name": "modules/information_transmission.py",
+        "description": "Implements InformationTransmission."
+      },
+      {
+        "name": "modules/behavior_adoption.py",
+        "description": "Implements BehaviorAdoption."
+      },
+      {
+        "name": "modules/observation_aggregator.py",
+        "description": "Implements ObservationAggregator and writes observables."
+      },
+      {
+        "name": "evaluation.py",
+        "description": "Loads target data, aligns series with observables, computes metrics."
+      },
+      {
+        "name": "config.py",
+        "description": "Holds parameter schema, defaults, and validation utilities."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption",
+    "RMSE_misinfo",
+    "PeakError_adoption",
+    "TimeToPeak_adoption"
+  ]
+}

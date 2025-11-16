@@ -1,0 +1,868 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion-of-adoption model on a social network simulating how individuals adopt a pro-social behavior (e.g., an energy-saving program) under peer influence, targeted campaign exposures, and time-bound policy incentives.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "income",
+        "openness",
+        "threshold",
+        "adopted",
+        "adoption_day",
+        "neighbors",
+        "camp_memory",
+        "exposures_today",
+        "degree",
+        "cluster_id"
+      ],
+      "behaviors": [
+        "receive_campaign_exposure",
+        "evaluate_policy_incentive",
+        "compute_social_influence",
+        "adoption_decision",
+        "memory_decay"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "population_size": 5000,
+          "initial_adoption_rate": 0.02,
+          "income_lognormal_mu": 10.6,
+          "income_lognormal_sigma": 0.5,
+          "openness_beta_a": 2.0,
+          "openness_beta_b": 2.0,
+          "threshold_clip_low": 0.0,
+          "threshold_clip_high": 1.0
+        }
+      }
+    },
+    {
+      "name": "CampaignManager",
+      "attributes": [
+        "budget_total",
+        "budget_remaining",
+        "cpm_cost",
+        "start_day",
+        "end_day",
+        "daily_impressions_per_1000",
+        "targeting_precision",
+        "frequency_cap_per_day",
+        "persuasion_lift_per_exposure"
+      ],
+      "behaviors": [
+        "allocate_impressions",
+        "spend_budget",
+        "target_non_adopters"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "budget_total": 50000.0,
+          "cpm_cost": 5.0,
+          "start_day": 5,
+          "end_day": 45,
+          "daily_impressions_per_1000": 80.0,
+          "targeting_precision": 0.7,
+          "frequency_cap_per_day": 3,
+          "persuasion_lift_per_exposure": 0.05
+        }
+      }
+    },
+    {
+      "name": "PolicyOffice",
+      "attributes": [
+        "subsidy_amount",
+        "incentive_start_day",
+        "incentive_end_day",
+        "eligibility_income_threshold",
+        "takeup_delay_days"
+      ],
+      "behaviors": [
+        "evaluate_eligibility",
+        "record_beneficiaries",
+        "apply_incentive_effect"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "subsidy_amount": 50.0,
+          "incentive_start_day": 15,
+          "incentive_end_day": 35,
+          "eligibility_income_threshold": 40000.0,
+          "takeup_delay_days": 2
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the social network and initializes agent attributes, thresholds, and neighbor indices with assortative rewiring for homophily.",
+      "inputs": [
+        "init.population_size",
+        "init.random_seed"
+      ],
+      "outputs": [
+        "network.graph",
+        "agents.attributes",
+        "network.neighbors_index"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  set RNG seed\n  create N=population_size Person agents\n  for each agent i:\n    income_i ~ LogNormal(mu=income_lognormal_mu, sigma=income_lognormal_sigma)\n    openness_i ~ Beta(a=openness_beta_a, b=openness_beta_b)\n    threshold_i ~ Clamp(Normal(mean=diffusion.threshold_mean, sd=diffusion.threshold_std), 0, 1)\n    adopted_i ~ Bernoulli(initial_adoption_rate)\n    adoption_day_i = 0 if adopted_i else -1\n    camp_memory_i = 0.0; exposures_today_i = 0\n  G = WattsStrogatzGraph(N, k=network.average_degree, p=network.rewire_prob)\n  perform assortative rewiring for a fraction f=network.assortative_rewire_fraction to increase similarity by openness using homophily_strength\n  compute neighbor_index for each agent\nemit network.graph, agents.attributes, network.neighbors_index",
+        "notes": [
+          "Assortative rewiring swaps edge endpoints to maximize similarity in openness based on homophily_strength.",
+          "Watts\u2013Strogatz preserves approximate average degree while adding small-world properties."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy RNG"
+      ],
+      "module_parameters": [
+        "network.average_degree",
+        "network.rewire_prob",
+        "network.homophily_strength",
+        "network.assortative_rewire_fraction"
+      ]
+    },
+    {
+      "name": "CampaignScheduler",
+      "description": "Allocates daily campaign impressions subject to budget and frequency caps, targeting non-adopters with precision reflecting model parameter.",
+      "inputs": [
+        "agents.attributes",
+        "adoption.state",
+        "day_index",
+        "campaign.budget_remaining"
+      ],
+      "outputs": [
+        "campaign.exposures_agent_daily",
+        "campaign.spend_daily"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day in [campaign.start_day, campaign.end_day] and budget_remaining > 0:\n  desired_impressions = (population_size / 1000) * campaign.daily_impressions_per_1000\n  afford_impressions = floor((budget_remaining / campaign.cpm_cost) * 1000)\n  impressions_today = min(desired_impressions, afford_impressions)\n  reset exposures_today_i = 0 for all i\n  scoring for each agent i:\n    if not adopted_i:\n      score_i = campaign.targeting_precision * openness_i + (1 - campaign.targeting_precision) * 0.5\n    else:\n      score_i = (1 - campaign.targeting_precision) * 0.1\n  sample agents proportionally to score_i with replacement until impressions_today allocated, respecting frequency_cap_per_day per agent\n  for each exposure allocated to agent i:\n    exposures_today_i += 1\n  spend_today = ceil(sum_exposures / 1000) * campaign.cpm_cost\n  budget_remaining -= spend_today\nelse:\n  set exposures_today_i = 0 for all i\n  spend_today = 0\nemit campaign.exposures_agent_daily, campaign.spend_daily",
+        "notes": [
+          "Targeting favors high-openness non-adopters when targeting_precision is high.",
+          "CPM billing rounds up to the nearest thousand impressions."
+        ]
+      },
+      "requirements": [
+        "weighted sampling",
+        "budget state"
+      ],
+      "module_parameters": [
+        "campaign.daily_impressions_per_1000",
+        "campaign.targeting_precision",
+        "campaign.frequency_cap_per_day",
+        "campaign.persuasion_lift_per_exposure",
+        "campaign.budget_total",
+        "campaign.cpm_cost",
+        "campaign.start_day",
+        "campaign.end_day"
+      ]
+    },
+    {
+      "name": "PolicyModule",
+      "description": "Activates a subsidy incentive for eligible agents within a time window, tracks beneficiaries, and outputs per-agent incentive influence scalars.",
+      "inputs": [
+        "agents.attributes",
+        "day_index"
+      ],
+      "outputs": [
+        "policy.eligibility_flags",
+        "policy.influence_scalar_per_agent",
+        "policy.beneficiaries_daily"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "active = (policy.incentive_start_day <= day <= policy.incentive_end_day)\nbeneficiaries_today = 0\nfor each agent i:\n  eligible_i = (income_i <= policy.eligibility_income_threshold)\n  if active and eligible_i:\n    if day - adoption_day_i >= policy.takeup_delay_days or adoption_day_i == -1:\n      influence_i = min(1.0, policy.subsidy_amount / (policy.eligibility_income_threshold + 1e-9))\n    else:\n      influence_i = 0.0\n    if not adopted_i and influence_i > 0:\n      beneficiaries_today += 1\n  else:\n    influence_i = 0.0\nemit policy.eligibility_flags, policy.influence_scalar_per_agent, policy.beneficiaries_daily",
+        "notes": [
+          "Influence scalar is normalized by eligibility threshold to keep values in [0,1].",
+          "Take-up delay prevents immediate effect on the day window opens."
+        ]
+      },
+      "requirements": [
+        "access to per-agent income and adoption_day"
+      ],
+      "module_parameters": [
+        "policy.subsidy_amount",
+        "policy.incentive_start_day",
+        "policy.incentive_end_day",
+        "policy.eligibility_income_threshold",
+        "policy.takeup_delay_days"
+      ]
+    },
+    {
+      "name": "InfluenceDiffusion",
+      "description": "Determines adoption transitions based on social influence, campaign exposures (with memory), and policy incentive influence.",
+      "inputs": [
+        "network.neighbors_index",
+        "agents.attributes",
+        "campaign.exposures_agent_daily",
+        "policy.influence_scalar_per_agent",
+        "day_index"
+      ],
+      "outputs": [
+        "adoption.state",
+        "adoption.new_adopters_daily"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "CampaignScheduler",
+        "PolicyModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "new_adopters = 0\nfor each agent i where adopted_i == False:\n  neigh = neighbors_index[i]\n  s_fraction = mean(adopted_j for j in neigh) if len(neigh) > 0 else 0\n  E = exposures_today_i\n  exposure_effect = min(1.0, E * campaign.persuasion_lift_per_exposure)\n  camp_memory_i = diffusion.memory_decay_rate * camp_memory_i + exposure_effect\n  U = diffusion.social_influence_weight * (s_fraction - threshold_i) + diffusion.campaign_influence_weight * camp_memory_i + diffusion.policy_influence_weight * policy_influence_i\n  p = clip( diffusion.base_adoption_prob + sigmoid(U / max(1e-6, (1.0 + diffusion.noise_scale))) , 0.0, 1.0)\n  if rand() < p:\n    adopted_i = True\n    adoption_day_i = day\n    new_adopters += 1\nemit adoption.state, adoption.new_adopters_daily",
+        "notes": [
+          "Threshold_i represents personal resistance; U compares social fraction to threshold.",
+          "Noise_scale dilates the logistic sensitivity; larger values flatten the response."
+        ]
+      },
+      "requirements": [
+        "random variate generation",
+        "sigmoid function"
+      ],
+      "module_parameters": [
+        "diffusion.base_adoption_prob",
+        "diffusion.social_influence_weight",
+        "diffusion.campaign_influence_weight",
+        "diffusion.policy_influence_weight",
+        "diffusion.threshold_mean",
+        "diffusion.threshold_std",
+        "diffusion.memory_decay_rate",
+        "diffusion.noise_scale"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates daily system-level observables and applies optional smoothing/report lag for comparison to data.",
+      "inputs": [
+        "adoption.state",
+        "adoption.new_adopters_daily",
+        "campaign.exposures_agent_daily",
+        "campaign.spend_daily",
+        "policy.beneficiaries_daily",
+        "day_index"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.new_adopters_daily",
+        "observable.cumulative_adoption",
+        "observable.mean_exposures_daily",
+        "observable.policy_beneficiaries_daily",
+        "observable.campaign_spend_daily"
+      ],
+      "dependencies": [
+        "InfluenceDiffusion",
+        "CampaignScheduler",
+        "PolicyModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "N = population_size\nadoption_rate = mean(adopted_i for all i)\nnew_adopters = adoption.new_adopters_daily\ncumulative_adoption = sum(adopted_i for all i)\nmean_exposures = mean(exposures_today_i for all i)\nbeneficiaries = policy.beneficiaries_daily\nspend = campaign.spend_daily\nif aggregator.smoothing_window_days > 1:\n  apply moving average of window W to each time series\nif aggregator.report_lag_days > 0:\n  shift reported series by lag\nemit all observables",
+        "notes": [
+          "Smoothing and lag are applied to emitted time series to match reporting characteristics of the data."
+        ]
+      },
+      "requirements": [
+        "time series buffers"
+      ],
+      "module_parameters": [
+        "aggregator.smoothing_window_days",
+        "aggregator.report_lag_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "network.average_degree",
+      "dtype": "int",
+      "default": 8,
+      "bounds": {
+        "low": 2.0,
+        "high": 40.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Average degree in the initial Watts\u2013Strogatz network.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.rewire_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Rewiring probability for Watts\u2013Strogatz small-world generation.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.homophily_strength",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Weight of openness similarity in assortative rewiring (0=no homophily, 1=max).",
+      "frozen": "false"
+    },
+    {
+      "key": "network.assortative_rewire_fraction",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Fraction of edges subject to assortative rewiring to increase homophily.",
+      "frozen": "false"
+    },
+    {
+      "key": "diffusion.base_adoption_prob",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "InfluenceDiffusion",
+      "description": "Baseline daily probability to adopt absent any influence.",
+      "frozen": "false"
+    },
+    {
+      "key": "diffusion.social_influence_weight",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "InfluenceDiffusion",
+      "description": "Weight of social fraction relative to personal threshold.",
+      "frozen": "false"
+    },
+    {
+      "key": "diffusion.campaign_influence_weight",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "InfluenceDiffusion",
+      "description": "Weight applied to cumulative campaign memory effect.",
+      "frozen": "false"
+    },
+    {
+      "key": "diffusion.policy_influence_weight",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "InfluenceDiffusion",
+      "description": "Weight applied to policy incentive influence scalar.",
+      "frozen": "false"
+    },
+    {
+      "key": "diffusion.threshold_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceDiffusion",
+      "description": "Mean of the normal distribution for agent thresholds (clipped to [0,1]).",
+      "frozen": "false"
+    },
+    {
+      "key": "diffusion.threshold_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.5
+      },
+      "owner_module": "InfluenceDiffusion",
+      "description": "Standard deviation for thresholds distribution.",
+      "frozen": "false"
+    },
+    {
+      "key": "diffusion.memory_decay_rate",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceDiffusion",
+      "description": "Daily exponential decay rate for campaign memory (0=no memory, 1=perfect carryover).",
+      "frozen": "false"
+    },
+    {
+      "key": "diffusion.noise_scale",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InfluenceDiffusion",
+      "description": "Scale of logistic dilatation to capture unobserved heterogeneity.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign.daily_impressions_per_1000",
+      "dtype": "float",
+      "default": 80.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 500.0
+      },
+      "owner_module": "CampaignScheduler",
+      "description": "Desired daily impressions per 1000 population.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign.targeting_precision",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "CampaignScheduler",
+      "description": "Weight of openness in targeting score; higher targets likely adopters.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign.frequency_cap_per_day",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 0.0,
+        "high": 10.0
+      },
+      "owner_module": "CampaignScheduler",
+      "description": "Max exposures per agent per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign.persuasion_lift_per_exposure",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.3
+      },
+      "owner_module": "CampaignScheduler",
+      "description": "Incremental effect per exposure prior to decay and weighting.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign.budget_total",
+      "dtype": "float",
+      "default": 50000.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 10000000.0
+      },
+      "owner_module": "CampaignScheduler",
+      "description": "Total media budget in currency units.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign.cpm_cost",
+      "dtype": "float",
+      "default": 5.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 100.0
+      },
+      "owner_module": "CampaignScheduler",
+      "description": "Cost per thousand impressions.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign.start_day",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 0.0,
+        "high": 364.0
+      },
+      "owner_module": "CampaignScheduler",
+      "description": "Day index when campaign starts.",
+      "frozen": "false"
+    },
+    {
+      "key": "campaign.end_day",
+      "dtype": "int",
+      "default": 45,
+      "bounds": {
+        "low": 1.0,
+        "high": 365.0
+      },
+      "owner_module": "CampaignScheduler",
+      "description": "Day index when campaign ends.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.subsidy_amount",
+      "dtype": "float",
+      "default": 50.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1000.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Per-eligible-agent incentive level (normalized to [0,1] influence).",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.incentive_start_day",
+      "dtype": "int",
+      "default": 15,
+      "bounds": {
+        "low": 0.0,
+        "high": 364.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Start day for policy incentive window.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.incentive_end_day",
+      "dtype": "int",
+      "default": 35,
+      "bounds": {
+        "low": 1.0,
+        "high": 365.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "End day for policy incentive window.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.eligibility_income_threshold",
+      "dtype": "float",
+      "default": 40000.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 200000.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Income threshold for policy eligibility.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.takeup_delay_days",
+      "dtype": "int",
+      "default": 2,
+      "bounds": {
+        "low": 0.0,
+        "high": 30.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Minimum days before eligible agents respond to the incentive.",
+      "frozen": "false"
+    },
+    {
+      "key": "aggregator.smoothing_window_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1.0,
+        "high": 14.0
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Moving average window applied to outputs (1 disables smoothing).",
+      "frozen": "false"
+    },
+    {
+      "key": "aggregator.report_lag_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0.0,
+        "high": 7.0
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Reporting lag applied to observables for alignment with data.",
+      "frozen": "false"
+    },
+    {
+      "key": "global.time.horizon_days",
+      "dtype": "int",
+      "default": 90,
+      "bounds": {
+        "low": 10.0,
+        "high": 365.0
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "adoption_timeseries.csv:adoption_rate"
+    },
+    {
+      "id": "observable.new_adopters_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "count(newly adopted on day t)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "adoption_timeseries.csv:new_adopters"
+    },
+    {
+      "id": "observable.cumulative_adoption",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "sum(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "adoption_timeseries.csv:cumulative"
+    },
+    {
+      "id": "observable.mean_exposures_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "mean(Person.exposures_today)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "media_timeseries.csv:mean_exposures"
+    },
+    {
+      "id": "observable.policy_beneficiaries_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "count(eligible non-adopters influenced by policy on day t)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "policy_timeseries.csv:beneficiaries"
+    },
+    {
+      "id": "observable.campaign_spend_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "CPM spend emitted by CampaignScheduler",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "finance_timeseries.csv:campaign_spend"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "MAE_new_adopters",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "PeakTimingError",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeak",
+        "config": {
+          "units": "days"
+        }
+      }
+    },
+    {
+      "name": "PeakMagnitudeError",
+      "inputs": [
+        "observable.new_adopters_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "mode": "magnitude",
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "BudgetDeviation",
+      "inputs": [
+        "observable.campaign_spend_daily"
+      ],
+      "definition": {
+        "type": "CumulativeAbsoluteError",
+        "config": {
+          "currency": "unit"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 12345,
+    "warm_start_days": 0,
+    "set_campaign_budget_remaining_to_total": true
+  },
+  "algorithms": {
+    "WattsStrogatzHomophily": "WS small-world graph with post-generation assortative rewiring proportional to homophily strength.",
+    "TargetedImpressionAllocation": "Weighted sampling with replacement respecting per-agent frequency caps and budget-limited impressions.",
+    "ThresholdedLogisticAdoption": "Adoption probability via logistic of weighted influences minus threshold with baseline floor and noise dilation.",
+    "ExponentialDecayMemory": "Campaign exposure effect accumulates with daily exponential decay."
+  },
+  "data_sources": [
+    {
+      "name": "adoption_timeseries.csv",
+      "purpose": "Calibration and evaluation of adoption dynamics.",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "new_adopters",
+        "cumulative"
+      ]
+    },
+    {
+      "name": "media_timeseries.csv",
+      "purpose": "Calibration/evaluation of campaign exposure dynamics.",
+      "fields_used": [
+        "date",
+        "mean_exposures"
+      ]
+    },
+    {
+      "name": "policy_timeseries.csv",
+      "purpose": "Validation of policy beneficiary counts.",
+      "fields_used": [
+        "date",
+        "beneficiaries"
+      ]
+    },
+    {
+      "name": "finance_timeseries.csv",
+      "purpose": "Validation of campaign spend trajectory.",
+      "fields_used": [
+        "date",
+        "campaign_spend"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "engine.py",
+        "description": "Simulation loop, clock, module scheduling, and dependency resolution."
+      },
+      {
+        "name": "entities.py",
+        "description": "Dataclasses for Person, CampaignManager, PolicyOffice."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder module."
+      },
+      {
+        "name": "modules/campaign_scheduler.py",
+        "description": "Implements CampaignScheduler module."
+      },
+      {
+        "name": "modules/policy_module.py",
+        "description": "Implements PolicyModule module."
+      },
+      {
+        "name": "modules/influence_diffusion.py",
+        "description": "Implements InfluenceDiffusion module."
+      },
+      {
+        "name": "modules/adoption_aggregator.py",
+        "description": "Implements AdoptionAggregator module and observable emissions."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric computations (RMSE, MAE, TimeToPeak, PeakError, cumulative errors)."
+      },
+      {
+        "name": "config.py",
+        "description": "Parameter schema validation and defaults."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Load target data, bind observables, and output simulation traces."
+      }
+    ],
+    "dependencies": [
+      "numpy>=1.26",
+      "pandas>=2.1",
+      "networkx>=3.2",
+      "scipy>=1.11"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 59
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "MAE_new_adopters",
+    "PeakTimingError",
+    "PeakMagnitudeError",
+    "BudgetDeviation"
+  ]
+}

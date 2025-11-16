@@ -1,0 +1,818 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion model of behavior adoption on a social network with peer influence, media exposure, misinformation, and policy interventions (incentives + moderation).",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "group",
+        "threshold",
+        "susceptibility",
+        "credulity",
+        "adopted",
+        "belief_score",
+        "exposures_today",
+        "misinfo_exposures_today",
+        "neighbors"
+      ],
+      "behaviors": [
+        "send_messages_to_neighbors",
+        "consume_media_broadcast",
+        "update_belief_from_exposures",
+        "decide_adoption",
+        "abandon_behavior"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "population.size": 5000,
+          "group.share_minority": 0.4,
+          "influence.threshold_mean": 0.5,
+          "influence.threshold_std": 0.15,
+          "influence.susceptibility_shape": 2.0,
+          "misinformation.credulity": 0.6,
+          "initial.adoption_fraction": 0.05,
+          "initial.misinfo_believer_fraction": 0.1,
+          "rng.seed": 42
+        }
+      }
+    },
+    {
+      "name": "Platform",
+      "attributes": [
+        "moderation_level",
+        "incentive_amount",
+        "target_group",
+        "active"
+      ],
+      "behaviors": [
+        "broadcast_incentives",
+        "apply_moderation"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy.moderation_strength": 0.0,
+          "policy.incentive_amount": 0.0,
+          "policy.target_group": "all"
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the social network and initializes agent attributes with homophily.",
+      "inputs": [],
+      "outputs": [
+        "signal.network",
+        "signal.agent_state_init"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "if not built:\n  set RNG(seed=rng.seed)\n  assign each agent to group in {majority, minority} by group.share_minority\n  if network.type == 'small_world':\n    G = WattsStrogatz(population.size, k=round(network.avg_degree), p=network.rewiring_prob)\n  elif network.type == 'scale_free':\n    G = BarabasiAlbert(population.size, m=max(1, round(network.avg_degree/2)), exponent=degree.exponent_scale_free)\n  else:\n    G = ErdosRenyi(population.size, p=network.avg_degree/(population.size-1))\n  apply homophily: rewire fraction network.homophily_strength of cross-group edges to within-group where possible\n  if network.assortativity_on_threshold:\n    assort nodes so similar thresholds are more connected (degree-preserving swap)\n  draw thresholds ~ TruncatedNormal(mean=influence.threshold_mean, std=influence.threshold_std, [0,1])\n  draw susceptibility ~ Beta(alpha=influence.susceptibility_shape, beta=influence.susceptibility_shape)\n  set credulity_i = misinformation.credulity + Normal(0, 0.05) clipped to [0,1]\n  initialize adopted_i ~ Bernoulli(initial.adoption_fraction)\n  initialize belief_score_i = 1.0 if adopted_i else 0.0\n  output signal.network=G and signal.agent_state_init={attributes per agent}\n  built = True",
+        "notes": [
+          "Homophily is implemented via degree-preserving edge swaps.",
+          "Assortativity on thresholds is optional to cluster similar agents.",
+          "Thresholds and susceptibilities are agent heterogeneities."
+        ]
+      },
+      "requirements": [
+        "PRNG",
+        "Graph"
+      ],
+      "module_parameters": [
+        "network.type",
+        "network.avg_degree",
+        "network.rewiring_prob",
+        "network.homophily_strength",
+        "network.assortativity_on_threshold",
+        "degree.exponent_scale_free",
+        "group.share_minority",
+        "influence.threshold_mean",
+        "influence.threshold_std",
+        "influence.susceptibility_shape",
+        "misinformation.credulity",
+        "initial.adoption_fraction",
+        "population.size",
+        "rng.seed"
+      ]
+    },
+    {
+      "name": "PolicyModule",
+      "description": "Schedules and applies platform-level incentives and moderation over time.",
+      "inputs": [
+        "signal.clock.day"
+      ],
+      "outputs": [
+        "signal.policy_state"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "day = signal.clock.day\nactive = (policy.start_day <= day <= policy.end_day)\nif not active:\n  moderation = 0.0\n  incentive = 0.0\nelse:\n  t_rel = max(0, min(day - policy.start_day, policy.ramp_up_days))\n  ramp = t_rel / max(1, policy.ramp_up_days)\n  moderation = ramp * policy.moderation_strength\n  incentive = ramp * policy.incentive_amount\npolicy_state = { 'moderation': moderation, 'incentive': incentive, 'target_group': policy.target_group, 'active': active }\nemit signal.policy_state = policy_state",
+        "notes": [
+          "Linear ramp-up allows smooth activation over policy.ramp_up_days.",
+          "Targeting can gate incentives to specific groups at downstream modules."
+        ]
+      },
+      "requirements": [
+        "Clock"
+      ],
+      "module_parameters": [
+        "policy.incentive_amount",
+        "policy.moderation_strength",
+        "policy.start_day",
+        "policy.end_day",
+        "policy.target_group",
+        "policy.ramp_up_days"
+      ]
+    },
+    {
+      "name": "InteractionEngine",
+      "description": "Generates daily exposures via network messaging and media broadcast; applies moderation to misinformation flow.",
+      "inputs": [
+        "signal.network",
+        "signal.agent_state_prev",
+        "signal.policy_state"
+      ],
+      "outputs": [
+        "signal.exposures",
+        "signal.misinfo_fraction"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "PolicyModule"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "G = signal.network\nstate = signal.agent_state_prev\npol = signal.policy_state\nfor agent i:\n  messages = Poisson(interaction.messages_per_day)\n  choose 'messages' neighbors uniformly from G.neighbors(i) with replacement\n  peer_adopt_exposures = count of chosen neighbors with adopted=True\n  media_exposures = Bernoulli(interaction.media_broadcast_rate)\n  total_pro_adopt = peer_adopt_exposures + media_exposures\n  # Misinformation arrivals\n  base_mis = Binomial(messages, misinformation.rate)\n  moderated_mis = Binomial(base_mis, (1 - pol.moderation))\n  # Record\n  exposures[i] = { 'pro_adopt': total_pro_adopt, 'misinfo': moderated_mis }\n# Aggregate misinfo fraction for observability\nmisinfo_fraction = sum_i exposures[i].misinfo / max(1, sum_i (exposures[i].pro_adopt + exposures[i].misinfo))\nemit signal.exposures = exposures and signal.misinfo_fraction = misinfo_fraction",
+        "notes": [
+          "Media broadcast rate adds non-network exposures.",
+          "Moderation proportionally reduces misinformation messages.",
+          "Sampling with replacement approximates multiple contacts."
+        ]
+      },
+      "requirements": [
+        "PRNG",
+        "Graph"
+      ],
+      "module_parameters": [
+        "interaction.messages_per_day",
+        "interaction.media_broadcast_rate",
+        "misinformation.rate",
+        "content.base_quality",
+        "rng.seed"
+      ]
+    },
+    {
+      "name": "InfluenceUpdate",
+      "description": "Updates beliefs and adoption states using a logistic threshold model with peer/media influence and policy incentives, and allows abandonment.",
+      "inputs": [
+        "signal.agent_state_prev",
+        "signal.exposures",
+        "signal.policy_state"
+      ],
+      "outputs": [
+        "signal.agent_state"
+      ],
+      "dependencies": [
+        "InteractionEngine"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "state_prev = signal.agent_state_prev\nexp = signal.exposures\npol = signal.policy_state\nfor agent i:\n  s = state_prev[i]\n  # Influence accumulation\n  peer_term = influence.peer_weight * exp[i].pro_adopt\n  media_term = influence.media_weight * exp[i].pro_adopt * content.base_quality\n  incentive_term = pol.incentive * (1.0 if pol.target_group=='all' or pol.target_group==s.group else 0.0)\n  mis_term = s.credulity * exp[i].misinfo\n  raw_score = s.susceptibility * (peer_term + media_term + incentive_term - mis_term)\n  # Convert to probability relative to threshold\n  # p_adopt = sigmoid( (raw_score / (1 + exp[i].pro_adopt + exp[i].misinfo)) - s.threshold ) + adoption.spontaneous_rate\n  denom = 1 + exp[i].pro_adopt + exp[i].misinfo\n  z = (raw_score / denom) - s.threshold\n  p_adopt = 1.0 / (1.0 + exp(-z)) + adoption.spontaneous_rate\n  p_adopt = min(max(p_adopt, 0.0), 1.0)\n  if s.adopted:\n    # possibility of abandonment\n    abandon = Bernoulli(adoption.decay_rate)\n    adopted = (not abandon)\n  else:\n    adopted = Bernoulli(p_adopt)\n  belief_score = min(1.0, max(0.0, s.belief_score + 0.1*(p_adopt - 0.5) - 0.1*(exp[i].misinfo/denom)))\n  new_state[i] = s updated with adopted and belief_score\nemit signal.agent_state = new_state",
+        "notes": [
+          "Logistic decision compares normalized influence to an agent-specific threshold.",
+          "Policy incentives act as an additive pro-adoption term.",
+          "Abandonment models fatigue or switching behavior."
+        ]
+      },
+      "requirements": [
+        "PRNG"
+      ],
+      "module_parameters": [
+        "influence.peer_weight",
+        "influence.media_weight",
+        "adoption.spontaneous_rate",
+        "adoption.decay_rate",
+        "time.horizon_days",
+        "misinformation.credulity",
+        "content.base_quality"
+      ]
+    },
+    {
+      "name": "Aggregator",
+      "description": "Computes daily aggregate observables for calibration and evaluation.",
+      "inputs": [
+        "signal.agent_state",
+        "signal.exposures",
+        "signal.misinfo_fraction",
+        "signal.clock.day"
+      ],
+      "outputs": [
+        "signal.adoption_rate_daily",
+        "signal.cumulative_adopters",
+        "signal.exposure_rate_daily",
+        "signal.misinfo_prevalence_daily"
+      ],
+      "dependencies": [
+        "InfluenceUpdate"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "N = population.size\nadoption_rate = mean_i(new_state[i].adopted)\nexposure_rate = mean_i(exposures[i].pro_adopt + exposures[i].misinfo)\nmisinfo_prev = signal.misinfo_fraction\nif day == 0:\n  cumulative = round(adoption_rate * N)\nelse:\n  cumulative = prev_cumulative + round((adoption_rate - prev_adoption_rate) * N)\nemit all signals",
+        "notes": [
+          "Cumulative adopters are tracked incrementally; ensure non-decreasing.",
+          "Exposure rate counts total daily messages per agent."
+        ]
+      },
+      "requirements": [
+        "Accumulator"
+      ],
+      "module_parameters": [
+        "aggregation.window_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "rng.seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 1,
+        "high": 1000000000
+      },
+      "owner_module": "global",
+      "description": "Random number generator seed for reproducibility.",
+      "frozen": "true"
+    },
+    {
+      "key": "population.size",
+      "dtype": "int",
+      "default": 5000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of agents in the population.",
+      "frozen": "false"
+    },
+    {
+      "key": "time.horizon_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 10,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total duration of the simulation in days.",
+      "frozen": "false"
+    },
+    {
+      "key": "time.step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Length of each simulation step in days.",
+      "frozen": "true"
+    },
+    {
+      "key": "initial.adoption_fraction",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "global",
+      "description": "Initial fraction of agents set to adopted.",
+      "frozen": "false"
+    },
+    {
+      "key": "initial.misinfo_believer_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.6
+      },
+      "owner_module": "global",
+      "description": "Initial fraction with high credulity towards misinformation.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.type",
+      "dtype": "categorical",
+      "default": "small_world",
+      "bounds": {
+        "low": null,
+        "high": null
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Network generator type: small_world | scale_free | erdos_renyi.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.avg_degree",
+      "dtype": "float",
+      "default": 8.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 50.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Average degree of the social network.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.rewiring_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Rewiring probability for small-world networks.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.homophily_strength",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Fraction of cross-group edges rewired to within-group to induce homophily.",
+      "frozen": "false"
+    },
+    {
+      "key": "network.assortativity_on_threshold",
+      "dtype": "bool",
+      "default": true,
+      "bounds": {
+        "low": null,
+        "high": null
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Whether to assortatively mix nodes by threshold via edge swaps.",
+      "frozen": "false"
+    },
+    {
+      "key": "degree.exponent_scale_free",
+      "dtype": "float",
+      "default": 2.5,
+      "bounds": {
+        "low": 2.1,
+        "high": 3.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Power-law exponent for scale-free network generation.",
+      "frozen": "false"
+    },
+    {
+      "key": "group.share_minority",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.9
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Share of the population assigned to the minority group.",
+      "frozen": "false"
+    },
+    {
+      "key": "influence.threshold_mean",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Mean of the threshold distribution for adoption decisions.",
+      "frozen": "false"
+    },
+    {
+      "key": "influence.threshold_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Standard deviation of thresholds (truncated to [0,1]).",
+      "frozen": "false"
+    },
+    {
+      "key": "influence.susceptibility_shape",
+      "dtype": "float",
+      "default": 2.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 5.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Shape parameter for Beta distribution of susceptibility (alpha=beta).",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation.credulity",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Baseline agent credulity to misinformation (center of agent-level variation).",
+      "frozen": "false"
+    },
+    {
+      "key": "interaction.messages_per_day",
+      "dtype": "float",
+      "default": 5.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 50.0
+      },
+      "owner_module": "InteractionEngine",
+      "description": "Expected number of peer messages per agent per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "interaction.media_broadcast_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InteractionEngine",
+      "description": "Daily probability of a media exposure per agent.",
+      "frozen": "false"
+    },
+    {
+      "key": "misinformation.rate",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InteractionEngine",
+      "description": "Baseline probability that any given message is misinformation (pre-moderation).",
+      "frozen": "false"
+    },
+    {
+      "key": "content.base_quality",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "InteractionEngine",
+      "description": "Quality/appeal factor for pro-adoption content, scaling its influence.",
+      "frozen": "false"
+    },
+    {
+      "key": "influence.peer_weight",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "InfluenceUpdate",
+      "description": "Weight of peer exposures in the adoption decision.",
+      "frozen": "false"
+    },
+    {
+      "key": "influence.media_weight",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "InfluenceUpdate",
+      "description": "Weight of media exposures in the adoption decision.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption.spontaneous_rate",
+      "dtype": "float",
+      "default": 0.001,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.02
+      },
+      "owner_module": "InfluenceUpdate",
+      "description": "Baseline adoption probability independent of exposures.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption.decay_rate",
+      "dtype": "float",
+      "default": 0.001,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.02
+      },
+      "owner_module": "InfluenceUpdate",
+      "description": "Daily probability that an adopter abandons the behavior.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.incentive_amount",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Scaled incentive magnitude added to influence (0=no incentive).",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.moderation_strength",
+      "dtype": "float",
+      "default": 0.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyModule",
+      "description": "Proportion of misinformation removed by moderation (0-1).",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.start_day",
+      "dtype": "int",
+      "default": 20,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyModule",
+      "description": "Day on which the policy begins.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.end_day",
+      "dtype": "int",
+      "default": 40,
+      "bounds": {
+        "low": 0,
+        "high": 365
+      },
+      "owner_module": "PolicyModule",
+      "description": "Day on which the policy ends.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.target_group",
+      "dtype": "categorical",
+      "default": "all",
+      "bounds": {
+        "low": null,
+        "high": null
+      },
+      "owner_module": "PolicyModule",
+      "description": "Group targeted by incentives: all | minority | majority.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy.ramp_up_days",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 0,
+        "high": 60
+      },
+      "owner_module": "PolicyModule",
+      "description": "Days to ramp from 0 to full policy strength.",
+      "frozen": "false"
+    },
+    {
+      "key": "aggregation.window_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "Aggregator",
+      "description": "Smoothing window for daily observables (moving average length).",
+      "frozen": "false"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "Aggregator",
+      "formula_or_field": "signal.adoption_rate_daily",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.cumulative_adopters",
+      "source_module": "Aggregator",
+      "formula_or_field": "signal.cumulative_adopters",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:cumulative_adopters"
+    },
+    {
+      "id": "observable.exposure_rate_daily",
+      "source_module": "Aggregator",
+      "formula_or_field": "signal.exposure_rate_daily",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:exposure_rate"
+    },
+    {
+      "id": "observable.misinfo_prevalence_daily",
+      "source_module": "Aggregator",
+      "formula_or_field": "signal.misinfo_prevalence_daily",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:misinfo_prevalence"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true
+        }
+      }
+    },
+    {
+      "name": "RMSE_cumulative",
+      "inputs": [
+        "observable.cumulative_adopters"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "MAPE_exposure_rate",
+      "inputs": [
+        "observable.exposure_rate_daily"
+      ],
+      "definition": {
+        "type": "MAPE",
+        "config": {
+          "epsilon": 1e-06
+        }
+      }
+    },
+    {
+      "name": "TimeToPeakError",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeakError",
+        "config": {
+          "unit": "days"
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1.0,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "start_day": 0,
+    "burn_in_days": 0
+  },
+  "algorithms": {
+    "network_generation": "Watts-Strogatz small-world, Barabasi-Albert scale-free, or Erdos-Renyi random graph with homophily rewiring and optional threshold assortativity.",
+    "exposure_sampling": "Poisson sampling of messages per agent with neighbor selection (with replacement); Bernoulli media broadcast; moderation as binomial thinning.",
+    "adoption_decision": "Logistic-threshold model combining peer and media influence, incentives, and misinformation penalties; with spontaneous adoption and abandonment.",
+    "aggregation": "Daily means and cumulative sums with optional moving average smoothing."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and evaluation of daily observables against simulated outputs.",
+      "fields_used": [
+        "date",
+        "adoption_rate",
+        "cumulative_adopters",
+        "exposure_rate",
+        "misinfo_prevalence"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point; orchestrates simulation loop, module scheduling, and configuration."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder and homophily/assortativity routines."
+      },
+      {
+        "name": "modules/policy.py",
+        "description": "Implements PolicyModule policy schedule and targeting."
+      },
+      {
+        "name": "modules/interaction.py",
+        "description": "Implements InteractionEngine exposure generation."
+      },
+      {
+        "name": "modules/influence.py",
+        "description": "Implements InfluenceUpdate decision and state update."
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "Implements Aggregator and smoothing utilities."
+      },
+      {
+        "name": "data/io.py",
+        "description": "Data loading for train_data.csv and writing outputs."
+      },
+      {
+        "name": "metrics/evaluate.py",
+        "description": "Metric computations (RMSE, MAPE, TimeToPeakError) and reporting over prediction_period."
+      },
+      {
+        "name": "config/params.py",
+        "description": "Parameter schema, defaults, bounds validation, and sampling utilities for SBI."
+      },
+      {
+        "name": "utils/random.py",
+        "description": "Seed management and RNG wrapper."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "scipy",
+      "networkx",
+      "pandas",
+      "numba",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "RMSE_cumulative",
+    "MAPE_exposure_rate",
+    "TimeToPeakError"
+  ]
+}

@@ -1,0 +1,226 @@
+{
+  "summary": "The current simulation runs and covers many core mechanisms (peer influence, information, policy, retail, and SEIR). However, there are critical logic errors (incidence double counting), intermittency issues due to buffer reliance (policy enforcement on days PolicyModule doesn't run), performance bottlenecks (retail allocation loop), and multiple spec mismatches (network type, missing behaviors/metrics, parameter usage). Prioritize fixing epidemiological correctness, policy persistence, and performance, then align metrics and model components to the specification.",
+  "critical_issues": [
+    {
+      "issue": "Incidence double-counting susceptible infections within the same day",
+      "impact": "Inflates incidence and biases infection_rate_reduction; undermines validity of disease-related outcomes and policy triggers.",
+      "solution": "Deduplicate by tracking newly exposed susceptible IDs in a set and increment incidence only once per susceptible per day. Also deduplicate counterfactual incidence on the same set of susceptible targets.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Policy enforcement pressure collapses to zero on days when PolicyModule doesn't run",
+      "impact": "Spurious drops in adoption/compliance leading to oscillatory or underestimated policy impact.",
+      "solution": "Use persistent state (state.locations[].mask_policy_required and state.policy.policy_state) when buffers are absent. Alternatively, run PolicyModule daily (tick_rate=1).",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "Retail allocation O(inventory * needers) per day",
+      "impact": "Performance and scalability issues for large populations and inventories, potentially causing slow runs or timeouts.",
+      "solution": "Replace iterative unit-by-unit allocation with a single multinomial draw across needers, then cap by ration limits.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Specification mismatches (network_type ignored, missing behaviors/attributes, metrics aliasing)",
+      "impact": "Reduces credibility and traceability; blocks evaluation against specified metrics and study designs.",
+      "solution": "Implement scale-free network generation when requested; add risk/trust update and movement placeholders; add metric aliases and compute policy_impact_effect_size.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Adoption bias parameter prepared in calibration but unused in decision function",
+      "impact": "Calibrator\u2019s effects are muted; reduces controllability of adoption dynamics calibration.",
+      "solution": "Add adoption_bias to AdoptionDecision total propensity; consider including compliance_propensity as a small bias term.",
+      "introduced_by_changes": true
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Risk perception feedback",
+      "current_approach": "Risk perception is static; prevalence_feedback_weight is unused.",
+      "suggested_approach": "Introduce a RiskUpdateModule that updates risk_perception from prevalence with optional decay.",
+      "expected_benefit": "Aligns with behavior theory and spec by coupling disease dynamics to adoption decisions."
+    },
+    {
+      "aspect": "Network structure",
+      "current_approach": "Always builds a ring-lattice network.",
+      "suggested_approach": "Implement Barabasi-Albert scale-free network when network_type='scale_free' and optionally ER random graph.",
+      "expected_benefit": "Matches spec and produces more realistic degree distributions for social contagion."
+    },
+    {
+      "aspect": "Policy impact estimation",
+      "current_approach": "No policy_impact_effect_size metric.",
+      "suggested_approach": "Compute difference-in-differences of adoption/compliance around policy change events, with simple pre/post windows.",
+      "expected_benefit": "Quantifies policy impact in alignment with spec and improves interpretability."
+    },
+    {
+      "aspect": "Compliance measurement",
+      "current_approach": "Approximated via mean policy_pressure.",
+      "suggested_approach": "When a mandate is active, compute actual compliance as fraction wearing masks; retain policy_pressure as a separate signal.",
+      "expected_benefit": "More faithful measure of real-world compliance under mandates."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation.py",
+      "modification": "Deduplicate new exposures and counterfactual infections in DiseaseDynamicsModule",
+      "reason": "Fixes critical incidence double counting and aligns infection_rate_reduction with proper counterfactual baseline.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Make PolicyEnforcement robust to missing buffers and/or run PolicyModule daily",
+      "reason": "Prevents spurious drops in policy pressure on non-policy days; stabilizes compliance dynamics.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Vectorize retail allocation via multinomial sampling",
+      "reason": "Resolves major performance bottleneck in retail allocation.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add adoption_bias and a small compliance_propensity term to AdoptionDecision total",
+      "reason": "Activates calibrated bias and improves controllability of adoption dynamics.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Conditionally include disease modules based on disease_module_enabled",
+      "reason": "Respects spec flag and enables faster runs when disease dynamics are disabled.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add metric aliases and compute policy_impact_effect_size; adjust compliance metric",
+      "reason": "Aligns outputs with spec and adds a key missing metric.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Implement RiskUpdateModule and schedule it after DiseaseDynamics",
+      "reason": "Uses prevalence feedback to update risk perception over time.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Support scale_free network generation in Simulation.reset",
+      "reason": "Aligns with spec and improves realism of social influence.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "modification": "Add spec-aligned aliases for Person attributes (health_risk_level, access_to_masks, home/work ids)",
+      "reason": "Improves schema alignment without breaking existing logic.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "overall_adoption_rate_over_time",
+      "current_gap": "Output key differs and adoption path may be too smooth due to strong habit term.",
+      "suggestion": "Provide alias and tune habit_persistence and adoption_noise to match empirical adoption curves; include adoption_bias for baseline levels."
+    },
+    {
+      "metric": "compliance_in_policy_locations",
+      "current_gap": "Proxy via policy_pressure rather than observed compliance under mandates.",
+      "suggestion": "Report actual mask wearing rate on mandate days; compare against observed compliance data by location type if available."
+    },
+    {
+      "metric": "policy_impact_effect_size",
+      "current_gap": "Not computed.",
+      "suggestion": "Add pre/post difference-in-differences estimator over 7-day windows around policy changes and validate against historical policy shifts."
+    },
+    {
+      "metric": "mask_access_inequity_index",
+      "current_gap": "Uses Gini on stock only; price and ration effects by income not validated.",
+      "suggestion": "Calibrate price_elasticity and access_inequity_income_elasticity against observed purchase disparities; add retailer outages if data supports."
+    }
+  ],
+  "prioritized_actions": [
+    "Fix incidence double counting and counterfactual deduplication in DiseaseDynamicsModule.",
+    "Stabilize policy enforcement by using persistent state or running PolicyModule daily.",
+    "Vectorize retail allocation to remove performance bottlenecks.",
+    "Add adoption_bias into decision equation; retune as needed.",
+    "Add metric aliases and compute policy_impact_effect_size.",
+    "Implement RiskUpdateModule to use prevalence_feedback_weight.",
+    "Support scale_free network generation to match spec.",
+    "Improve compliance metric to reflect observed mask wearing under mandates."
+  ],
+  "additional_comments": "The main() direct call requirement is met. Error handling and artifact logging are reasonable. Consider adding small unit tests for modules (e.g., transmission dedup, policy persistence, and retail allocation limits) to prevent regressions.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "        incidence = 0\n        counterf = 0\n        new_E = []\n        # Transmission on contacts\n        for (i, j) in contacts:\n            a = people[i]\n            b = people[j]\n            pairs = []\n            if a.health_status == \"I\" and b.health_status == \"S\":\n                pairs.append((a, b))\n            if b.health_status == \"I\" and a.health_status == \"S\":\n                pairs.append((b, a))\n            for src, dst in pairs:\n                p = base_inf * ((1.0 - mask_eff) ** (src.mask_use_state + dst.mask_use_state))\n                if rng.random() < p:\n                    if dst.health_status == \"S\":\n                        new_E.append(dst.id)\n                        incidence += 1\n                # Counterfactual without masks\n                if rng.random() < base_inf:\n                    counterf += 1\n        # Apply new exposures\n        disease_updates = []\n        for pid in new_E:\n            p = people[pid]\n            if p.health_status == \"S\":\n                p.health_status = \"E\"\n                ...",
+      "after": "        incidence = 0\n        counterf = 0\n        new_E_set = set()\n        cf_E_set = set()\n        for (i, j) in contacts:\n            a = people[i]\n            b = people[j]\n            pairs = []\n            if a.health_status == \"I\" and b.health_status == \"S\":\n                pairs.append((a, b))\n            if b.health_status == \"I\" and a.health_status == \"S\":\n                pairs.append((b, a))\n            for src, dst in pairs:\n                if dst.health_status != \"S\":\n                    continue\n                p_trans = base_inf * ((1.0 - mask_eff) ** (src.mask_use_state + dst.mask_use_state))\n                if rng.random() < p_trans and dst.id not in new_E_set:\n                    new_E_set.add(dst.id)\n                    incidence += 1\n                if rng.random() < base_inf and dst.id not in cf_E_set:\n                    cf_E_set.add(dst.id)\n                    counterf += 1\n        new_E = list(new_E_set)\n        disease_updates = []\n        for pid in new_E:\n            p = people[pid]\n            if p.health_status == \"S\":\n                p.health_status = \"E\"\n                ...",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "class PolicyModule(ModuleBase):\n    name = \"PolicyModule\"\n    tick_rate = 3\n    dependencies: List[str] = [\"DiseaseDynamics\"]\n\nclass PolicyEnforcementModule(ModuleBase):\n    ...\n    def forward(self, state: State, buffers: Dict[str, Any], t: int) -> None:\n        loc_required = buffers.get(\"locations_policy\", {})\n        enforce_levels = []\n        for loc in state.locations:\n            if loc_required.get(loc.id, False):\n                enforce_levels.append(float(loc.enforcement_level))\n        avg_enforce = float(np.mean(enforce_levels)) if enforce_levels else 0.0",
+      "after": "class PolicyModule(ModuleBase):\n    name = \"PolicyModule\"\n    tick_rate = 1\n    dependencies: List[str] = [\"DiseaseDynamics\"]\n\nclass PolicyEnforcementModule(ModuleBase):\n    ...\n    def forward(self, state: State, buffers: Dict[str, Any], t: int) -> None:\n        loc_required = buffers.get(\"locations_policy\", None)\n        enforce_levels = []\n        for loc in state.locations:\n            required = (loc_required.get(loc.id, False) if isinstance(loc_required, dict) else bool(loc.mask_policy_required))\n            if required:\n                enforce_levels.append(float(loc.enforcement_level))\n        avg_enforce = float(np.mean(enforce_levels)) if enforce_levels else 0.0",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "            if need_idx:\n                # Allocate iteratively up to inventory or needs\n                for _ in range(min(r.inventory, len(need_idx) * ration_limit)):\n                    w = np.array([weights[i] for i in need_idx], dtype=float)\n                    if w.sum() <= 0:\n                        break\n                    w = w / w.sum()\n                    pick = int(np.searchsorted(np.cumsum(w), rng.random()))\n                    pid = need_idx[pick]\n                    if mask_stock_add[pid] >= ration_limit:\n                        continue\n                    mask_stock_add[pid] += 1\n                    r.inventory -= 1\n                    if r.inventory <= 0:\n                        break",
+      "after": "            if need_idx and r.inventory > 0:\n                w = np.array([weights[i] for i in need_idx], dtype=float)\n                if w.sum() > 0:\n                    pvec = w / w.sum()\n                    draw = rng.multinomial(r.inventory, pvec)\n                    for local_i, alloc in enumerate(draw):\n                        pid = need_idx[local_i]\n                        cap = min(ration_limit, desired_buffer - people[pid].mask_stock)\n                        give = int(min(alloc, max(0, cap)))\n                        if give > 0:\n                            mask_stock_add[pid] += give\n                            r.inventory -= give\n                            if r.inventory <= 0:\n                                break",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "            total = peer[i] + info[i] + policy[i] + habit + risk_signal + rng.normal(0.0, noise_scale)\n            propensity = sigmoid(total / max(1e-6, temperature))",
+      "after": "            bias = float(self.params.get(\"adoption_bias\", 0.0))\n            comp = clamp(p.compliance_propensity, 0.0, 1.0) - 0.5\n            total = bias + peer[i] + info[i] + policy[i] + habit + risk_signal + 0.2 * comp + rng.normal(0.0, noise_scale)\n            propensity = sigmoid(total / max(1e-6, temperature))",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "simulation.py",
+      "before": "        self.modules = {\n            \"SocialInfluence\": SocialInfluenceModule(self.params),\n            \"InformationBroadcast\": InformationBroadcastModule(self.params),\n            \"PolicyModule\": PolicyModule(self.params),\n            \"PolicyEnforcement\": PolicyEnforcementModule(self.params),\n            \"RetailMarket\": RetailMarketModule(self.params),\n            \"MovementAndInteraction\": MovementAndInteractionModule(self.params),\n            \"AdoptionDecision\": AdoptionDecisionModule(self.params),\n            \"DiseaseDynamics\": DiseaseDynamicsModule(self.params),\n            \"AdoptionAggregator\": AdoptionAggregatorModule(self.params),\n        }\n        module_order = [\n            self.modules[\"PolicyModule\"],\n            self.modules[\"SocialInfluence\"],\n            self.modules[\"InformationBroadcast\"],\n            self.modules[\"PolicyEnforcement\"],\n            self.modules[\"RetailMarket\"],\n            self.modules[\"MovementAndInteraction\"],\n            self.modules[\"AdoptionDecision\"],\n            self.modules[\"DiseaseDynamics\"],\n            self.modules[\"AdoptionAggregator\"],\n        ]\n        self.scheduler = DAGScheduler(module_order)",
+      "after": "        self.modules = {\n            \"SocialInfluence\": SocialInfluenceModule(self.params),\n            \"InformationBroadcast\": InformationBroadcastModule(self.params),\n            \"PolicyModule\": PolicyModule(self.params),\n            \"PolicyEnforcement\": PolicyEnforcementModule(self.params),\n            \"RetailMarket\": RetailMarketModule(self.params),\n            \"AdoptionDecision\": AdoptionDecisionModule(self.params),\n            \"AdoptionAggregator\": AdoptionAggregatorModule(self.params),\n        }\n        if bool(self.params.get(\"disease_module_enabled\", True)):\n            self.modules[\"MovementAndInteraction\"] = MovementAndInteractionModule(self.params)\n            self.modules[\"DiseaseDynamics\"] = DiseaseDynamicsModule(self.params)\n        # Optional risk update module\n        if bool(self.params.get(\"disease_module_enabled\", True)):\n            class RiskUpdateModule(ModuleBase):\n                name = \"RiskUpdate\"; tick_rate = 1; dependencies = [\"DiseaseDynamics\"]\n                def forward(self, state, buffers, t):\n                    prev = buffers.get(\"prevalence\", sum(1 for p in state.people if p.health_status==\"I\")/max(1,len(state.people)))\n                    w = float(self.params.get(\"prevalence_feedback_weight\", 0.3))\n                    decay = float(self.params.get(\"risk_decay\", 0.05))\n                    for p in state.people:\n                        p.risk_perception = clamp(p.risk_perception*(1.0-decay) + w*prev, 0.0, 1.0)\n            self.modules[\"RiskUpdate\"] = RiskUpdateModule(self.params)\n        module_order = [self.modules[\"PolicyModule\"], self.modules[\"SocialInfluence\"], self.modules[\"InformationBroadcast\"], self.modules[\"PolicyEnforcement\"], self.modules[\"RetailMarket\"]]\n        if \"MovementAndInteraction\" in self.modules:\n            module_order += [self.modules[\"MovementAndInteraction\"], self.modules[\"AdoptionDecision\"], self.modules[\"DiseaseDynamics\"]]\n            if \"RiskUpdate\" in self.modules:\n                module_order.append(self.modules[\"RiskUpdate\"])\n        else:\n            module_order.append(self.modules[\"AdoptionDecision\"])\n        module_order.append(self.modules[\"AdoptionAggregator\"])\n        self.scheduler = DAGScheduler(module_order)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Build simple ring-lattice network\n        k = max(1, avg_degree // 2)\n        for i, p in enumerate(people):\n            p.network_neighbors = [int((i + j) % N) for j in range(1, k + 1)] + [int((i - j) % N) for j in range(1, k + 1)]",
+      "after": "        net_type = str(self.params.get(\"network_type\", \"scale_free\"))\n        if net_type == \"scale_free\":\n            m = max(1, avg_degree // 2)\n            G = [set() for _ in range(N)]\n            degrees = np.ones(N, dtype=float)\n            for i0 in range(m):\n                for j0 in range(i0+1, m):\n                    G[i0].add(j0); G[j0].add(i0)\n                    degrees[i0] += 1; degrees[j0] += 1\n            for i_new in range(m, N):\n                probs = degrees[:i_new] / degrees[:i_new].sum()\n                chosen = set()\n                while len(chosen) < m:\n                    j = int(self.rng.choice(i_new, p=probs))\n                    chosen.add(j)\n                for j in chosen:\n                    G[i_new].add(j); G[j].add(i_new)\n                    degrees[i_new] += 1; degrees[j] += 1\n            for i, p in enumerate(people):\n                p.network_neighbors = list(G[i])\n        elif net_type == \"erdos_renyi\":\n            p_edge = min(1.0, avg_degree / max(1, N-1))\n            G = [set() for _ in range(N)]\n            for i in range(N):\n                for j in range(i+1, N):\n                    if self.rng.random() < p_edge:\n                        G[i].add(j); G[j].add(i)\n            for i, p in enumerate(people):\n                p.network_neighbors = list(G[i])\n        else:\n            k = max(1, avg_degree // 2)\n            for i, p in enumerate(people):\n                p.network_neighbors = [int((i + j) % N) for j in range(1, k + 1)] + [int((i - j) % N) for j in range(1, k + 1)]",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        adoption_rate = float(np.mean(mask_arr)) if len(mask_arr) > 0 else 0.0\n        policy_press = buffers.get(\"policy_pressure\", np.zeros(N, dtype=float))\n        compliance = float(np.mean(policy_press)) if len(policy_press) > 0 else 0.0\n        state.observables[\"adoption_rate_daily\"].append(adoption_rate)\n        state.observables[\"compliance_in_policy_locations_daily\"].append(compliance)",
+      "after": "        adoption_rate = float(np.mean(mask_arr)) if len(mask_arr) > 0 else 0.0\n        policy_press = buffers.get(\"policy_pressure\", np.zeros(N, dtype=float))\n        mandate = 1 if state.policy.policy_state == \"mandate\" else 0\n        comp_obs = float(np.mean(mask_arr)) if mandate else float(np.mean(policy_press))\n        state.observables[\"adoption_rate_daily\"].append(adoption_rate)\n        state.observables[\"overall_adoption_rate_over_time\"].append(adoption_rate)\n        state.observables[\"compliance_in_policy_locations_daily\"].append(comp_obs)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "        # Steady-state adoption (last 14 days)\n        if adoption:\n            k = min(14, len(adoption))\n            metrics[\"steady_state_adoption\"] = float(np.mean(adoption[-k:]))\n            target = float(self.params.get(\"threshold_adoption_target\", 0.7))\n            ttt = next((i for i, a in enumerate(adoption) if a >= target), None)\n            metrics[\"time_to_target_adoption\"] = int(ttt) if ttt is not None else None",
+      "after": "        # Steady-state adoption and aliases\n        if adoption:\n            k = min(14, len(adoption))\n            metrics[\"steady_state_adoption\"] = float(np.mean(adoption[-k:]))\n            target = float(self.params.get(\"threshold_adoption_target\", 0.7))\n            ttt = next((i for i, a in enumerate(adoption) if a >= target), None)\n            metrics[\"time_to_target_adoption\"] = int(ttt) if ttt is not None else None\n            metrics[\"time_to_threshold_adoption\"] = metrics[\"time_to_target_adoption\"]\n        # Policy impact effect size (DiD over 7-day windows)\n        eff = None\n        comp_eff = None\n        if self.state.policy_change_events:\n            change_day = self.state.policy_change_events[-1][0]\n            pre = adoption[max(0, change_day-7):change_day]\n            post = adoption[change_day:change_day+7]\n            comp_series = self.state.observables.get(\"compliance_in_policy_locations_daily\", [])\n            pre_c = comp_series[max(0, change_day-7):change_day]\n            post_c = comp_series[change_day:change_day+7]\n            if pre and post:\n                eff = float(np.mean(post) - np.mean(pre))\n            if pre_c and post_c:\n                comp_eff = float(np.mean(post_c) - np.mean(pre_c))\n        metrics[\"policy_impact_effect_size\"] = {\"adoption\": eff, \"compliance\": comp_eff}",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "@dataclass\nclass Person:\n    id: int\n    age_group: int\n    risk_perception: float = 0.2\n    trust_in_institutions: float = 0.5\n    compliance_propensity: float = 0.5\n    social_influence_susceptibility: float = 0.5\n    political_orientation: int = 0\n    income: float = 1.0\n    mask_stock: int = 0\n    mask_preference: int = 1\n    mask_use_state: int = 0\n    adoption_threshold: float = 0.5\n    information_exposure_level: float = 0.5\n    network_neighbors: List[int] = field(default_factory=list)\n    health_status: str = \"S\"\n    ...",
+      "after": "@dataclass\nclass Person:\n    id: int\n    age_group: int\n    # Spec-aligned aliases\n    health_risk_level: float = 0.0  # alias of risk_perception base\n    risk_perception: float = 0.2\n    trust_in_authority: float = 0.5  # alias of trust_in_institutions\n    trust_in_institutions: float = 0.5\n    conformity_susceptibility: float = 0.5  # alias of social_influence_susceptibility\n    social_influence_susceptibility: float = 0.5\n    political_identity: int = 0  # alias of political_orientation\n    political_orientation: int = 0\n    income: float = 1.0\n    access_to_masks: int = 0  # alias of mask_stock\n    mask_stock: int = 0\n    mask_preference: int = 1\n    current_mask_status: int = 0  # alias of mask_use_state\n    mask_use_state: int = 0\n    adoption_state: int = 0  # optional state label\n    adoption_threshold: float = 0.5\n    information_exposure_level: float = 0.5\n    home_location_id: int = 0\n    workplace_location_id: int = 1\n    network_neighbors: List[int] = field(default_factory=list)\n    disease_status: str = \"S\"  # alias of health_status\n    health_status: str = \"S\"\n    ...\n    def as_dict(self) -> Dict[str, Any]:\n        d = asdict(self)\n        d[\"health_risk_level\"] = self.risk_perception\n        d[\"trust_in_authority\"] = self.trust_in_institutions\n        d[\"conformity_susceptibility\"] = self.social_influence_susceptibility\n        d[\"political_identity\"] = self.political_orientation\n        d[\"access_to_masks\"] = self.mask_stock\n        d[\"current_mask_status\"] = self.mask_use_state\n        d[\"disease_status\"] = self.health_status\n        return d",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "The new iteration reintroduces a full simulation with modules, deterministic seeding, metrics, and CLI orchestration. It improves structure and adds calibration scaffolding. However, several specification mismatches and logic/performance issues persist or were introduced.",
+    "positive_impacts": [
+      "Functional main() with CLI, artifacts, and visualization support.",
+      "Modular design with buffers and a scheduler; deterministic RNG seeding.",
+      "Inclusion of SEIR dynamics and a basic retail market."
+    ],
+    "negative_impacts": [
+      "PolicyModule running every 3 days leads to missing buffers and intermittent enforcement pressure.",
+      "Adoption bias prepared in calibration is not applied in decision-making.",
+      "Performance hotspot in retail allocation not addressed.",
+      "Network type parameter ignored; ring-lattice only."
+    ],
+    "suggestions": [
+      "Run PolicyModule daily or base enforcement on state when buffers missing.",
+      "Apply adoption_bias and consider using compliance_propensity as a small bias.",
+      "Vectorize retail allocation.",
+      "Implement scale-free network generation to match the spec."
+    ]
+  }
+}

@@ -1,0 +1,176 @@
+{
+  "summary": "The simulation is syntactically correct and functionally complete, but the runtime output includes non-JSON text on stdout, causing the sandbox to fail when parsing the final JSON. There are also minor logic issues (one-day lag in adoption/compliance measurement and redundant vendor stock updates) and a limitation in frozen-parameter validation during calibration. Recent changes improved realism (prevalence coupling, household sharing, price dynamics, randomized allocation, warm-up/slicing fixes), but they also increased stdout chatter, exacerbating the JSON parsing error. The highest priority is to ensure stdout contains only the final JSON line and move all logs/visualization to stderr or files. Secondary fixes should align adoption/compliance with current-day decisions and clean up vendor stock accounting.",
+  "critical_issues": [
+    {
+      "issue": "Non-JSON text printed to stdout before the final JSON summary",
+      "impact": "The sandbox expects a single JSON object on stdout. Printing visualization lines, parameter warnings, and debug messages causes JSON parsing to fail (Error parsing JSON response).",
+      "solution": "Route all non-JSON output to stderr or log files, and ensure the only stdout line is the final JSON. Remove sim.visualize() and prints to stdout in main and calibrators/adapters or redirect them to stderr.",
+      "introduced_by_changes": true
+    },
+    {
+      "issue": "AdoptionAggregator uses prior-day wears_mask state instead of current-day wear_flags buffer",
+      "impact": "This introduces a one-day lag in adoption and compliance series, degrading evaluation accuracy, calibration, and interpretability.",
+      "solution": "When available, compute adoption and mandate compliance from buffers['signal.wear_flags'] (current decisions) rather than persons[i].wears_mask.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Redundant vendor stock update in commit (double-adjustment)",
+      "impact": "Simulation accuracy and clarity are reduced because vendor.stock is decreased per allocation and then overwritten with the Market module\u2019s inventory buffer (which already accounted for sales and restock). This risks transient inconsistencies and makes reasoning harder.",
+      "solution": "Remove vendor.stock -= qty in _commit and rely solely on buffers['observable.inventory_daily'] for end-of-day stock.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Frozen-parameter validation is ineffective during calibration due to missing parameter_definitions.json in calibration run directories",
+      "impact": "Calibrator may inadvertently override frozen parameters without warnings, leading to poor reproducibility and unintended changes.",
+      "solution": "Copy parameter_definitions.json into each calibration run artifacts directory (or pass a consistent defs_path to evaluate_params/adapter).",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Timing of adoption/compliance measurement",
+      "current_approach": "AdoptionAggregator reads persons[i].wears_mask (prior-day committed state).",
+      "suggested_approach": "Use buffers['signal.wear_flags'] for the current day's decisions when available; fallback to state only if the buffer is missing.",
+      "expected_benefit": "Removes one-day lag, better calibration signal, and more accurate observables."
+    },
+    {
+      "aspect": "Market accounting consistency",
+      "current_approach": "Commit stage subtracts purchases from vendor.stock, then overwrites vendor.stock with buffered inventory.",
+      "suggested_approach": "Let MarketAndSupply compute end-of-day inventory; in commit, only set vendor.stock from buffers['observable.inventory_daily'] without interim subtraction.",
+      "expected_benefit": "Cleaner accounting, fewer inconsistencies under scarcity, easier debugging."
+    },
+    {
+      "aspect": "Parameter validation during calibration",
+      "current_approach": "DefaultParamsAdapter loads definitions from simulator.artifacts_dir; calibration runs lack that file.",
+      "suggested_approach": "Copy parameter_definitions.json into each calibration run directory or pass a stable path to the adapter used in evaluate_params.",
+      "expected_benefit": "Enforces frozen parameters during calibration, improving reproducibility."
+    },
+    {
+      "aspect": "Output/logging discipline",
+      "current_approach": "Multiple print calls (visualization, warnings, adapter/calibrator logs) write to stdout.",
+      "suggested_approach": "Send logs, warnings, and visualization to stderr or artifact files; restrict stdout to the final JSON line.",
+      "expected_benefit": "Prevents JSON parsing errors in the sandbox and makes outputs clean and machine-readable."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "simulation_code_iter_45.py (main and logging points)",
+      "modification": "Redirect all non-JSON prints to stderr or files; remove sim.visualize() call before the final JSON print.",
+      "reason": "Fixes sandbox JSON parsing failures by ensuring stdout contains only the final JSON.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "AdoptionAggregatorModule.forward",
+      "modification": "Compute adoption and compliance using buffers['signal.wear_flags'] when present.",
+      "reason": "Removes one-day lag in adoption/compliance, improving data fidelity and calibration.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "Simulation._commit (purchase allocations section)",
+      "modification": "Remove per-person vendor.stock decrement; rely on MarketAndSupply to output final inventory and set vendor.stock only from buffers['observable.inventory_daily'].",
+      "reason": "Avoids double counting/overwriting and clarifies inventory flow.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "main() -> simulator_factory",
+      "modification": "Copy artifacts/parameter_definitions.json into calibration_runs dir so DefaultParamsAdapter can validate frozen params.",
+      "reason": "Ensures frozen-parameter handling during calibration runs.",
+      "related_to_recent_changes": true
+    },
+    {
+      "file": "DefaultParamsAdapter.apply and SNPECalibrator.fit",
+      "modification": "Replace print(...) with writes to stderr or logging module.",
+      "reason": "Avoids polluting stdout and causing JSON parsing errors.",
+      "related_to_recent_changes": true
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Adoption rate over time",
+      "current_gap": "Series has a one-day lag versus ground truth, and may react sluggishly to mandate changes.",
+      "suggestion": "Use current-day wear_flags in aggregation, and consider adding a short ramp-up dynamic for policy effects (e.g., mandate adherence inertia)."
+    },
+    {
+      "metric": "Mask price dynamics",
+      "current_gap": "Price responds only to excess demand vs inventory; real data may include cost floors, promotions, and vendor pricing stickiness.",
+      "suggestion": "Add price smoothing (e.g., exponential moving average) and a minimum change threshold to mimic sticky pricing; optionally load a price series if available."
+    },
+    {
+      "metric": "Infections and R-effective proxy",
+      "current_gap": "Transmission model is simplified and may not match incidence trends when compared with real-world data.",
+      "suggestion": "Incorporate contacts-by-context weighted by adoption rates and add stochasticity; allow calibration to observed incidence if available."
+    },
+    {
+      "metric": "Mandate compliance",
+      "current_gap": "Measured across at-risk population but could refine by location types and workplace enforcement heterogeneity.",
+      "suggestion": "Load mandate policy timelines by jurisdiction from data and allow per-location enforcement strengths to better match observed compliance."
+    }
+  ],
+  "prioritized_actions": [
+    "Route all non-JSON output to stderr or files; ensure stdout only prints the final JSON line.",
+    "Use wear_flags from buffers in AdoptionAggregator to remove one-day lag.",
+    "Remove redundant vendor.stock decrements in _commit.",
+    "Copy parameter_definitions.json into calibration_runs so frozen parameters are enforced.",
+    "Optionally add price smoothing and inertia; calibrate to any available ground truth."
+  ],
+  "additional_comments": "Recent changes significantly improved internal consistency and realism: randomized scarcity allocation, prevalence-to-risk coupling, household sharing, evaluator warm-up with proper window slicing, and improved SES inequality metric via Gini. The primary blocker is output contamination on stdout; address that first. The other fixes will improve metric fidelity and calibration robustness.",
+  "code_snippets": [
+    {
+      "file": "simulation_code_iter_45.py (main)",
+      "before": "    for w in registry.warnings:\n        print(f\"[ParamWarning] {w}\")\n    ...\n    sim.visualize()\n    print(json.dumps({\"status\": \"ok\", \"final_adoption\": metrics.get(\"adoption_rate_over_time\", [0])[-1] if metrics.get(\"adoption_rate_over_time\") else 0.0}))\n",
+      "after": "    import sys\n    for w in registry.warnings:\n        sys.stderr.write(f\"[ParamWarning] {w}\\n\")\n    ...\n    # sim.visualize()  # Move visualization to stderr or a file if needed\n    # Final JSON-only stdout\n    print(json.dumps({\"status\": \"ok\", \"final_adoption\": metrics.get(\"adoption_rate_over_time\", [0])[-1] if metrics.get(\"adoption_rate_over_time\") else 0.0}))\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "DefaultParamsAdapter.apply",
+      "before": "                if self._is_frozen(target_key):\n                    print(f\"[ParamsAdapter] Frozen param '{target_key}' ignored.\")\n                    continue\n",
+      "after": "                if self._is_frozen(target_key):\n                    import sys\n                    sys.stderr.write(f\"[ParamsAdapter] Frozen param '{target_key}' ignored.\\n\")\n                    continue\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "SNPECalibrator.fit",
+      "before": "        if not self.available:\n            print(\"[SNPECalibrator] Dependencies unavailable; falling back to RandomSearch.\")\n            return RandomSearchCalibrator().fit(\n                bundle, simulator_factory, evaluator, train_window, seed, budget, artifacts_dir, params_adapter\n            )\n",
+      "after": "        if not self.available:\n            import sys\n            sys.stderr.write(\"[SNPECalibrator] Dependencies unavailable; falling back to RandomSearch.\\n\")\n            return RandomSearchCalibrator().fit(\n                bundle, simulator_factory, evaluator, train_window, seed, budget, artifacts_dir, params_adapter\n            )\n",
+      "addresses_recent_changes": true
+    },
+    {
+      "file": "AdoptionAggregatorModule.forward",
+      "before": "        persons: List[Person] = state[\"persons\"]\n        mandate = buffers.get(\"state.mandate_status\", state[\"authority\"].mandate_status)\n        # Adoption rate overall\n        adoption = sum(p.wears_mask for p in persons) / max(1, len(persons))\n        buffers[\"observable.adoption_rate_daily\"] = adoption\n        # FIXED: Mandate compliance measured among at-risk (working) population when mandate is active.\n        at_risk_ids = [i for i, p in enumerate(persons) if p.work_location_id is not None]\n        if mandate and len(at_risk_ids) > 0:\n            comp = sum(persons[i].wears_mask for i in at_risk_ids) / len(at_risk_ids)\n        else:\n            comp = None\n        buffers[\"observable.mandate_compliance_rate_daily\"] = comp\n",
+      "after": "        persons: List[Person] = state[\"persons\"]\n        mandate = buffers.get(\"state.mandate_status\", state[\"authority\"].mandate_status)\n        wear_flags = buffers.get(\"signal.wear_flags\")\n        if wear_flags is not None and len(wear_flags) == len(persons):\n            adoption = sum(wear_flags) / max(1, len(wear_flags))\n            at_risk_ids = [i for i, p in enumerate(persons) if p.work_location_id is not None]\n            if mandate and len(at_risk_ids) > 0:\n                comp = sum(wear_flags[i] for i in at_risk_ids) / len(at_risk_ids)\n            else:\n                comp = None\n        else:\n            adoption = sum(p.wears_mask for p in persons) / max(1, len(persons))\n            at_risk_ids = [i for i, p in enumerate(persons) if p.work_location_id is not None]\n            if mandate and len(at_risk_ids) > 0:\n                comp = sum(persons[i].wears_mask for i in at_risk_ids) / len(at_risk_ids)\n            else:\n                comp = None\n        buffers[\"observable.adoption_rate_daily\"] = adoption\n        buffers[\"observable.mandate_compliance_rate_daily\"] = comp\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "Simulation._commit (purchase allocations section)",
+      "before": "        allocations = buffers.get(\"signal.purchase_allocations\")\n        if allocations is not None:\n            for i, qty in enumerate(allocations):\n                if qty > 0:\n                    # Add purchases to personal inventory (household borrow remains possible)\n                    persons[i].mask_inventory += qty\n                    vendor.stock -= qty\n",
+      "after": "        allocations = buffers.get(\"signal.purchase_allocations\")\n        if allocations is not None:\n            for i, qty in enumerate(allocations):\n                if qty > 0:\n                    persons[i].mask_inventory += qty\n        # Note: vendor.stock will be set from buffers['observable.inventory_daily'] below\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "main() -> simulator_factory",
+      "before": "    def simulator_factory() -> Simulation:\n        # Create a fresh registry instance with same values\n        reg_copy = ParameterRegistry(_default_parameter_definitions())\n        for k, v in registry.to_dict().items():\n            reg_copy.set(k, v)\n        art_dir = os.path.join(args.artifacts, \"calibration_runs\")\n        ensure_dir(art_dir)\n        s = build_simulator(reg_copy, seed, art_dir)\n        # Pass ground truth bundle for evaluator\n        s.bundle[\"ground_truth\"] = gt\n        return s\n",
+      "after": "    def simulator_factory() -> Simulation:\n        reg_copy = ParameterRegistry(_default_parameter_definitions())\n        for k, v in registry.to_dict().items():\n            reg_copy.set(k, v)\n        art_dir = os.path.join(args.artifacts, \"calibration_runs\")\n        ensure_dir(art_dir)\n        # Ensure parameter definitions are present for adapters\n        try:\n            import shutil\n            shutil.copy(os.path.join(args.artifacts, \"parameter_definitions.json\"), os.path.join(art_dir, \"parameter_definitions.json\"))\n        except Exception:\n            pass\n        s = build_simulator(reg_copy, seed, art_dir)\n        s.bundle[\"ground_truth\"] = gt\n        return s\n",
+      "addresses_recent_changes": true
+    }
+  ],
+  "change_analysis": {
+    "summary": "The latest iteration adds several solid improvements (risk-prevalence coupling, randomized allocation, household sharing, proper evaluator warm-up and slicing, better SES inequality metric). However, additional print statements and visualization on stdout now conflict with the sandbox's requirement for a single JSON output, causing parsing errors.",
+    "positive_impacts": [
+      "Evaluator warm-up (run from day 0 to end) with window slicing improves evaluation fidelity.",
+      "Randomization in scarcity allocation reduces index bias.",
+      "Risk perception now responds to prevalence, improving behavior-epidemiology coupling.",
+      "Household sharing allows limited substitution when personal stock is empty.",
+      "SES inequality now uses quintile Gini, improving equity assessment."
+    ],
+    "negative_impacts": [
+      "Increased stdout chatter (warnings, adapter/calibrator logs, visualization) breaks JSON parsing.",
+      "Adoption/compliance still measured with a one-day lag.",
+      "Vendor stock is updated redundantly in commit."
+    ],
+    "suggestions": [
+      "Move all prints except the final JSON to stderr or artifacts files.",
+      "Use wear_flags from buffers in AdoptionAggregator to remove lag.",
+      "Simplify vendor stock updates to rely on Market\u2019s buffered inventory only.",
+      "Ensure parameter_definitions.json is accessible inside calibration runs for frozen-param validation."
+    ]
+  }
+}

@@ -1,0 +1,871 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based social influence and policy-driven adoption model on a dynamic small-world network. Individuals decide daily whether to adopt a behavior based on peer influence, marketing, and policy incentives/mandates. Communication diffuses information across the network; the network rewires slowly with homophily.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "age",
+        "income",
+        "group_id",
+        "openness",
+        "stubborn",
+        "adopted",
+        "adoption_threshold",
+        "utility_bias",
+        "exposures_memory",
+        "last_adoption_change_day"
+      ],
+      "behaviors": [
+        "communicate",
+        "evaluate_adoption",
+        "form_break_ties"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "age_distribution": {
+            "18_34": 0.35,
+            "35_54": 0.4,
+            "55_plus": 0.25
+          },
+          "income_log10_normal_mean": 4.5,
+          "income_log10_normal_std": 0.25,
+          "group_count": 5,
+          "group_assignment": "uniform",
+          "openness_beta_a": 2.0,
+          "openness_beta_b": 5.0,
+          "stubborn_fraction": 0.1,
+          "adoption_threshold_mean": 0.35,
+          "adoption_threshold_std": 0.12,
+          "initial_adopted_fraction": 0.05
+        }
+      }
+    },
+    {
+      "name": "Message",
+      "attributes": [
+        "sender_id",
+        "receiver_id",
+        "timestamp_day",
+        "content_type",
+        "strength",
+        "decay_rate"
+      ],
+      "behaviors": [
+        "decay"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "initial_count": 0
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "SocialNetworkFormation",
+      "description": "Initializes and dynamically rewires the social network with homophily.",
+      "inputs": [],
+      "outputs": [
+        "signal.network.graph",
+        "signal.network.degree",
+        "signal.network.adjacency"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if t == 0:\n  create WS graph with N nodes, average degree=network_ws_k, rewire prob=network_ws_p_rewire\n  assign nodes to agents 1..N\nelse:\n  for each node i:\n    with probability network_dynamic_rewire_rate:\n      if degree(i) > 0:\n        pick neighbor j uniformly from neighbors(i)\n        remove edge (i, j)\n      candidate_pool = nodes not connected to i and not i\n      score(u) = network_homophily_weight * similarity(i, u) + (1 - network_homophily_weight) * random_uniform()\n      pick u* = argmax score(u) subject to degree(u) < network_max_degree\n      add edge (i, u*)\nupdate and emit adjacency and degree arrays",
+        "notes": [
+          "similarity uses cosine over standardized attributes: age bucket, income z-score, group one-hot, openness.",
+          "Ensure graph stays simple and undirected.",
+          "Homophily weight 0 -> random rewiring; 1 -> purely homophilous."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "random_number_generator",
+        "agents.Person"
+      ],
+      "module_parameters": [
+        "network_type",
+        "network_ws_k",
+        "network_ws_p_rewire",
+        "network_dynamic_rewire_rate",
+        "network_homophily_weight",
+        "network_max_degree"
+      ]
+    },
+    {
+      "name": "CommunicationDynamics",
+      "description": "Simulates daily message transmission along edges and maintains exposure memories.",
+      "inputs": [
+        "signal.network.adjacency",
+        "signal.agent.adopted_flags"
+      ],
+      "outputs": [
+        "signal.agent.exposures_today",
+        "signal.exposure_rate_daily"
+      ],
+      "dependencies": [
+        "SocialNetworkFormation"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "initialize exposures_today[i] = 0 for all agents i\nfor each edge (i, j) in adjacency:\n  for ordered pair (i -> j):\n    if adopted[i] == True and adopted[j] == False:\n      bias = 1 + comm_transmission_bias_strength * (degree(i) > degree(j))\n      p_send = min(1.0, comm_transmission_prob_base * bias)\n      if Bernoulli(p_send) == 1 and exposures_today[j] < comm_max_exposures_per_day:\n        exposures_today[j] += 1\nfor each agent j:\n  decay_factor = 0.5 ** (1 / comm_message_half_life_days)\n  update exposures_memory_j = decay_factor * exposures_memory_j + exposures_today[j]\nemit exposures_today and exposure_rate_daily = mean(exposures_today)",
+        "notes": [
+          "Independent cascade style with per-day contact budget capped by comm_max_exposures_per_day.",
+          "Memory is a decayed scalar exposure score per agent."
+        ]
+      },
+      "requirements": [
+        "random_number_generator",
+        "access to agents.Person.exposures_memory"
+      ],
+      "module_parameters": [
+        "comm_transmission_prob_base",
+        "comm_transmission_bias_strength",
+        "comm_contact_budget_daily",
+        "comm_message_half_life_days",
+        "comm_max_exposures_per_day"
+      ]
+    },
+    {
+      "name": "PolicyIntervention",
+      "description": "Generates daily policy and marketing signals (mandates, incentives, outreach).",
+      "inputs": [],
+      "outputs": [
+        "signal.policy.active",
+        "signal.policy.incentive_amount",
+        "signal.marketing.contacts_by_agent"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "policy_active = (t >= policy_mandate_start_day) and (t <= policy_mandate_end_day)\nincentive = policy_incentive_amount if policy_active else 0.0\ncontacts_by_agent = zeros(N)\nexpected_contacts = int(round(marketing_budget_daily))\nfor c in 1..expected_contacts:\n  pick agent i uniformly at random\n  if Bernoulli(marketing_contact_probability) == 1:\n    contacts_by_agent[i] += 1\nemit policy_active, incentive, contacts_by_agent",
+        "notes": [
+          "Marketing contacts are modeled as Bernoulli-thinned uniform targeting.",
+          "Mandate window is fixed and can be treated as exogenous."
+        ]
+      },
+      "requirements": [
+        "random_number_generator"
+      ],
+      "module_parameters": [
+        "policy_mandate_start_day",
+        "policy_mandate_end_day",
+        "policy_incentive_amount",
+        "policy_enforcement_probability",
+        "policy_target_coverage",
+        "marketing_budget_daily",
+        "marketing_contact_probability"
+      ]
+    },
+    {
+      "name": "BehaviorAdoption",
+      "description": "Agent decision-making to adopt or drop the behavior based on social, marketing, and policy signals.",
+      "inputs": [
+        "signal.network.adjacency",
+        "signal.agent.exposures_today",
+        "signal.policy.active",
+        "signal.policy.incentive_amount",
+        "signal.marketing.contacts_by_agent"
+      ],
+      "outputs": [
+        "signal.agent.adopted_flags",
+        "signal.new_adoptions_today",
+        "signal.dropouts_today"
+      ],
+      "dependencies": [
+        "SocialNetworkFormation",
+        "CommunicationDynamics",
+        "PolicyIntervention"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "new_adopts = 0; dropouts = 0\nfor each agent i:\n  peer_adopt_frac = mean(adopted[neighbors(i)]) if degree(i) > 0 else 0\n  social_reinforce = adoption_social_reinforcement * max(0, peer_adopt_frac - adoption_threshold_mean)\n  marketing_signal = log(1 + contacts_by_agent[i])\n  policy_signal = (1.0 if policy_active else 0.0)\n  utility = adoption_base_rate\n  utility += adoption_peer_weight * peer_adopt_frac\n  utility += adoption_marketing_weight * marketing_signal\n  utility += adoption_policy_weight * policy_signal\n  utility += social_reinforce\n  utility -= adoption_stubborn_resistance * stubborn[i]\n  utility -= adoption_fatigue_decay * max(0, t - last_adoption_change_day[i]) / 30.0\n  # threshold heterogeneity\n  effective_threshold = Normal(adoption_threshold_mean, adoption_threshold_std) truncated to [0,1] per agent at init\n  # probabilistic choice via logistic temperature\n  p_adopt = sigmoid((utility - effective_threshold) / max(1e-6, adoption_temperature))\n  if adopted[i] == False:\n    if Bernoulli(p_adopt) == 1:\n      adopted[i] = True; new_adopts += 1; last_adoption_change_day[i] = t\n  else:\n    # reversion allowed when no policy or weak enforcement\n    reversion_p = adoption_reversion_prob * (1.0 - policy_enforcement_probability * (1.0 if policy_active else 0.0))\n    if Bernoulli(min(1.0, max(0.0, reversion_p))) == 1:\n      adopted[i] = False; dropouts += 1; last_adoption_change_day[i] = t\nemit adopted flags, new_adoptions_today=new_adopts, dropouts_today=dropouts",
+        "notes": [
+          "Combines threshold and random utility via logistic transformation.",
+          "Stubborn agents have stubborn[i]=1; others 0.",
+          "Marketing signal saturates with log(1 + contacts)."
+        ]
+      },
+      "requirements": [
+        "random_number_generator",
+        "agents.Person",
+        "access to adjacency and degrees"
+      ],
+      "module_parameters": [
+        "adoption_base_rate",
+        "adoption_peer_weight",
+        "adoption_marketing_weight",
+        "adoption_policy_weight",
+        "adoption_threshold_mean",
+        "adoption_threshold_std",
+        "adoption_temperature",
+        "adoption_fatigue_decay",
+        "adoption_reversion_prob",
+        "adoption_stubborn_fraction",
+        "adoption_stubborn_resistance",
+        "adoption_memory_window_days",
+        "adoption_social_reinforcement"
+      ]
+    },
+    {
+      "name": "AdoptionAggregator",
+      "description": "Aggregates and reports daily observables (rates, cumulative counts). Applies optional smoothing.",
+      "inputs": [
+        "signal.agent.adopted_flags",
+        "signal.agent.exposures_today"
+      ],
+      "outputs": [
+        "signal.adoption_rate_daily",
+        "signal.cumulative_adopters",
+        "signal.exposure_rate_daily_smoothed"
+      ],
+      "dependencies": [
+        "BehaviorAdoption",
+        "CommunicationDynamics"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_rate = mean(adopted_flags)\nif t == 0: cumulative_adopters = sum(adopted_flags)\nelse: cumulative_adopters = previous_cumulative + new_adoptions_today - dropouts_today\nexposure_rate = mean(exposures_today)\nexposure_rate_smoothed = moving_average(exposure_rate, window=agg_smoothing_window_days)\nemit adoption_rate_daily, cumulative_adopters, exposure_rate_daily_smoothed",
+        "notes": [
+          "Cumulative counts reflect net new adopters minus dropouts.",
+          "Smoothing uses a simple trailing window average."
+        ]
+      },
+      "requirements": [
+        "rolling_window_buffer"
+      ],
+      "module_parameters": [
+        "agg_smoothing_window_days",
+        "agg_report_by_group"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "network_type",
+      "dtype": "categorical",
+      "default": "watts_strogatz",
+      "bounds": {
+        "low": 0,
+        "high": 0
+      },
+      "owner_module": "SocialNetworkFormation",
+      "description": "Network generator type; fixed to Watts-Strogatz.",
+      "frozen": "true"
+    },
+    {
+      "key": "network_ws_k",
+      "dtype": "int",
+      "default": 12,
+      "bounds": {
+        "low": 2,
+        "high": 50
+      },
+      "owner_module": "SocialNetworkFormation",
+      "description": "Average degree (must be even) for WS graph.",
+      "frozen": "false"
+    },
+    {
+      "key": "network_ws_p_rewire",
+      "dtype": "float",
+      "default": 0.08,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "SocialNetworkFormation",
+      "description": "Initial WS rewiring probability.",
+      "frozen": "false"
+    },
+    {
+      "key": "network_dynamic_rewire_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.1
+      },
+      "owner_module": "SocialNetworkFormation",
+      "description": "Daily probability a node rewires one edge.",
+      "frozen": "false"
+    },
+    {
+      "key": "network_homophily_weight",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "SocialNetworkFormation",
+      "description": "Weight on similarity versus random choice during rewiring.",
+      "frozen": "false"
+    },
+    {
+      "key": "network_max_degree",
+      "dtype": "int",
+      "default": 100,
+      "bounds": {
+        "low": 10,
+        "high": 300
+      },
+      "owner_module": "SocialNetworkFormation",
+      "description": "Hard cap on degree when adding edges.",
+      "frozen": "false"
+    },
+    {
+      "key": "comm_transmission_prob_base",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.6
+      },
+      "owner_module": "CommunicationDynamics",
+      "description": "Base probability that an adopter transmits to a neighbor in a day.",
+      "frozen": "false"
+    },
+    {
+      "key": "comm_transmission_bias_strength",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "CommunicationDynamics",
+      "description": "Multiplier increasing transmission when sender has higher degree.",
+      "frozen": "false"
+    },
+    {
+      "key": "comm_contact_budget_daily",
+      "dtype": "int",
+      "default": 20,
+      "bounds": {
+        "low": 5,
+        "high": 100
+      },
+      "owner_module": "CommunicationDynamics",
+      "description": "Upper bound on potential contacts evaluated per agent per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "comm_message_half_life_days",
+      "dtype": "float",
+      "default": 7.0,
+      "bounds": {
+        "low": 1.0,
+        "high": 30.0
+      },
+      "owner_module": "CommunicationDynamics",
+      "description": "Half-life of exposure memory decay in days.",
+      "frozen": "false"
+    },
+    {
+      "key": "comm_max_exposures_per_day",
+      "dtype": "int",
+      "default": 5,
+      "bounds": {
+        "low": 1,
+        "high": 20
+      },
+      "owner_module": "CommunicationDynamics",
+      "description": "Saturation cap on messages received per agent per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_mandate_start_day",
+      "dtype": "int",
+      "default": 20,
+      "bounds": {
+        "low": 0,
+        "high": 120
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Day policy mandate begins.",
+      "frozen": "true"
+    },
+    {
+      "key": "policy_mandate_end_day",
+      "dtype": "int",
+      "default": 45,
+      "bounds": {
+        "low": 1,
+        "high": 180
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Day policy mandate ends.",
+      "frozen": "true"
+    },
+    {
+      "key": "policy_incentive_amount",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Scalar incentive strength applied during mandate.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_enforcement_probability",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Probability that enforcement deters reversion when policy is active.",
+      "frozen": "false"
+    },
+    {
+      "key": "policy_target_coverage",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.95
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Target adoption fraction used for evaluation gap metrics.",
+      "frozen": "true"
+    },
+    {
+      "key": "marketing_budget_daily",
+      "dtype": "float",
+      "default": 1000.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 10000.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Expected number of marketing contact attempts per day.",
+      "frozen": "false"
+    },
+    {
+      "key": "marketing_contact_probability",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyIntervention",
+      "description": "Probability each budgeted marketing attempt results in a contact.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_base_rate",
+      "dtype": "float",
+      "default": -1.8,
+      "bounds": {
+        "low": -5.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Intercept in utility for adoption.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_peer_weight",
+      "dtype": "float",
+      "default": 2.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 5.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight of peer adoption fraction in utility.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_marketing_weight",
+      "dtype": "float",
+      "default": 0.8,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight of marketing signal log(1+contacts).",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_policy_weight",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 4.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Weight of policy active signal.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_threshold_mean",
+      "dtype": "float",
+      "default": 0.35,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Mean personal threshold for adoption.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_threshold_std",
+      "dtype": "float",
+      "default": 0.12,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Std dev of thresholds, truncated to [0,1].",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_temperature",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.05,
+        "high": 2.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Logistic choice temperature; higher means more randomness.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_fatigue_decay",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Monthly-scale decay penalty discouraging frequent switching.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_reversion_prob",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Daily probability an adopter drops absent enforcement.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_stubborn_fraction",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Fraction of agents with stubborn=1.",
+      "frozen": "true"
+    },
+    {
+      "key": "adoption_stubborn_resistance",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 3.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Penalty applied to stubborn agents' utility.",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_memory_window_days",
+      "dtype": "int",
+      "default": 14,
+      "bounds": {
+        "low": 3,
+        "high": 60
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Window for rolling effects of exposures used in analysis (auxiliary).",
+      "frozen": "false"
+    },
+    {
+      "key": "adoption_social_reinforcement",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "BehaviorAdoption",
+      "description": "Extra utility when peer fraction exceeds mean threshold.",
+      "frozen": "false"
+    },
+    {
+      "key": "agg_smoothing_window_days",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Window for moving average smoothing.",
+      "frozen": "false"
+    },
+    {
+      "key": "agg_report_by_group",
+      "dtype": "bool",
+      "default": "false",
+      "bounds": {
+        "low": 0,
+        "high": 1
+      },
+      "owner_module": "AdoptionAggregator",
+      "description": "Whether to compute group-wise aggregates (not used in metrics).",
+      "frozen": "true"
+    },
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 2147483647
+      },
+      "owner_module": "global",
+      "description": "Seed for all RNGs.",
+      "frozen": "true"
+    },
+    {
+      "key": "simulation_days",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 10,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total number of simulated days.",
+      "frozen": "true"
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "signal.adoption_rate_daily",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.cumulative_adopters",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "signal.cumulative_adopters",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:cumulative_adopters"
+    },
+    {
+      "id": "observable.exposure_rate_daily_smoothed",
+      "source_module": "AdoptionAggregator",
+      "formula_or_field": "signal.exposure_rate_daily_smoothed",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:exposure_rate"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": true,
+          "window": [
+            30,
+            39
+          ]
+        }
+      }
+    },
+    {
+      "name": "MAE_cumulative_adopters",
+      "inputs": [
+        "observable.cumulative_adopters"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "window": [
+            30,
+            39
+          ]
+        }
+      }
+    },
+    {
+      "name": "PearsonR_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "PearsonR",
+        "config": {
+          "window": [
+            30,
+            39
+          ]
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeakError",
+        "config": {
+          "window": [
+            30,
+            39
+          ]
+        }
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 5000,
+    "random_seed": 42,
+    "simulation_days": 60,
+    "fraction_initial_adopters": 0.05
+  },
+  "algorithms": {
+    "NetworkGeneration": "Watts-Strogatz small-world with dynamic homophilous rewiring.",
+    "InformationDiffusion": "Independent cascade with degree bias and saturation.",
+    "AdoptionDecision": "Random utility with logistic choice and heterogeneous thresholds.",
+    "Smoothing": "Trailing moving average over specified window."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibration and evaluation of adoption and exposure observables.",
+      "fields_used": [
+        "adoption_rate",
+        "cumulative_adopters",
+        "exposure_rate"
+      ]
+    },
+    {
+      "name": "policy_schedule.csv",
+      "purpose": "Optional cross-check for mandate start/end days and incentives.",
+      "fields_used": [
+        "mandate_start_day",
+        "mandate_end_day",
+        "incentive_amount"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "core/engine.py",
+        "description": "Simulation loop, scheduler, and inter-module message bus."
+      },
+      {
+        "name": "entities/person.py",
+        "description": "Person entity class and initialization routines."
+      },
+      {
+        "name": "modules/social_network.py",
+        "description": "SocialNetworkFormation module implementation."
+      },
+      {
+        "name": "modules/communication.py",
+        "description": "CommunicationDynamics module implementation."
+      },
+      {
+        "name": "modules/policy.py",
+        "description": "PolicyIntervention module implementation."
+      },
+      {
+        "name": "modules/behavior.py",
+        "description": "BehaviorAdoption module implementation."
+      },
+      {
+        "name": "modules/aggregator.py",
+        "description": "AdoptionAggregator module and observable emitters."
+      },
+      {
+        "name": "metrics/evaluation.py",
+        "description": "Metric implementations and evaluation harness."
+      },
+      {
+        "name": "config/parameters.yaml",
+        "description": "Externalized parameter overrides and experiment configs."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "numba",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "MAE_cumulative_adopters",
+    "PearsonR_adoption_rate",
+    "TimeToPeak_adoption_rate"
+  ]
+}

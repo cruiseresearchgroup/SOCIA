@@ -1,0 +1,1084 @@
+{
+  "model_type": "agent_based",
+  "description": "Agent-based diffusion-of-adoption model with social influence, policy broadcasts, and heterogeneous thresholds on a homophilic social network. Suitable for fitting to daily adoption and opinion time series and evaluating policy scenarios.",
+  "entities": [
+    {
+      "name": "Person",
+      "attributes": [
+        "id",
+        "group",
+        "neighbors",
+        "degree",
+        "edge_weights",
+        "opinion",
+        "adopted",
+        "adoption_threshold",
+        "susceptibility",
+        "stubbornness",
+        "fatigue",
+        "last_message_effect",
+        "enforcement_penalty"
+      ],
+      "behaviors": [
+        "update_opinion",
+        "decide_adoption",
+        "relapse_or_persist"
+      ],
+      "initialization": {
+        "method": "random",
+        "parameters": {
+          "group_count": 3,
+          "group_assignment": "uniform_over_groups",
+          "opinion_distribution": "Normal(mean=0.4, std=0.15) clipped to [0,1]",
+          "adoption_threshold_distribution": "Normal(mean=0.6, std=0.15) clipped to [0,1]",
+          "initial_adopter_fraction": 0.02,
+          "susceptibility_distribution": "Beta(a=2.0, b=2.0)",
+          "stubbornness_distribution": "Normal(mean=0.2, std=0.05) clipped to [0,1]"
+        }
+      }
+    },
+    {
+      "name": "PolicyAgency",
+      "attributes": [
+        "policy_intensity",
+        "budget_per_day",
+        "campaign_frequency_days",
+        "fraction_to_priority_group",
+        "priority_group_id",
+        "message_effectiveness",
+        "message_decay_rate",
+        "compliance_enforcement_prob",
+        "enforcement_penalty"
+      ],
+      "behaviors": [
+        "broadcast_messages",
+        "apply_enforcement"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_intensity": 0.6,
+          "budget_per_day": 1000.0,
+          "campaign_frequency_days": 3,
+          "fraction_to_priority_group": 0.5,
+          "priority_group_id": 0,
+          "message_effectiveness": 0.5,
+          "message_decay_rate": 0.1,
+          "compliance_enforcement_prob": 0.05,
+          "enforcement_penalty": 0.15
+        }
+      }
+    }
+  ],
+  "modules": [
+    {
+      "name": "NetworkBuilder",
+      "description": "Constructs the social network with homophily and assigns groups; initializes Person agents and edge weights.",
+      "inputs": [
+        "global.population_size",
+        "global.random_seed"
+      ],
+      "outputs": [
+        "state.network",
+        "state.people",
+        "state.groups"
+      ],
+      "dependencies": [],
+      "tick_rate": {
+        "unit": "days",
+        "value": 0
+      },
+      "update_rule": {
+        "pseudocode": "if day == 0:\n  set RNG seed = global.random_seed\n  create groups = range(group_count)\n  assign each person to a group uniformly (or per block sizes)\n  if network_topology == 'watts_strogatz':\n    G = watts_strogatz_graph(n=population_size, k=round(mean_degree), p=rewiring_prob)\n  elif network_topology == 'barabasi_albert':\n    G = barabasi_albert_graph(n=population_size, m=preferential_attachment_m)\n  else: # stochastic_block\n    construct SBM with homophily_strength controlling intra-block edge probs\n  rewire or weight edges to achieve assortativity_target approximately\n  for each edge (i,j): assign weight ~ Normal(weight_mean, weight_std), clipped to [0,1]\n  initialize person attributes (opinion, thresholds, susceptibility, stubbornness) from specified distributions\n  set adopted=True for a random fraction initial_adopter_fraction of persons",
+        "notes": [
+          "Tick rate 0 means setup-only.",
+          "Assortativity can be nudged via degree-preserving swaps targeting group assortativity."
+        ]
+      },
+      "requirements": [
+        "networkx",
+        "numpy"
+      ],
+      "module_parameters": [
+        "network_topology",
+        "mean_degree",
+        "rewiring_prob",
+        "preferential_attachment_m",
+        "group_count",
+        "homophily_strength",
+        "weight_mean",
+        "weight_std",
+        "assortativity_target"
+      ]
+    },
+    {
+      "name": "PolicyBroadcast",
+      "description": "Schedules and broadcasts policy messages and enforcement to agents, producing per-person policy influence and penalties.",
+      "inputs": [
+        "state.groups",
+        "time.day"
+      ],
+      "outputs": [
+        "signal.policy_influence_per_person",
+        "signal.enforcement_penalty_per_person",
+        "log.messages_sent"
+      ],
+      "dependencies": [
+        "NetworkBuilder"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "policy_influence = zeros(population_size)\npenalties = zeros(population_size)\nmessages_sent = 0\nif day % campaign_frequency_days == 0:\n  total_messages = round(policy_intensity * budget_per_day)\n  messages_to_priority = round(total_messages * fraction_to_priority_group)\n  messages_to_others = total_messages - messages_to_priority\n  select recipients from priority_group_id uniformly for messages_to_priority\n  select recipients from non-priority groups uniformly for messages_to_others\n  for each recipient r:\n    delta = message_effectiveness * exp(-last_message_effect[r] * message_decay_rate)\n    policy_influence[r] += delta\n  messages_sent = total_messages\n# Enforcement\nfor each person i:\n  if random() < compliance_enforcement_prob:\n    penalties[i] = enforcement_penalty\n# Decay last_message_effect\nfor each person i:\n  last_message_effect[i] = max(0, last_message_effect[i] * (1 - message_decay_rate) + policy_influence[i])\noutput signals: policy_influence, penalties, messages_sent",
+        "notes": [
+          "Message decay ensures diminishing returns.",
+          "Enforcement penalty increases effective hazard of adopting or reduces threshold via AdoptionDecision."
+        ]
+      },
+      "requirements": [
+        "numpy",
+        "random"
+      ],
+      "module_parameters": [
+        "policy_intensity",
+        "campaign_frequency_days",
+        "fraction_to_priority_group",
+        "budget_per_day",
+        "message_effectiveness",
+        "message_decay_rate",
+        "compliance_enforcement_prob",
+        "enforcement_penalty",
+        "priority_group_id"
+      ]
+    },
+    {
+      "name": "OpinionDynamics",
+      "description": "Updates agent opinions via weighted social averaging with bounded confidence, policy influence, noise, and forgetting.",
+      "inputs": [
+        "state.network",
+        "state.people",
+        "signal.policy_influence_per_person"
+      ],
+      "outputs": [
+        "state.opinions",
+        "state.social_norm_per_person"
+      ],
+      "dependencies": [
+        "NetworkBuilder",
+        "PolicyBroadcast"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "for each person i:\n  neighbors = N(i)\n  weighted_sum = 0; weight_total = 0\n  for j in neighbors:\n    if abs(opinion[j] - opinion[i]) <= bounded_confidence_epsilon:\n      w = edge_weight(i,j) * (1 - trust_variance*0.5 + trust_variance*random_uniform(0,1))\n      weighted_sum += w * opinion[j]\n      weight_total += w\n  social_term = opinion[i] if weight_total==0 else weighted_sum/weight_total\n  policy_term = signal.policy_influence_per_person[i]\n  new_opinion = stubbornness * opinion[i] + influence_weight_social * (social_term - opinion[i]) + influence_weight_policy * policy_term\n  new_opinion = new_opinion * (1 - forgetting_rate) + opinion_initial_mean * forgetting_rate\n  new_opinion += Normal(0, noise_std)\n  # misinformation shock for a fraction of agents\n  if random() < misinformation_fraction:\n    new_opinion = clip(new_opinion - misinformation_bias, 0, 1)\n  opinions_next[i] = clip(new_opinion, 0, 1)\n# Social norm perceived by each agent as neighbor mean opinion\nfor each i:\n  social_norm[i] = mean(opinion[j] for j in N(i)) if |N(i)|>0 else mean(opinions_next)\nupdate opinions = opinions_next",
+        "notes": [
+          "Bounded-confidence ignores neighbors too far in opinion.",
+          "Forgetting drifts toward initial mean capturing exogenous reversion.",
+          "Misinformation introduces negative shocks."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "opinion_initial_mean",
+        "opinion_initial_std",
+        "influence_weight_social",
+        "influence_weight_policy",
+        "stubbornness",
+        "trust_variance",
+        "bounded_confidence_epsilon",
+        "noise_std",
+        "forgetting_rate",
+        "misinformation_fraction",
+        "misinformation_bias"
+      ]
+    },
+    {
+      "name": "AdoptionDecision",
+      "description": "Converts opinions and social norms to adoption events via a hazard-based threshold mechanism with fatigue and relapse.",
+      "inputs": [
+        "state.opinions",
+        "state.social_norm_per_person",
+        "signal.enforcement_penalty_per_person"
+      ],
+      "outputs": [
+        "state.adopted_flags",
+        "log.adoption_events"
+      ],
+      "dependencies": [
+        "OpinionDynamics",
+        "PolicyBroadcast"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "adoption_events = []\nfor each person i:\n  if adopted[i]:\n    # Relapse with probability depending on fatigue\n    if random() < relapse_rate * fatigue[i]:\n      adopted[i] = False\n    else:\n      fatigue[i] = min(1.0, fatigue[i] + fatigue_rate)\n    continue\n  # Compute persuasion score\n  persuasion = opinions[i] * 0.5 + social_norm[i] * 0.5 + signal.enforcement_penalty_per_person[i]\n  # Effective threshold lowered by enforcement\n  effective_threshold = adoption_threshold[i] - signal.enforcement_penalty_per_person[i]\n  margin = persuasion - effective_threshold\n  hazard = max(0, hazard_rate_base + hazard_rate_sensitivity * (persuasion_to_adoption_slope * margin))\n  hazard = 1 - exp(-hazard)  # map to probability in [0,1)\n  # Intrinsic propensity adds baseline\n  p_adopt = clip(hazard + intrinsic_adoption_propensity, 0, 1)\n  if random() < p_adopt:\n    adopted[i] = True\n    fatigue[i] = max(0, fatigue[i] * 0.5)\n    adoption_events.append(i)\n# Initialization day (day==0): set a random fraction initial_adopter_fraction to adopted=True and record events",
+        "notes": [
+          "Hazard formulation yields smooth probability mapping.",
+          "Fatigue accumulates while adopted and increases relapse risk."
+        ]
+      },
+      "requirements": [
+        "numpy"
+      ],
+      "module_parameters": [
+        "adoption_threshold_mean",
+        "adoption_threshold_std",
+        "intrinsic_adoption_propensity",
+        "hazard_rate_base",
+        "hazard_rate_sensitivity",
+        "persuasion_to_adoption_slope",
+        "relapse_rate",
+        "fatigue_rate",
+        "initial_adopter_fraction"
+      ]
+    },
+    {
+      "name": "AggregationObserver",
+      "description": "Computes daily observables for calibration and evaluation.",
+      "inputs": [
+        "state.people",
+        "state.adopted_flags",
+        "state.opinions",
+        "log.messages_sent"
+      ],
+      "outputs": [
+        "observable.adoption_rate_daily",
+        "observable.adoption_rate_by_group_daily",
+        "observable.mean_opinion_daily",
+        "observable.messages_sent_daily",
+        "observable.cumulative_adoption"
+      ],
+      "dependencies": [
+        "AdoptionDecision",
+        "OpinionDynamics",
+        "PolicyBroadcast"
+      ],
+      "tick_rate": {
+        "unit": "days",
+        "value": 1
+      },
+      "update_rule": {
+        "pseudocode": "if day % observe_every_n_days != 0: return\nadoption_rate_daily = mean(adopted[i] for i in persons)\nmean_opinion_daily = mean(opinions[i] for i in persons)\nmessages_sent_daily = sum(log.messages_sent[today])\nfor each group g:\n  adoption_rate_by_group[g] = mean(adopted[i] for i in persons if group[i]==g)\ncumulative_adoption = cumulative_adoption_prev + sum(1 for i if adoption_event_today(i))\nstore observables with timestamps\napply rolling_window_days smoothing if needed for reporting",
+        "notes": [
+          "By-group observable aligns with group-level calibration.",
+          "Smoothing can be toggled by setting rolling_window_days."
+        ]
+      },
+      "requirements": [
+        "pandas",
+        "numpy"
+      ],
+      "module_parameters": [
+        "rolling_window_days",
+        "group_field",
+        "observe_every_n_days"
+      ]
+    }
+  ],
+  "parameters": [
+    {
+      "key": "random_seed",
+      "dtype": "int",
+      "default": 42,
+      "bounds": {
+        "low": 0,
+        "high": 1000000
+      },
+      "owner_module": "global",
+      "description": "Random number generator seed for reproducibility.",
+      "frozen": true
+    },
+    {
+      "key": "population_size",
+      "dtype": "int",
+      "default": 1000,
+      "bounds": {
+        "low": 100,
+        "high": 100000
+      },
+      "owner_module": "global",
+      "description": "Number of Person agents.",
+      "frozen": false
+    },
+    {
+      "key": "simulation_days",
+      "dtype": "int",
+      "default": 90,
+      "bounds": {
+        "low": 30,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "Total simulation horizon in days.",
+      "frozen": false
+    },
+    {
+      "key": "time_step_days",
+      "dtype": "float",
+      "default": 1.0,
+      "bounds": {
+        "low": 0.5,
+        "high": 1.0
+      },
+      "owner_module": "global",
+      "description": "Size of a simulation tick in days.",
+      "frozen": true
+    },
+    {
+      "key": "prediction_start_day",
+      "dtype": "int",
+      "default": 60,
+      "bounds": {
+        "low": 1,
+        "high": 364
+      },
+      "owner_module": "global",
+      "description": "Start day for prediction/evaluation period.",
+      "frozen": true
+    },
+    {
+      "key": "prediction_end_day",
+      "dtype": "int",
+      "default": 89,
+      "bounds": {
+        "low": 2,
+        "high": 365
+      },
+      "owner_module": "global",
+      "description": "End day for prediction/evaluation period (inclusive).",
+      "frozen": true
+    },
+    {
+      "key": "data_observation_lag_days",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 14
+      },
+      "owner_module": "global",
+      "description": "Lag between simulated event occurrence and data observation.",
+      "frozen": true
+    },
+    {
+      "key": "network_topology",
+      "dtype": "categorical",
+      "default": "watts_strogatz",
+      "bounds": null,
+      "owner_module": "NetworkBuilder",
+      "description": "Topology type: watts_strogatz | barabasi_albert | stochastic_block.",
+      "frozen": false
+    },
+    {
+      "key": "mean_degree",
+      "dtype": "float",
+      "default": 10.0,
+      "bounds": {
+        "low": 2.0,
+        "high": 50.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Average degree for network construction (used for WS, reference for SBM).",
+      "frozen": false
+    },
+    {
+      "key": "rewiring_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Rewiring probability for Watts-Strogatz.",
+      "frozen": false
+    },
+    {
+      "key": "preferential_attachment_m",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 20
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Edges to attach per new node in Barabasi-Albert.",
+      "frozen": false
+    },
+    {
+      "key": "group_count",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 10
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Number of demographic/interest groups for homophily and targeting.",
+      "frozen": false
+    },
+    {
+      "key": "homophily_strength",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Probability bias of within-group ties vs cross-group ties.",
+      "frozen": false
+    },
+    {
+      "key": "weight_mean",
+      "dtype": "float",
+      "default": 0.7,
+      "bounds": {
+        "low": 0.1,
+        "high": 1.0
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Mean of edge weight distribution (influence strength).",
+      "frozen": false
+    },
+    {
+      "key": "weight_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Std dev of edge weight distribution.",
+      "frozen": false
+    },
+    {
+      "key": "assortativity_target",
+      "dtype": "float",
+      "default": 0.25,
+      "bounds": {
+        "low": -0.2,
+        "high": 0.9
+      },
+      "owner_module": "NetworkBuilder",
+      "description": "Target attribute assortativity (by group).",
+      "frozen": false
+    },
+    {
+      "key": "policy_intensity",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Scaled effort level controlling number of messages per day.",
+      "frozen": false
+    },
+    {
+      "key": "campaign_frequency_days",
+      "dtype": "int",
+      "default": 3,
+      "bounds": {
+        "low": 1,
+        "high": 14
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Interval between active broadcast days.",
+      "frozen": false
+    },
+    {
+      "key": "fraction_to_priority_group",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Share of messages targeted to priority group.",
+      "frozen": false
+    },
+    {
+      "key": "budget_per_day",
+      "dtype": "float",
+      "default": 1000.0,
+      "bounds": {
+        "low": 0.0,
+        "high": 100000.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Budget scale that converts to message volume.",
+      "frozen": false
+    },
+    {
+      "key": "message_effectiveness",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Opinion impact per message before decay and saturation.",
+      "frozen": false
+    },
+    {
+      "key": "message_decay_rate",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Daily decay of accumulated message effect.",
+      "frozen": false
+    },
+    {
+      "key": "compliance_enforcement_prob",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Daily probability of enforcement contact per person.",
+      "frozen": false
+    },
+    {
+      "key": "enforcement_penalty",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Additive boost to persuasion or reduction in threshold when enforced.",
+      "frozen": false
+    },
+    {
+      "key": "priority_group_id",
+      "dtype": "int",
+      "default": 0,
+      "bounds": {
+        "low": 0,
+        "high": 9
+      },
+      "owner_module": "PolicyBroadcast",
+      "description": "Group index that receives priority targeting.",
+      "frozen": true
+    },
+    {
+      "key": "opinion_initial_mean",
+      "dtype": "float",
+      "default": 0.4,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Mean of initial opinion distribution.",
+      "frozen": false
+    },
+    {
+      "key": "opinion_initial_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.5
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Std dev of initial opinion distribution.",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_social",
+      "dtype": "float",
+      "default": 0.5,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Weight on social averaging relative to self and policy.",
+      "frozen": false
+    },
+    {
+      "key": "influence_weight_policy",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Weight on policy signal in opinion updates.",
+      "frozen": false
+    },
+    {
+      "key": "stubbornness",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Persistence of prior opinion each step.",
+      "frozen": false
+    },
+    {
+      "key": "trust_variance",
+      "dtype": "float",
+      "default": 0.2,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Heterogeneity factor added to neighbor weights.",
+      "frozen": false
+    },
+    {
+      "key": "bounded_confidence_epsilon",
+      "dtype": "float",
+      "default": 0.3,
+      "bounds": {
+        "low": 0.0,
+        "high": 1.0
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Max opinion difference to consider a neighbor in averaging.",
+      "frozen": false
+    },
+    {
+      "key": "noise_std",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Gaussian noise added to opinion each day.",
+      "frozen": false
+    },
+    {
+      "key": "forgetting_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Reversion toward initial mean per day.",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_fraction",
+      "dtype": "float",
+      "default": 0.05,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Daily fraction of agents receiving misinformation shock.",
+      "frozen": false
+    },
+    {
+      "key": "misinformation_bias",
+      "dtype": "float",
+      "default": 0.1,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.5
+      },
+      "owner_module": "OpinionDynamics",
+      "description": "Magnitude of negative shift due to misinformation.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold_mean",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.1,
+        "high": 0.9
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Mean of adoption threshold distribution.",
+      "frozen": false
+    },
+    {
+      "key": "adoption_threshold_std",
+      "dtype": "float",
+      "default": 0.15,
+      "bounds": {
+        "low": 0.01,
+        "high": 0.4
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Std dev of adoption threshold distribution.",
+      "frozen": false
+    },
+    {
+      "key": "intrinsic_adoption_propensity",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Baseline probability of adopting absent persuasion.",
+      "frozen": false
+    },
+    {
+      "key": "hazard_rate_base",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Base hazard rate component.",
+      "frozen": false
+    },
+    {
+      "key": "hazard_rate_sensitivity",
+      "dtype": "float",
+      "default": 0.6,
+      "bounds": {
+        "low": 0.0,
+        "high": 2.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Sensitivity of hazard to persuasion margin.",
+      "frozen": false
+    },
+    {
+      "key": "persuasion_to_adoption_slope",
+      "dtype": "float",
+      "default": 1.2,
+      "bounds": {
+        "low": 0.1,
+        "high": 5.0
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Slope mapping margin (persuasion - threshold) to hazard.",
+      "frozen": false
+    },
+    {
+      "key": "relapse_rate",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Daily probability of abandoning adoption (modulated by fatigue).",
+      "frozen": false
+    },
+    {
+      "key": "fatigue_rate",
+      "dtype": "float",
+      "default": 0.01,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Accumulation of fatigue while adopted.",
+      "frozen": false
+    },
+    {
+      "key": "initial_adopter_fraction",
+      "dtype": "float",
+      "default": 0.02,
+      "bounds": {
+        "low": 0.0,
+        "high": 0.2
+      },
+      "owner_module": "AdoptionDecision",
+      "description": "Share of population set to adopted at initialization.",
+      "frozen": false
+    },
+    {
+      "key": "rolling_window_days",
+      "dtype": "int",
+      "default": 7,
+      "bounds": {
+        "low": 1,
+        "high": 30
+      },
+      "owner_module": "AggregationObserver",
+      "description": "Smoothing window for reported observables.",
+      "frozen": false
+    },
+    {
+      "key": "group_field",
+      "dtype": "categorical",
+      "default": "group",
+      "bounds": null,
+      "owner_module": "AggregationObserver",
+      "description": "Agent attribute used for group aggregations.",
+      "frozen": true
+    },
+    {
+      "key": "observe_every_n_days",
+      "dtype": "int",
+      "default": 1,
+      "bounds": {
+        "low": 1,
+        "high": 7
+      },
+      "owner_module": "AggregationObserver",
+      "description": "Observation frequency.",
+      "frozen": false
+    }
+  ],
+  "observables": [
+    {
+      "id": "observable.adoption_rate_daily",
+      "source_module": "AggregationObserver",
+      "formula_or_field": "mean(Person.adopted)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:adoption_rate"
+    },
+    {
+      "id": "observable.adoption_rate_by_group_daily",
+      "source_module": "AggregationObserver",
+      "formula_or_field": "mean(Person.adopted) grouped by Person.group",
+      "frequency": "daily",
+      "aggregation": "by_group(group)",
+      "target_data_field": "train_data_by_group.csv:adoption_rate_by_group"
+    },
+    {
+      "id": "observable.mean_opinion_daily",
+      "source_module": "AggregationObserver",
+      "formula_or_field": "mean(Person.opinion)",
+      "frequency": "daily",
+      "aggregation": "mean",
+      "target_data_field": "train_data.csv:mean_opinion"
+    },
+    {
+      "id": "observable.messages_sent_daily",
+      "source_module": "AggregationObserver",
+      "formula_or_field": "sum(PolicyBroadcast.messages_sent)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "policy_logs.csv:messages_sent"
+    },
+    {
+      "id": "observable.cumulative_adoption",
+      "source_module": "AggregationObserver",
+      "formula_or_field": "cumsum(Person.adopted transitions)",
+      "frequency": "daily",
+      "aggregation": "sum",
+      "target_data_field": "train_data.csv:cumulative_adoption"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "RMSE_adoption_rate",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "RMSE_mean_opinion",
+      "inputs": [
+        "observable.mean_opinion_daily"
+      ],
+      "definition": {
+        "type": "RMSE",
+        "config": {
+          "normalize": false
+        }
+      }
+    },
+    {
+      "name": "MAE_group_adoption",
+      "inputs": [
+        "observable.adoption_rate_by_group_daily"
+      ],
+      "definition": {
+        "type": "MAE",
+        "config": {
+          "aggregate": "macro"
+        }
+      }
+    },
+    {
+      "name": "TimeToPeak_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "TimeToPeak",
+        "config": {
+          "unit": "days"
+        }
+      }
+    },
+    {
+      "name": "PeakError_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "PeakError",
+        "config": {
+          "absolute": true
+        }
+      }
+    },
+    {
+      "name": "PearsonR_adoption",
+      "inputs": [
+        "observable.adoption_rate_daily"
+      ],
+      "definition": {
+        "type": "PearsonR",
+        "config": {}
+      }
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1.0,
+    "time_unit": "days"
+  },
+  "initialization": {
+    "population_size": 1000,
+    "random_seed": 42,
+    "network_topology": "watts_strogatz",
+    "mean_degree": 10.0,
+    "rewiring_prob": 0.05,
+    "group_count": 3,
+    "homophily_strength": 0.6
+  },
+  "algorithms": {
+    "HomophilicNetworkGeneration": "Construct WS/BA/SBM graphs; adjust assortativity via edge swaps; set weighted edges from Normal(weight_mean, weight_std) clipped to [0,1].",
+    "BoundedConfidenceDeGroot": "Weighted social averaging over neighbors within epsilon; add policy term, forgetting, and noise; clip to [0,1].",
+    "HazardAdoption": "Compute persuasion margin; hazard = 1 - exp(-(base + sensitivity * slope * margin)_+); Bernoulli draw for adoption; fatigue-modulated relapse.",
+    "PolicyMessageScheduler": "Periodic broadcasting with targeted allocation and diminishing returns via message decay; random enforcement with penalties."
+  },
+  "data_sources": [
+    {
+      "name": "train_data.csv",
+      "purpose": "Time series for aggregate adoption and opinion to calibrate the model.",
+      "fields_used": [
+        "day",
+        "adoption_rate",
+        "mean_opinion",
+        "cumulative_adoption"
+      ]
+    },
+    {
+      "name": "train_data_by_group.csv",
+      "purpose": "Group-level adoption rates for validating heterogeneity.",
+      "fields_used": [
+        "day",
+        "group",
+        "adoption_rate_by_group"
+      ]
+    },
+    {
+      "name": "policy_logs.csv",
+      "purpose": "Policy broadcast intensity for exogenous comparison.",
+      "fields_used": [
+        "day",
+        "messages_sent"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "main.py",
+        "description": "Entry point: parse config, run simulation, compute metrics, output traces."
+      },
+      {
+        "name": "entities.py",
+        "description": "Class definitions for Person and PolicyAgency; dataclasses for state."
+      },
+      {
+        "name": "modules/network_builder.py",
+        "description": "Implements NetworkBuilder module."
+      },
+      {
+        "name": "modules/policy_broadcast.py",
+        "description": "Implements PolicyBroadcast module."
+      },
+      {
+        "name": "modules/opinion_dynamics.py",
+        "description": "Implements OpinionDynamics module."
+      },
+      {
+        "name": "modules/adoption_decision.py",
+        "description": "Implements AdoptionDecision module."
+      },
+      {
+        "name": "modules/aggregation_observer.py",
+        "description": "Implements AggregationObserver module."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Metric implementations (RMSE, MAE, TimeToPeak, PeakError, PearsonR) and evaluation pipeline."
+      },
+      {
+        "name": "config.py",
+        "description": "Parameter schema, validation, and defaults."
+      },
+      {
+        "name": "data_io.py",
+        "description": "Load target data, align fields, and write outputs."
+      }
+    ],
+    "dependencies": [
+      "numpy>=1.22",
+      "pandas>=1.5",
+      "networkx>=2.8",
+      "scipy>=1.8"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 60,
+    "end_day": 89
+  },
+  "evaluation_metrics": [
+    "RMSE_adoption_rate",
+    "RMSE_mean_opinion",
+    "MAE_group_adoption",
+    "TimeToPeak_adoption",
+    "PeakError_adoption",
+    "PearsonR_adoption"
+  ]
+}
