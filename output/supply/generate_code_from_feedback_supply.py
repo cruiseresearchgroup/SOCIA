@@ -61,16 +61,16 @@ def _scenario_paths(scenario: str) -> dict:
         return {
             "scenario_root": scenario_root,
             "alpha_results_path": os.path.join(scenario_root, "alpha_feedback_inputs_supply.json"),
-            "code_path": os.path.join(scenario_root, "simulation_code_iter_0_alpha.py"),
-            "task_spec_path": os.path.join(scenario_root, "task_spec_supply.json"),
+            "code_path": os.path.join(scenario_root, "simulation_code_iter_0_alpha_poisson.py"),  # 使用poisson版本（启用alpha）
+            "task_spec_path": os.path.join(scenario_root, "task_spec_iter_0.json"),  # 使用实际存在的文件
             "model_plan_path": os.path.join(scenario_root, "model_plan_supply.json"),
             "data_analysis_path": os.path.join(scenario_root, "data_analysis_supply.json"),
-            "new_code_path": os.path.join(scenario_root, "simulation_code_iter_0_alpha_improved.py"),
-            "result_path": os.path.join(scenario_root, "codegen_result_supply.json"),
+            "new_code_path": os.path.join(scenario_root, "simulation_code_iter_0_alpha_poisson_improved.py"),
+            "result_path": os.path.join(scenario_root, "codegen_result_supply_poisson.json"),
             "feedback_output_dir": scenario_root,
             "data_path": "data_fitting/supply_data",
-            "llm_response_path": os.path.join(scenario_root, "llm_raw_response_supply.txt"),
-            "prompt_desc": "CalibraSim Alpha (Supply)",
+            "llm_response_path": os.path.join(scenario_root, "llm_raw_response_supply_poisson.txt"),
+            "prompt_desc": "CalibraSim Alpha (Supply - Poisson Lambda)",
         }
 
     raise ValueError(f"Unsupported scenario '{scenario}'")

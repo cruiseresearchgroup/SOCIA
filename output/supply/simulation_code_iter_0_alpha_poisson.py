@@ -221,9 +221,9 @@ def parse_cli() -> argparse.Namespace:
     parser.add_argument("--mc-K", type=int, default=20,
                         help="Number of runs per parameter sample for Double Monte Carlo (default: 20)")
     parser.add_argument("--use-alpha", action="store_true",
-                        help="Enable embedded alpha noise for selected continuous parameters.")
-    parser.add_argument("--alpha-params", type=str, default=None,
-                        help="Comma-separated parameter names for alpha embedding (default depends on demand family).")
+                        help="Enable embedded alpha noise for selected continuous parameters. Default: True (enabled for poisson_lambda).")
+    parser.add_argument("--alpha-params", type=str, default="poisson_lambda",
+                        help="Comma-separated parameter names for alpha embedding. Default: 'poisson_lambda' (the most sensitive parameter from GSA).")
     parser.add_argument("--alpha-max-ratio", type=float, default=0.5,
                         help="Upper bound on alpha scaling factor r (ratio of distance to bounds).")
     parser.add_argument("--alpha-mode", type=str, default="additive",
@@ -2403,6 +2403,22 @@ def main() -> None:
 
     train_trajs, holdout_ranges = holdout_split(train_trajectories, train_end_inclusive=48)
 
+    # Parse alpha_params if provided as string
+    alpha_params_list = None
+    if args.alpha_params:
+        if isinstance(args.alpha_params, str):
+            alpha_params_list = [p.strip() for p in args.alpha_params.split(",") if p.strip()]
+        elif isinstance(args.alpha_params, list):
+            alpha_params_list = args.alpha_params
+        else:
+            alpha_params_list = [str(args.alpha_params)]
+    
+    # Default: enable alpha for poisson_lambda (the most sensitive parameter from GSA)
+    # If --use-alpha is not provided, default to True (enabled)
+    use_alpha = args.use_alpha if hasattr(args, 'use_alpha') and args.use_alpha else True
+    if alpha_params_list is None and use_alpha:
+        alpha_params_list = ["poisson_lambda"]  # Default to poisson_lambda based on GSA results
+    
     calibrator = SBICalibrator(
         train_trajectories=train_trajs,
         holdout_ranges=holdout_ranges,
@@ -2415,8 +2431,8 @@ def main() -> None:
         max_evals=args.max_evals,
         n_samples_wass_mmd=args.n_samples_wass_mmd,
         mmd_sigma=args.mmd_sigma,
-        use_alpha=args.use_alpha,
-        alpha_params=args.alpha_params,
+        use_alpha=use_alpha,
+        alpha_params=alpha_params_list,
         alpha_max_ratio=args.alpha_max_ratio,
         alpha_mode=args.alpha_mode,
     )
@@ -2714,15 +2730,138 @@ def main() -> None:
             )
             print(f"Saved OOD test results (demand_family={args.ood_demand_family}) to: {results_dir_test_ood_d}")
 
+    # Generate alpha_feedback_inputs.json in mask task format for LLM tuning
+    alpha_feedback = None
+    if alpha_report and calibrator.use_alpha and calibrator.alpha_params:
+        try:
+            # Collect evaluation results
+            evaluation_results = {}
+            if len(test_trajectories) > 0:
+                try:
+                    with open(os.path.join(results_dir_base, "metrics_test.json"), "r") as f:
+                        metrics_test = json.load(f)
+                    dist_metrics = metrics_test.get("distributional", {})
+                    evaluation_results["metrics"] = {
+                        "RMSE_inventory_mean": dist_metrics.get("RMSE_inventory", 0.0),
+                        "RMSE_inventory_std": 0.0,  # Not available in current format
+                        "RMSE_backlog_mean": dist_metrics.get("RMSE_backlog", 0.0),
+                        "RMSE_backlog_std": 0.0,
+                        "Wasserstein_per_t": dist_metrics.get("Wasserstein_per_t", 0.0),
+                        "MMD_per_t": dist_metrics.get("MMD_per_t", 0.0),
+                    }
+                except Exception:
+                    pass
+            
+            # Get wasserstein_summary if available
+            try:
+                with open(os.path.join(results_dir_base, "wasserstein_summary.json"), "r") as f:
+                    wasserstein_summary = json.load(f)
+                evaluation_results["wasserstein_summary"] = wasserstein_summary
+            except Exception:
+                pass
+            
+            # Build alpha_stats, alpha_norm_stats, r_stats
+            alpha_stats = {}
+            alpha_norm_stats = {}
+            r_stats = {}
+            
+            opt_data = alpha_report.get("optimized", {})
+            post_data = alpha_report.get("posterior", {})
+            
+            for param_name in calibrator.alpha_params:
+                if param_name not in bounds:
+                    continue
+                lower, upper = bounds[param_name]
+                param_range = upper - lower
+                
+                # Alpha stats
+                opt_alpha = opt_data.get(param_name, {}).get("alpha", 0.0) if opt_data else 0.0
+                post_alpha_mean = post_data.get(param_name, {}).get("alpha_mean", None) if post_data else None
+                post_alpha_std = post_data.get(param_name, {}).get("alpha_std", None) if post_data else None
+                
+                alpha_stats[param_name] = {
+                    "optimized_alpha": float(opt_alpha),
+                    "posterior_alpha_mean": float(post_alpha_mean) if post_alpha_mean is not None else None,
+                    "posterior_alpha_std": float(post_alpha_std) if post_alpha_std is not None else None,
+                }
+                
+                # Normalized alpha stats (alpha normalized by parameter range)
+                opt_alpha_norm = opt_alpha / param_range if param_range > 0 else 0.0
+                post_alpha_norm_mean = post_alpha_mean / param_range if post_alpha_mean is not None and param_range > 0 else None
+                post_alpha_norm_std = post_alpha_std / param_range if post_alpha_std is not None and param_range > 0 else None
+                
+                # Compute posterior probability that normalized alpha > 0.1
+                post_alpha_norm_prob_gt_0_1 = None
+                if post_data and param_name in post_data:
+                    # Estimate from posterior samples if available
+                    if calibrator.posterior_samples is not None:
+                        base_idx = base_indices.get(param_name)
+                        r_idx = r_indices.get(param_name)
+                        if base_idx is not None and r_idx is not None:
+                            base_samples = calibrator.posterior_samples[:, base_idx]
+                            r_samples = calibrator.posterior_samples[:, r_idx]
+                            margins = _np.minimum(base_samples - lower, upper - base_samples)
+                            alpha_samples = r_samples * margins
+                            alpha_norm_samples = alpha_samples / param_range if param_range > 0 else alpha_samples
+                            post_alpha_norm_prob_gt_0_1 = float(_np.mean(alpha_norm_samples > 0.1))
+                
+                alpha_norm_stats[param_name] = {
+                    "optimized_alpha_norm": float(opt_alpha_norm),
+                    "posterior_alpha_norm_mean": float(post_alpha_norm_mean) if post_alpha_norm_mean is not None else None,
+                    "posterior_alpha_norm_std": float(post_alpha_norm_std) if post_alpha_norm_std is not None else None,
+                    "posterior_alpha_norm_prob_gt_0_1": post_alpha_norm_prob_gt_0_1,
+                }
+                
+                # R stats
+                opt_r = opt_data.get(param_name, {}).get("r", 0.0) if opt_data else 0.0
+                post_r_mean = post_data.get(param_name, {}).get("r_mean", None) if post_data else None
+                post_r_std = post_data.get(param_name, {}).get("r_std", None) if post_data else None
+                
+                # Compute posterior probability that r > 0.1
+                post_r_prob_gt_0_1 = None
+                if calibrator.posterior_samples is not None:
+                    r_idx = r_indices.get(param_name)
+                    if r_idx is not None:
+                        r_samples = calibrator.posterior_samples[:, r_idx]
+                        post_r_prob_gt_0_1 = float(_np.mean(r_samples > 0.1))
+                
+                r_stats[param_name] = {
+                    "optimized_r": float(opt_r),
+                    "posterior_r_mean": float(post_r_mean) if post_r_mean is not None else None,
+                    "posterior_r_std": float(post_r_std) if post_r_std is not None else None,
+                    "posterior_r_prob_gt_0_1": post_r_prob_gt_0_1,
+                }
+            
+            # Build final alpha_feedback structure
+            alpha_feedback = {
+                "selected_params": list(calibrator.alpha_params),
+                "evaluation_results": evaluation_results if evaluation_results else {},
+                "alpha_stats": alpha_stats,
+                "alpha_norm_stats": alpha_norm_stats,
+                "r_stats": r_stats,
+            }
+            
+        except Exception as e:
+            warnings.warn(f"Failed to generate alpha_feedback_inputs.json: {e}")
+            traceback.print_exc()
+    
     if use_double_mc:
         if alpha_report:
             with open(os.path.join(results_dir_base, "alpha_report.json"), "w") as f:
                 json.dump(alpha_report, f, indent=2)
+        if alpha_feedback:
+            with open(os.path.join(results_dir_base, "alpha_feedback_inputs.json"), "w") as f:
+                json.dump(alpha_feedback, f, indent=2)
+            print(f"✅ Alpha feedback inputs saved to: {os.path.join(results_dir_base, 'alpha_feedback_inputs.json')}")
         return
     else:
         if alpha_report:
             with open(os.path.join(results_dir_base, "alpha_report.json"), "w") as f:
                 json.dump(alpha_report, f, indent=2)
+        if alpha_feedback:
+            with open(os.path.join(results_dir_base, "alpha_feedback_inputs.json"), "w") as f:
+                json.dump(alpha_feedback, f, indent=2)
+            print(f"✅ Alpha feedback inputs saved to: {os.path.join(results_dir_base, 'alpha_feedback_inputs.json')}")
 
 
 # Execute main for both direct execution and sandbox wrapper invocation
