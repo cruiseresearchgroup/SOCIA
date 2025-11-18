@@ -1,39 +1,177 @@
 {
-  "summary": "The simulation provides a good starting point but needs refinements in both model design and implementation",
+  "summary": "The simulator is structurally close to the task specification but suffers from key implementation choices and subtle bugs that lead to poor fit. The most critical issues are: (1) defaulting to alpha-embedding during calibration, which injects stochastic parameter noise into the loss and destabilizes calibration; (2) an incorrect deliver_at_remaining_1 arrival convention; and (3) reusing a single RNG across all trajectories, coupling their stochastic demands and distorting pooled distributions. These three issues likely drive the high Wasserstein distance and puzzling RMSE=0 aggregate reports. Additional improvements include aligning Wasserstein computation with the spec (POT on joint states) and a few evaluation and pipeline occupancy alignment refinements.",
   "critical_issues": [
     {
-      "issue": "Lack of validation against real data",
-      "impact": "Simulation may not accurately reflect real-world behavior",
-      "solution": "Implement more detailed validation metrics comparing simulation outputs to real data"
+      "issue": "Alpha embedding is enabled by default during calibration, adding stochastic noise to core demand parameters (e.g., poisson_lambda).",
+      "impact": "Destabilizes the calibration objective and biases the optimizer towards inflated r values, degrading fit. This likely contributes to the very high in-distribution Wasserstein (≈14.9) and can prevent convergence to a consistent parameter set.",
+      "solution": "Disable alpha embedding by default during calibration. Only enable it explicitly via CLI for robustness experiments or Double Monte Carlo. In code: set use_alpha = bool(args.use_alpha) instead of forcing True, and keep alpha_params unset unless explicitly provided.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Incorrect delivery logic for arrival_convention='deliver_at_remaining_1'.",
+      "impact": "Items are delivered when remaining<=1 rather than remaining==1, delivering too early. This breaks the step alignment and can lead to systematic timing errors in inventory/backlog evolution.",
+      "solution": "Deliver only items with remaining==1 at the beginning of the step and decrement others by 1 with a floor at 1. Do not deliver items with remaining>1.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Single RNG reused across all trajectories (both in calibration sims and in rollout), causing cross-trajectory dependence.",
+      "impact": "Pooled distribution metrics (Wasserstein/MMD) become biased because trajectories are not independent draws. This directly harms the distributional alignment and can inflate distances.",
+      "solution": "Create an independent RNG per trajectory, deterministically seeded with the global seed and trajectory_id (e.g., seed_val + int(tid)*1009).",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Wasserstein computation deviates from spec (1D per-dimension averages instead of POT-based joint distribution state comparison).",
+      "impact": "The reported Wasserstein can be inflated and not directly comparable to the target evaluation. This may hide improvements and misguide optimization.",
+      "solution": "Implement POT-based Earth Mover’s Distance on the joint state vector [inventory, backlog, pipeline_len] at each time step with 200 samples, using ot.emd2 on a cost matrix with Euclidean distances; fall back to current method if POT unavailable.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "RMSE aggregate values reported as 0.0 suggest aggregation/averaging issue in Double Monte Carlo or metric reporting.",
+      "impact": "Masks true errors and complicates debugging/tuning. It undermines confidence in the fit when other metrics are high.",
+      "solution": "Harden metric aggregation: avoid averaging dictionaries blindly in run_double_monte_carlo; ensure metrics['aggregate'] stays nested and is not flattened incorrectly. Add a simple sanity check logging RMSE_inventory_mean before saving.",
+      "introduced_by_changes": false
     }
   ],
   "model_improvements": [
     {
-      "aspect": "Agent behavior",
-      "current_approach": "Simple rule-based behavior",
-      "suggested_approach": "More sophisticated decision-making model based on utility functions",
-      "expected_benefit": "More realistic agent decisions that better match observed patterns"
+      "aspect": "Demand model calibration under constant actions",
+      "current_approach": "Optimize Poisson lambda (with optional alpha) and lead time via SBI or gradient-free, using summary features or distributional losses.",
+      "suggested_approach": "Disable alpha during calibration; use a small integer grid for L around the inferred max remaining (e.g., {1..4}) and continuous optimization for demand parameters. Try NegBin if Poisson fit remains poor (overdispersion likely given backlog stats).",
+      "expected_benefit": "More stable and accurate parameter estimates; reduced W_in and MMD; improved predictability for OOD tests."
+    },
+    {
+      "aspect": "Arrival convention and event order alignment",
+      "current_approach": "Two conventions; deliver_at_remaining_1 is implemented incorrectly; deliver_at_remaining_0 matches dataset in many cases.",
+      "suggested_approach": "Fix deliver_at_remaining_1 semantics; prefer deliver_at_remaining_0 as default and restrict search to that unless validation suggests otherwise.",
+      "expected_benefit": "Reduced systematic timing error; better match to observed pipeline occupancy and inventory levels."
+    },
+    {
+      "aspect": "Distributional metric computation",
+      "current_approach": "Average 1D Wasserstein across inventory, backlog, pipeline_len per time step; use custom MMD.",
+      "suggested_approach": "Compute POT-based Wasserstein on joint 3D state vectors at each time, consistent with the spec; keep 1D as a fallback or auxiliary.",
+      "expected_benefit": "More faithful evaluation and optimization target; better alignment to the evaluation harness’s interpretation."
+    },
+    {
+      "aspect": "Stochasticity handling across trajectories",
+      "current_approach": "Single RNG instance passed to all demand models across trajectories.",
+      "suggested_approach": "Per-trajectory independent RNGs seeded by trajectory_id.",
+      "expected_benefit": "Correct pooled-distribution properties and improved robustness of Wasserstein/MMD metrics."
     }
   ],
   "code_improvements": [
     {
-      "file": "simulation.py",
-      "modification": "Add error handling for edge cases",
-      "reason": "Currently, the simulation may crash when unexpected inputs are provided"
+      "file": "simulate.py",
+      "modification": "Disable alpha embedding by default; only enable if --use-alpha is provided.",
+      "reason": "Stabilizes calibration by removing stochastic parameter noise; prevents optimizer from inflating r and degrading fit.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulate.py",
+      "modification": "Fix deliver_at_remaining_1 delivery logic to deliver only items with remaining==1.",
+      "reason": "Corrects off-by-one delivery timing; aligns with common interpretation that 1 means 'arrives next step,' not 'arrives now.'",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulate.py",
+      "modification": "Instantiate an independent RNG per trajectory (both in calibration and rollout).",
+      "reason": "Ensures independence across trajectories and correct pooled distributions for Wasserstein/MMD.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulate.py",
+      "modification": "Implement POT-based Wasserstein on joint state vectors when POT is available; fall back to 1D averaging.",
+      "reason": "Aligns with the task spec and provides a more meaningful distance metric.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "simulate.py",
+      "modification": "Harden Double Monte Carlo metric aggregation to avoid producing zeros and to preserve nested aggregates.",
+      "reason": "Prevents misleading RMSE=0 reports; improves reliability of evaluation outputs.",
+      "related_to_recent_changes": false
     }
   ],
   "data_alignment_suggestions": [
     {
-      "metric": "Activity distribution",
-      "current_gap": "Simulation shows uniform activity, real data shows peaks",
-      "suggestion": "Add time-dependency to agent activity levels"
+      "metric": "Wasserstein_per_t",
+      "current_gap": "Observed ≈14.9 ID (far above target range 0.5–10.0).",
+      "suggestion": "Disable alpha during calibration; fix arrival convention; use per-trajectory RNG; switch to POT-based joint state Wasserstein for optimization and evaluation."
+    },
+    {
+      "metric": "MMD_per_t",
+      "current_gap": "≈0.305 (moderate).",
+      "suggestion": "Same as for Wasserstein; additionally, consider NegBin demand to capture overdispersion implied by higher backlog variance."
+    },
+    {
+      "metric": "RMSE_inventory_mean",
+      "current_gap": "Reported as 0.0, which is implausible given high Wasserstein.",
+      "suggestion": "Fix aggregation and add sanity-check logging; ensure per-trajectory metrics are computed and preserved without accidental overwriting."
     }
   ],
   "prioritized_actions": [
-    "Fix critical bugs in the implementation",
-    "Improve the agent behavior model",
-    "Add more detailed validation metrics"
+    "Disable alpha embedding by default in main() and re-run calibration.",
+    "Fix deliver_at_remaining_1 semantics to deliver only remaining==1.",
+    "Use per-trajectory independent RNGs in both calibration and rollout.",
+    "Implement POT-based joint-state Wasserstein in Evaluator (with fallback).",
+    "Grid-search lead_time L over a small integer set during gradient-free optimization and switch to NegBin if Poisson underfits.",
+    "Verify RMSE aggregation correctness and add sanity checks."
   ],
-  "additional_comments": "Overall, the simulation shows promise but needs refinement in key areas",
-  "code_snippets": []
+  "additional_comments": "Given backlog means and std dev in metadata, NegBin demand is a good candidate to capture overdispersion compared to Poisson. Also, ensure the simulator’s event order matches the dataset's recording convention: receive → serve backlog → serve demand → place order → shift pipeline. The deliver_at_remaining_0 path already matches the stable [[4,1],[4,2]] pattern in samples.",
+  "code_snippets": [
+    {
+      "file": "simulate.py",
+      "before": "use_alpha = args.use_alpha if hasattr(args, 'use_alpha') and args.use_alpha else True\nif alpha_params_list is None and use_alpha:\n    alpha_params_list = [\"poisson_lambda\"]",
+      "after": "use_alpha = bool(args.use_alpha)\nif alpha_params_list is None and use_alpha:\n    alpha_params_list = [\"poisson_lambda\"]",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulate.py",
+      "before": "if self.arrival_convention == \"deliver_at_remaining_1\":\n    remaining_items: List[Item] = []\n    for it in self.pipeline:\n        if it.remaining <= 1:\n            delivered += it.qty\n        else:\n            remaining_items.append(it)\n    new_pipeline: List[Item] = []\n    for it in remaining_items:\n        new_rem = max(1, it.remaining - 1)\n        new_pipeline.append(Item(qty=it.qty, remaining=new_rem))\n    self.pipeline = new_pipeline",
+      "after": "if self.arrival_convention == \"deliver_at_remaining_1\":\n    remaining_items: List[Item] = []\n    for it in self.pipeline:\n        if it.remaining == 1:\n            delivered += it.qty\n        else:\n            remaining_items.append(it)\n    new_pipeline: List[Item] = []\n    for it in remaining_items:\n        # decrement but keep floor at 1 so arrivals occur when remaining==1 next step\n        new_rem = max(1, it.remaining - 1)\n        new_pipeline.append(Item(qty=it.qty, remaining=new_rem))\n    self.pipeline = new_pipeline",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulate.py",
+      "before": "rng = np.random.default_rng(seed_val)\n...\nfor tr in self.train_trajectories:\n    ...\n    demand_model = create_demand_model_from_params(params, rng=rng)",
+      "after": "base_rng = np.random.default_rng(seed_val)\n...\nfor tr in self.train_trajectories:\n    # independent RNG per trajectory\n    tr_seed = seed_val + int(tr.trajectory_id) * 1009\n    rng_tr = np.random.default_rng(tr_seed)\n    ...\n    demand_model = create_demand_model_from_params(params, rng=rng_tr)",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulate.py",
+      "before": "rng = np.random.default_rng(seed_val)\n...\nfor tr in trajectories:\n    demand_model = create_demand_model_from_params(self.params, rng=rng)\n    demand_model.reset()",
+      "after": "base_rng = np.random.default_rng(seed_val)\n...\nfor tr in trajectories:\n    tr_seed = seed_val + int(tr.trajectory_id) * 1009\n    rng_tr = np.random.default_rng(tr_seed)\n    demand_model = create_demand_model_from_params(self.params, rng=rng_tr)\n    demand_model.reset()",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulate.py",
+      "before": "for t in range(max_T):\n    ...\n    ws = []\n    if xi.size > 0 and xo.size > 0:\n        ws.append(wasserstein_1d(xi, xo))\n    if xb.size > 0 and yb.size > 0:\n        ws.append(wasserstein_1d(xb, yb))\n    if xp.size > 0 and yp.size > 0:\n        ws.append(wasserstein_1d(xp, yp))\n    if len(ws) > 0:\n        wass_vals.append(float(np.mean(ws)))",
+      "after": "for t in range(max_T):\n    ...\n    if POT_AVAILABLE:\n        # Build joint samples [inv, backlog, pipeline_len]\n        Xs = np.stack([xi, xb, xp], axis=1)\n        Xo = np.stack([xo, yb, yp], axis=1)\n        # cost = Euclidean distance\n        C = np.linalg.norm(Xs[:, None, :] - Xo[None, :, :], axis=2)\n        a = np.ones((Xs.shape[0],)) / Xs.shape[0]\n        b = np.ones((Xo.shape[0],)) / Xo.shape[0]\n        emd2 = ot.emd2(a, b, C)\n        wass_vals.append(float(emd2))\n    else:\n        ws = []\n        if xi.size > 0 and xo.size > 0:\n            ws.append(wasserstein_1d(xi, xo))\n        if xb.size > 0 and yb.size > 0:\n            ws.append(wasserstein_1d(xb, yb))\n        if xp.size > 0 and yp.size > 0:\n            ws.append(wasserstein_1d(xp, yp))\n        if len(ws) > 0:\n            wass_vals.append(float(np.mean(ws)))",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulate.py",
+      "before": "for key in per_k_metrics[0].keys():\n    if isinstance(per_k_metrics[0][key], dict):\n        avg_metrics[key] = {}\n        for subkey in per_k_metrics[0][key].keys():\n            values = [m[key][subkey] for m in per_k_metrics if key in m and subkey in m[key]]\n            if values:\n                avg_metrics[key][subkey] = float(np.mean(values))",
+      "after": "for key in per_k_metrics[0].keys():\n    if isinstance(per_k_metrics[0][key], dict):\n        # Skip per_trajectory dict averaging; keep first as representative\n        if key == \"per_trajectory\":\n            avg_metrics[key] = per_k_metrics[0][key]\n            continue\n        avg_metrics[key] = {}\n        for subkey in per_k_metrics[0][key].keys():\n            vals = [m[key][subkey] for m in per_k_metrics if key in m and subkey in m[key] and isinstance(m[key][subkey], (int, float))]\n            if vals:\n                avg_metrics[key][subkey] = float(np.mean(vals))",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "No code changes were indicated in the diff for this iteration. The analysis therefore focuses on existing issues within the current codebase.",
+    "positive_impacts": [
+      "The architecture supports both SBI and gradient-free calibration.",
+      "Clear separation between data ingestion, simulation, calibration, and evaluation.",
+      "OOD evaluation hooks and Double Monte Carlo framework are in place."
+    ],
+    "negative_impacts": [
+      "Alpha embedding defaulted to enabled degrades calibration.",
+      "Arrival convention deliver_at_remaining_1 is implemented incorrectly.",
+      "RNG is shared across trajectories, biasing distributional metrics.",
+      "Wasserstein deviates from spec by using 1D averages rather than joint POT-based distance."
+    ],
+    "suggestions": [
+      "Disable alpha embedding by default; require explicit opt-in via CLI.",
+      "Fix arrival timing for deliver_at_remaining_1 to deliver only remaining==1.",
+      "Use per-trajectory RNG seeding for independence.",
+      "Adopt POT-based joint-state Wasserstein to adhere to the task’s evaluation specification."
+    ]
+  }
 }

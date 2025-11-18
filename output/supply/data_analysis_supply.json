@@ -1,0 +1,238 @@
+{
+  "overall_simulation_design": {
+    "objective": "Calibrate and validate a single-stage Beer Game supply chain simulator that reproduces inventory, backlog, and pipeline dynamics from observed state-action trajectories and generalizes to out-of-distribution lead times and demand regimes.",
+    "initialization": "Parse train_data.csv grouped by trajectory_id; for each trajectory read the first row to set initial inventory_0, backlog_0, and pipeline_0 (parse pipeline_items JSON). Infer an initial guess of lead time L0 as the max remaining_lead across early steps. Set random seed from metadata.json. Initialize parameter vector theta with priors/bounds: lead time L (integer), demand model parameters (e.g., Poisson rate or NegBin/AR1), event timing flags (arrival/recording convention), and optional noise terms. During calibration, actions a_t are taken directly from the dataset for each trajectory.",
+    "execution": "For each candidate parameter vector theta, simulate forward each train trajectory from its initial state using the observed action sequence: at each step process pipeline arrivals per lead-time convention, draw demand d_t from the demand generator parameterized by theta (optionally AR1 on latent demand), fulfill backlog then current demand, update inventory/backlog, update pipeline by decrementing leads and appending a_t at position L. Compute a trajectory discrepancy loss between simulated and observed sequences (weighted errors on inventory, backlog, and pipeline composition/length). Optimize theta via simulation-based inference or gradient-free optimization: (a) ABC-SMC or SNPE to obtain a posterior over theta using summary statistics and the full sequence loss; or (b) point-estimation with CMA-ES/Nelder–Mead with multi-starts and early stopping on within-train temporal holdout. Enforce invariants (nonnegative inventory/backlog, integer pipeline positions) via penalties.",
+    "outputs": [
+      "Calibrated parameter estimates (point estimate or posterior samples) for lead time and demand process",
+      "Validation-set evaluation metrics (RMSE/MAE for inventory and backlog; pipeline composition error)",
+      "Fitted demand generator object/config and reproducible simulator config (event order, lead convention)",
+      "Per-trajectory simulated vs observed traces on validation set and summary plots/tables",
+      "OOD scenario stress-test results for altered lead times and/or demand parameters"
+    ]
+  },
+  "scale_granularity": {
+    "time_step": "days",
+    "spatial_resolution": "non-spatial",
+    "population_size": "Single agent (retailer node) per trajectory; 100 trajectories per split",
+    "rationale": "Dynamics are discrete-period inventory updates with pipeline lead times; no spatial interactions in single-stage Beer Game. One agent suffices because supplier and customer processes are modeled exogenously. The 'day' unit represents the dataset’s discrete period (interpretable as week); metrics are computed per step."
+  },
+  "agent_archetypes": {
+    "unit": "InventoryNode",
+    "roles": [
+      "Retailer"
+    ],
+    "static_attributes": [
+      "trajectory_id",
+      "episode_length",
+      "lead_time (per-simulation constant)",
+      "ordering_policy (exogenous playback during calibration; policy parameters for counterfactuals)"
+    ],
+    "dynamic_states": [
+      "inventory_t",
+      "backlog_t",
+      "pipeline_t (list of [qty, remaining_lead])",
+      "t (time index)"
+    ],
+    "construction_from_data": "For each trajectory, set static trajectory_id and episode_length=61 from metadata.json. Initialize dynamic states from the first row: inventory_0, backlog_0, and pipeline_0 by parsing pipeline_items. Use action sequence a_t from the CSV as exogenous orders during calibration/validation. Initialize lead_time with the max observed remaining_lead as a starting guess; it is then calibrated.",
+    "update_from_data": "During simulation, states update via the transition kernel; data are not directly injected except for actions. The discrepancy between simulated and observed (inventory, backlog, pipeline) drives parameter updates in the optimizer/SBI. Optionally, implied demand per step can be reconstructed from observed state differences and used as summary statistics for SBI."
+  },
+  "interaction_topology": {
+    "topology": "broadcast",
+    "layers": [
+      "supplier_interface",
+      "customer_interface"
+    ],
+    "protocol": "platform-level rules",
+    "construction_from_data": "supplier_interface: pipeline update rules inferred from pipeline_items (decrement positions; arrivals when remaining_lead threshold met; append orders at position L). customer_interface: demand is latent and modeled probabilistically; its parameters are calibrated to match observed state transitions. No explicit multi-agent edges are required."
+  },
+  "information_propagation": {
+    "exists": false,
+    "topology": "",
+    "mechanism": "",
+    "construction_from_data": "",
+    "parameters": {
+      "names": [],
+      "notes": ""
+    }
+  },
+  "exogenous_signals": [
+    {
+      "name": "action_stream",
+      "construction_from_data": "action column per (trajectory_id, time_step) from train/val/test CSVs",
+      "observability": "Retailer observes and executes; no delay/noise (playback during calibration/validation)",
+      "effect_on_agents": "Appended to pipeline at position L each step",
+      "bounds": "[0, 10] (dataset shows constant 4; allow headroom for counterfactuals)"
+    },
+    {
+      "name": "latent_demand",
+      "construction_from_data": "Not observed; inferred via calibration using observed state transitions and pipeline arrivals",
+      "observability": "Unobserved by the model at calibration time; realized as stochastic draw during simulation",
+      "effect_on_agents": "Consumes available inventory; unmet portion increases backlog",
+      "bounds": "[0, 50] per step; governed by calibrated demand parameters"
+    },
+    {
+      "name": "time_index",
+      "construction_from_data": "t or time_step column",
+      "observability": "Retailer observes current period index",
+      "effect_on_agents": "Optional seasonality/trend feature in demand model or policy",
+      "bounds": "[0, 60]"
+    }
+  ],
+  "action_decision_policy": {
+    "by_role": {
+      "Retailer": {
+        "inputs": [
+          "inventory_t",
+          "backlog_t",
+          "pipeline_t",
+          "time_index",
+          "action_stream (when using playback)"
+        ],
+        "policy_form": "Calibration/validation uses action playback (a_t from data). For counterfactual/generalization, use a base-stock policy with optional demand-forecast smoothing: a_t = clip(0, A_max, S - (inventory_t + on_order_t) + k*backlog_t + forecast_t), where forecast_t = alpha * d_{t-1} + (1-alpha) * forecast_{t-1}; orders are appended at position L.",
+        "parameters": [
+          "S (base-stock level)",
+          "k (backlog urgency weight)",
+          "alpha (EWMA demand forecast smoothing)",
+          "A_max (order cap)",
+          "s (optional reorder point if using (s,S))"
+        ]
+      }
+    }
+  },
+  "holdout_plan": {
+    "method": "temporal_holdout",
+    "train_range": "For each training trajectory: steps t=0–48 (first ~80% of 61 steps) for objective accumulation; also use full train split for final fit.",
+    "validation_range": "For each training trajectory: steps t=49–60 for early stopping/tuning; primary evaluation on the provided val_data.csv (all steps). Test_data.csv reserved for final OOD checks.",
+    "notes": "Primary calibration is on train_data.csv using full sequences; within-trajectory temporal holdout can guide early stopping or hyperparameter selection. Validation metrics reported on val_data.csv with actions fixed to observed."
+  },
+  "simulation_evaluation": {
+    "metrics": [
+      {
+        "name": "RMSE_inventory",
+        "definition": "Root mean squared error between simulated and observed inventory over time and trajectories"
+      },
+      {
+        "name": "RMSE_backlog",
+        "definition": "Root mean squared error between simulated and observed backlog"
+      },
+      {
+        "name": "MAE_pipeline_len",
+        "definition": "Mean absolute error of pipeline_len per step"
+      },
+      {
+        "name": "PipelineComp_L1",
+        "definition": "Average L1 distance between simulated and observed pipeline occupancy vectors across positions 1..L (sum of absolute differences in quantities by remaining lead)"
+      },
+      {
+        "name": "DemandNLL (optional)",
+        "definition": "Negative log-likelihood of reconstructed implied demand under the calibrated demand model (if using likelihood-based fitting)"
+      }
+    ],
+    "comparison_method": "For each validation trajectory, initialize simulator from the first row, play back observed actions, and simulate with calibrated parameters. Compute metrics per trajectory and aggregate (mean, std, and 95% CI across trajectories). Report tables for aggregate metrics and per-trajectory distributions; optionally provide time-series plots of observed vs simulated means with bands."
+  },
+  "calibratable_parameters": [
+    {
+      "name": "lead_time_L",
+      "range_bounds": "[1, 8]",
+      "source": "Constrained by observed max remaining_lead in pipeline_items; initialized at observed max (often 2).",
+      "notes": "Integer; controls pipeline positions and arrival timing."
+    },
+    {
+      "name": "arrival_convention",
+      "range_bounds": "{deliver_at_remaining_1, deliver_at_remaining_0}",
+      "source": "Event-order ambiguity between datasets and simulators.",
+      "notes": "Discrete flag; can be optimized via grid search nested in outer optimizer."
+    },
+    {
+      "name": "demand_family",
+      "range_bounds": "{Poisson, NegBin, AR1-Normal}",
+      "source": "Model selection via AIC/BIC on implied demand or via ABC model probabilities.",
+      "notes": "Choose one family; others can be compared via validation fit."
+    },
+    {
+      "name": "poisson_lambda",
+      "range_bounds": "[0.0, 20.0]",
+      "source": "If demand_family=Poisson; seeded by mean implied demand from train.",
+      "notes": "Continuous; per-trajectory stationary mean demand."
+    },
+    {
+      "name": "negbin_r",
+      "range_bounds": "[0.1, 50.0]",
+      "source": "If demand_family=NegBin; shape/dispersion parameter.",
+      "notes": "Controls overdispersion; pair with p or mean/var parameterization."
+    },
+    {
+      "name": "negbin_p",
+      "range_bounds": "[0.05, 0.95]",
+      "source": "If demand_family=NegBin; success probability.",
+      "notes": "Alternative parameterization to match mean/variance of implied demand."
+    },
+    {
+      "name": "ar1_mu",
+      "range_bounds": "[0.0, 20.0]",
+      "source": "If demand_family=AR1-Normal on latent demand; unconditional mean.",
+      "notes": "Works with truncation at 0 if mapping to nonnegative demand."
+    },
+    {
+      "name": "ar1_phi",
+      "range_bounds": "[-0.95, 0.95]",
+      "source": "If demand_family=AR1-Normal; autocorrelation parameter.",
+      "notes": "Stability enforced by |phi|<1."
+    },
+    {
+      "name": "ar1_sigma",
+      "range_bounds": "[0.0, 10.0]",
+      "source": "If demand_family=AR1-Normal; innovation std dev.",
+      "notes": "Maps to demand via max(0, round(latent))."
+    },
+    {
+      "name": "seasonal_amplitude",
+      "range_bounds": "[0.0, 10.0]",
+      "source": "Optional deterministic seasonality on demand using time_index.",
+      "notes": "Use with seasonal_period; set to 0 if not needed."
+    },
+    {
+      "name": "seasonal_period",
+      "range_bounds": "[2, 30]",
+      "source": "Optional; integer period for seasonality component.",
+      "notes": "Only active if seasonal_amplitude>0."
+    },
+    {
+      "name": "inventory_obs_noise_sigma",
+      "range_bounds": "[0.0, 2.0]",
+      "source": "Allows small measurement mismatch between simulator and data.",
+      "notes": "Penalized toward 0 to avoid absorbing structural errors."
+    },
+    {
+      "name": "initial_state_noise_sigma",
+      "range_bounds": "[0.0, 5.0]",
+      "source": "Randomization around observed initial inventory/backlog for robustness.",
+      "notes": "Used only during calibration robustness checks; set to 0 for final fit."
+    },
+    {
+      "name": "policy_S",
+      "range_bounds": "[0, 200]",
+      "source": "If running counterfactual base-stock policy.",
+      "notes": "Not used during playback-based calibration; used for OOD policy experiments."
+    },
+    {
+      "name": "policy_k",
+      "range_bounds": "[0.0, 2.0]",
+      "source": "Backlog urgency weight in base-stock policy.",
+      "notes": "Counterfactual only."
+    },
+    {
+      "name": "policy_alpha",
+      "range_bounds": "[0.0, 1.0]",
+      "source": "EWMA smoothing for demand forecast in policy.",
+      "notes": "Counterfactual only."
+    },
+    {
+      "name": "A_max",
+      "range_bounds": "[4, 50]",
+      "source": "Order cap in counterfactual policy.",
+      "notes": "Set >= observed max action; playback ignores."
+    }
+  ]
+}
