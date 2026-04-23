@@ -1,0 +1,220 @@
+{
+  "results-json-schema-mismatch": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "io_contract.results_json.metrics_schema (expects train_mse_overall/val_mse_overall/test_mse_overall)",
+      "simulation_evaluation.metrics names: train_loss/val_loss/test_loss vs io_contract naming"
+    ],
+    "code_refs": [
+      {
+        "symbol": "Evaluator.compute_metrics",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "save_results",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Code writes metrics keys: train_loss/val_loss/test_loss etc; Blueprint io_contract expects train_mse_overall/val_mse_overall/test_mse_overall and conservation_violation_rate."
+    },
+    "metric_links": [],
+    "error_identification": "The produced results.json does not follow the BLUEPRINT io_contract metric key schema, which can break downstream evaluation even if simulation is correct.",
+    "root_cause_analysis": "Evaluator.compute_metrics emits non-contract keys (train_loss, val_loss, test_loss, val_conservation_violation_rate). save_results writes these verbatim instead of mapping to the required io_contract keys.",
+    "correct_approach": "In Evaluator.compute_metrics and/or save_results, add a contract-mapping layer: output both (a) the current keys for internal prints and (b) the exact BLUEPRINT-required keys in results.json: train_mse_overall, val_mse_overall, test_mse_overall, val_mse_S/I/R, conservation_violation_rate. Keep val_predicted_mean_trajectories.csv unchanged.",
+    "key_insight": "Always separate internal metric naming from required IO contract: implement an explicit schema adapter before writing artifacts."
+  },
+  "improper-holdout-split-present": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "holdout_plan.method: file_split_only",
+      "execution step 4: evaluate on full train/val/test sets without any additional temporal holdout split"
+    ],
+    "code_refs": [
+      {
+        "symbol": "holdout_split",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "main",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "holdout_split is computed but ignored in SBINPECalibrator.fit (assigned to _). This is dead logic that conflicts with blueprint intent."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "A temporal holdout split is implemented despite the blueprint explicitly requiring no within-trajectory time split; it is currently unused, creating confusion and increasing risk of future leakage/incorrect evaluation changes.",
+    "root_cause_analysis": "holdout_split() implements a prefix/suffix split and main() passes it into calibrator.fit, but SBINPECalibrator.fit discards it. This contradicts the blueprint and makes future modifications error-prone.",
+    "correct_approach": "Remove holdout_split entirely from main flow, or repurpose HoldoutBundle into a no-op placeholder that matches the blueprint (e.g., store only metadata). Ensure calibrator.fit signature and callers reflect that calibration uses the full observed trajectory_id==0.",
+    "key_insight": "If the spec forbids an evaluation split, delete the split machinery; unused code is a common source of accidental leakage later."
+  },
+  "deterministic-algorithms-enabled-hurting-sbi-training": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "initialization: Random seed optionally set for reproducibility (not mandatory determinism)",
+      "execution: SBI calibration via NPE (training stability important)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "set_global_seed",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Validation loss remains high (val_loss=280.22) and does not improve beyond prior run; forcing torch.use_deterministic_algorithms(True) can degrade performance/compatibility and slow training, reducing effective optimization."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "SBI training may be unnecessarily constrained and potentially suboptimal due to enforcing deterministic algorithms globally.",
+    "root_cause_analysis": "set_global_seed() calls torch.use_deterministic_algorithms(True) unconditionally. For SBI neural density estimation, this can disable faster kernels and sometimes changes numerics/optimizer behavior, reducing convergence quality for a fixed epoch budget.",
+    "correct_approach": "Make deterministic algorithms optional via CLI flag (default off). Keep seeding (random/np/torch manual_seed) for reproducibility, but do not force deterministic algorithms unless explicitly requested. Log whether determinism is enabled.",
+    "key_insight": "Reproducibility is seeding; determinism is a stronger constraint that can harm model training\u2014make it opt-in, not default."
+  },
+  "single-trajectory-sbi-summary-too-high-dimensional": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "execution step 3: flatten full (T+1)x3 trajectory as x for NPE",
+      "objective: infer parameters from a single observed trajectory (trajectory_id=0 only)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Large generalization gap and high errors: train_loss=186.36 vs val_loss=280.22; per-dim val S and R errors dominate (val_loss_per_dim.S=415.54, R=334.11) while I is much lower (91.01)."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Posterior inference from a single flattened 183-dim observation appears to overfit/noise-fit and does not transfer to other trajectories; validation and test losses remain high.",
+    "root_cause_analysis": "SBINPECalibrator.fit uses the raw flattened trajectory as the observation/simulation output vector (dimension 183). With only 2000 simulations and a flexible density estimator, NPE can struggle to learn a stable inverse mapping, especially when many dimensions are redundant (S and R are deterministically tied to I via conservation) and scales differ. This reduces posterior quality, harming cross-trajectory performance.",
+    "correct_approach": "Keep blueprint-compatible flattening but improve identifiability and conditioning by changing the observation representation inside SBINPECalibrator.fit before feeding into NPE: (1) standardize/normalize x using z-score computed over simulated xs (fit scaler on xs, apply to x_o); (2) optionally reduce redundancy by transforming x from (S,I,R) to (I,R) or (S,I) while still remaining a flattening of the trajectory (still a flattened full trajectory, just of fewer compartments); (3) weight time steps (e.g., emphasize early growth/peak window) by multiplying x dimensions with a fixed taper to improve parameter sensitivity. Ensure the same transform is applied to all simulated xs and x_o.",
+    "key_insight": "When using NPE on a single long trajectory, always normalize and remove redundant dimensions; otherwise the density estimator learns scale artifacts instead of parameter-sensitive structure."
+  },
+  "rng-reuse-couples-sbi-and-evaluation-rollouts": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "initialization: Random seed optionally set for reproducibility",
+      "comparison_method: run K stochastic rollouts per trajectory and output mean"
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "DiscreteTimeSIRSimulator.rollout",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "main",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Metrics are stable but potentially biased/low-variance due to reusing the same numpy Generator for (a) SBI simulation generation and (b) evaluation rollouts; this can reduce effective randomness in posterior training and evaluation."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "Using the same RNG stream for SBI training simulations and later evaluation can introduce unintended coupling and reduce the reliability of validation estimates.",
+    "root_cause_analysis": "main() creates a single rng = default_rng(seed) and passes it into SBINPECalibrator and also into DiscreteTimeSIRSimulator for evaluation. SBINPECalibrator.fit consumes many random draws, advancing the RNG state; evaluation then depends on training consumption order.",
+    "correct_approach": "Derive independent RNG streams: in main(), create rng_sbi and rng_eval by splitting the seed (e.g., using SeedSequence.spawn or initializing two Generators with different seeds derived from cfg.seed). Use rng_sbi for SBI simulation generation and rng_eval for evaluation rollouts. Optionally create per-trajectory child RNGs to avoid order-dependence across trajectories.",
+    "key_insight": "Never reuse a single RNG stream across training and evaluation; split RNGs to prevent order-dependent randomness affecting validation."
+  },
+  "hard-requirement-absolute-data-dir": {
+    "issue_type": "CODE_BUG",
+    "severity": "low",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "io_contract: relies on dataset files under provided data directory; does not require absolute path constraint"
+    ],
+    "code_refs": [
+      {
+        "symbol": "load_data",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "No crash in current run, but load_data enforces DATA_DIR must be absolute, which is not required by blueprint and can cause runtime failures in other environments."
+    },
+    "metric_links": [],
+    "error_identification": "Unnecessary restriction can cause avoidable runtime errors when DATA_DIR is relative.",
+    "root_cause_analysis": "load_data() raises ValueError if data_dir is not absolute, even though main constructs data_dir from PROJECT_ROOT + DATA_PATH and could be relative depending on env setup.",
+    "correct_approach": "Remove the absolute-path check; instead, normalize with os.path.abspath and proceed. Keep existence checks for directory/files.",
+    "key_insight": "Avoid adding path format constraints not required by the spec; normalize paths instead of rejecting them."
+  }
+}

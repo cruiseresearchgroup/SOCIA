@@ -1,0 +1,476 @@
+\begin{AIBoxBreak}{Generated Blueprint: N2A Mobility Trajectory Simulation (Online OOD)}
+\begin{lstlisting}[breaklines=true]
+{
+  "title": "Simulation Task",
+  "description": "Design a social simulator to generate daily mobility trajectories of urban residents under an out-of-distribution (OOD) setting (N2A: Normal-to-Abnormal). A trajectory is an ordered sequence of (location, time) visits: {(l0,t0),(l1,t1),...,(ln,tn)}. In this task, the simulator MUST be trained/fitted only on normal-period records (2019-2020), while model selection / calibration MUST use abnormal-period targets (2021) as validation. Final performance MUST be reported on a held-out 2021 test split.",
+  "data_folder": "data_fitting/llmob_data/",
+  "data_files": {
+    "1921Y.json": "Resident daily trajectories across multiple years. For THIS TASK (N2A Online OOD), split by date into three disjoint subsets:\n(A) TRAIN_NORMAL: keep ONLY records where date is within [2019-01-01, 2020-12-31]. Used for training/fitting priors/Pattern/Persona ONLY.\n(B) V_CALIB_ABNORMAL: keep ONLY records where date is within [2021-01-01, 2021-12-31] AND assigned to the 2021-calib split. Used for calibration/model selection (best_params, early stop) ONLY.\n(C) V_TEST_ABNORMAL: keep ONLY records where date is within [2021-01-01, 2021-12-31] AND assigned to the 2021-test split. ",
+    "poi_category_192021_longitude_latitude.json": "Maps each full POI name (e.g., \"Rest Area#1061\") to its latitude/longitude. Use it to get coordinates for each visited stop (for both 2019-2020 fitting and 2021 evaluation).",
+    "catto.json": "Maps base POI name (suffix removed; e.g., \"Rest Area\") to a semantic category (e.g., \"Travel & Transport\"). Use it to compute category-based metrics."
+  },
+  "data_analysis_result": {
+    "overall_simulation_design": {
+      "objective": "Generate realistic daily mobility trajectories (ordered sequences of (POI, time) visits) for urban residents under an out-of-distribution Normal-to-Abnormal (N2A) setting: fit baseline behavior using only 2019–2020 records, tune/calibrate abnormal-shift parameters using a 2021 validation split, and report final performance on a held-out 2021 test split.",
+      "initialization": {
+        "description": "Load and parse 1921Y.json into per-user, per-day sequences; split by year into normal (2019–2020) vs abnormal (2021). Build POI catalog with lat/lon from poi_category_192021_longitude_latitude.json and map fine categories to super-categories using catto.json. Initialize each Resident with baseline (normal-period) learned distributions (time-of-day, chain length, category/POI transitions, anchor POIs). Initialize global abnormal-shift parameters (to be calibrated) that perturb baseline distributions when simulating 2021.",
+        "source_type": "mixed",
+        "data_reference": {
+          "file": "1921Y.json",
+          "fields": [
+            "top-level keys (user IDs)",
+            "top-level values (daily activity strings containing dates, locations, times)"
+          ],
+          "derivation": "Parse each string 'Activities at YYYY-MM-DD: ...' into date and ordered visits of (Category#POI_ID, HH:MM:SS); year determines normal (2019–2020) vs abnormal (2021). Join POI lat/lon by matching POI identifier strings to poi_category_192021_longitude_latitude.json entries; map Category -> super-category via catto.json when available."
+        }
+      },
+      "execution": "1) Fit baseline per-user and global mobility models on 2019–2020 only (e.g., distributions over start time, stop count, inter-visit time gaps, super-category transitions, POI choice kernels conditioned on category and distance). 2) Define abnormal-shift mechanisms with free parameters (e.g., category-mix reweighting, increased/decreased mobility radius, increased infrastructure/transit propensity, time-shift of activities). 3) Calibrate abnormal-shift parameters by simulating 2021 validation days and optimizing an objective over evaluation metrics (trajectory similarity, distributional match) against 2021 ground truth. 4) Freeze baseline + calibrated shift and evaluate on 2021 held-out test split. 5) Online OOD context window rule: For each 2021 target day, construct a 7-day context window using only days strictly earlier than the target day; this window may include earlier 2021 days and may backfill from late 2020; never use target-day or future days.",
+      "outputs": [
+        "calibrated_parameters",
+        "evaluation_results_on_validation"
+      ]
+    },
+    "scale_granularity": {
+      "time_step": {
+        "value": "minutes",
+        "source_type": "mixed",
+        "data_reference": {
+          "file": "1921Y.json",
+          "fields": [
+            "visit time tokens HH:MM:SS within daily strings"
+          ],
+          "derivation": "Observed times are second-resolved; simulator can operate in minute granularity while outputting HH:MM:SS by rounding/stochastic seconds jitter (designed)."
+        }
+      },
+      "spatial_resolution": {
+        "value": "POI",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "1921Y.json",
+          "fields": [
+            "place tokens formatted Category#POI_ID"
+          ],
+          "derivation": "Each visit location is a POI identifier string (Category#id)."
+        }
+      },
+      "population_size": {
+        "value": "number of unique user IDs in 1921Y.json (one agent per key)",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "1921Y.json",
+          "fields": [
+            "top-level keys"
+          ],
+          "derivation": "Count keys in the JSON object; each key defines one resident agent."
+        }
+      },
+      "rationale": "Trajectories are day-level sequences with intra-day timestamps; minute-level simulation supports feasibility constraints via travel-time approximations while matching the dataset’s timestamp structure. POI-level resolution is required because ground truth uses Category#POI_ID and POI lat/lon is available for distance-based plausibility."
+    },
+    "agent_archetypes": {
+      "unit": "resident/user",
+      "roles": [
+        {
+          "name": "Resident",
+          "static_attributes": [
+            {
+              "name": "resident_id",
+              "type": "string",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "top-level key"
+                ],
+                "derivation": "Use JSON key as resident_id."
+              }
+            },
+            {
+              "name": "anchor_pois",
+              "type": "vector",
+              "source_type": "mixed",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "daily visit sequences (locations)"
+                ],
+                "derivation": "From 2019–2020 visits, compute top-K frequent POIs; additionally mark any POI whose category is 'Home' as an anchor when present (data-derived), otherwise rely on frequency-only heuristic (designed fallback)."
+              }
+            },
+            {
+              "name": "baseline_start_time_dist",
+              "type": "other",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "first timestamp per day"
+                ],
+                "derivation": "For each 2019–2020 day, extract first visit time; fit a distribution per user (e.g., histogram/mixture)."
+              }
+            },
+            {
+              "name": "baseline_stop_count_dist",
+              "type": "other",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "number of visits per day"
+                ],
+                "derivation": "For each 2019–2020 day, count visits; fit a per-user distribution."
+              }
+            },
+            {
+              "name": "baseline_inter_event_time_dist",
+              "type": "other",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "ordered visit times within day"
+                ],
+                "derivation": "Compute successive time gaps within 2019–2020 days; fit distribution (conditioned on previous/next category optionally)."
+              }
+            },
+            {
+              "name": "baseline_category_transition_model",
+              "type": "other",
+              "source_type": "mixed",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "ordered visit locations (Category#POI_ID)"
+                ],
+                "derivation": "Extract Category from each location token; optionally map to super-category via catto.json; fit Markov transition probabilities with smoothing at super-category level if category not found in catto.json."
+              }
+            },
+            {
+              "name": "baseline_poi_choice_model",
+              "type": "other",
+              "source_type": "mixed",
+              "data_reference": {
+                "file": "poi_category_192021_longitude_latitude.json",
+                "fields": [
+                  "POI records [lat, lon, 'Category#id']"
+                ],
+                "derivation": "Given chosen category, choose POI via a combination of (a) empirical POI popularity from 2019–2020 visits (data-derived from 1921Y.json) and (b) distance-decay from current POI using lat/lon (data-derived). Weighting between (a) and (b) is calibratable (mixed)."
+              }
+            }
+          ],
+          "dynamic_states": [
+            {
+              "name": "current_day",
+              "type": "string",
+              "update_rule": "Advance to next simulation date; for calibration/evaluation, simulate only dates in the selected 2021 validation/test split; for generation, dates are sampled from target set.",
+              "source_type": "mixed",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "date prefix 'Activities at YYYY-MM-DD'"
+                ],
+                "derivation": "Use available dates to define candidate simulation days (data-derived); selecting which days to simulate per split is designed by holdout plan."
+              }
+            },
+            {
+              "name": "current_poi",
+              "type": "string",
+              "update_rule": "Set to the most recently generated POI in the trajectory sequence.",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "current_time",
+              "type": "string",
+              "update_rule": "Set to generated time-of-day; increment by sampled inter-event gap subject to feasibility constraints.",
+              "source_type": "mixed",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "HH:MM:SS tokens"
+                ],
+                "derivation": "Time-of-day distributions fit from 2019–2020; feasibility adjustment (e.g., minimum travel time) is designed using POI distances."
+              }
+            },
+            {
+              "name": "daily_plan",
+              "type": "vector",
+              "update_rule": "At day start, sample stop_count, start_time, and a sequence of activity categories; then instantiate POIs and times sequentially.",
+              "source_type": "mixed",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "per-day sequences of categories and times"
+                ],
+                "derivation": "Plan templates and distributions learned from normal data; abnormal adjustments applied via exogenous shift parameters calibrated on 2021 validation."
+              }
+            },
+            {
+              "name": "visited_sequence",
+              "type": "vector",
+              "update_rule": "Append each generated (POI, time) as simulation progresses.",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "construction_from_data": "Create one Resident agent per user ID in 1921Y.json. Parse 2019–2020 days to estimate baseline distributions and transition models. Build POI lookup table from poi_category_192021_longitude_latitude.json by indexing on the POI identifier string. Optionally map fine categories to super-categories using catto.json for smoothing and OOD robustness.",
+          "update_from_data": "During calibration/evaluation, for a given 2021 day the agent generates a trajectory using baseline models plus abnormal-shift parameters. No online learning from 2021 ground truth during simulation; only outer-loop calibration uses 2021 validation targets to adjust global shift parameters."
+        },
+        {
+          "name": "CalibrationController",
+          "static_attributes": [
+            {
+              "name": "search_strategy",
+              "type": "enum",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "objective_weights",
+              "type": "vector",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "dynamic_states": [
+            {
+              "name": "current_parameter_vector",
+              "type": "vector",
+              "update_rule": "Update via black-box optimization (e.g., Bayesian optimization / evolutionary search / random search) to minimize validation loss computed against 2021 validation set.",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "best_parameter_vector",
+              "type": "vector",
+              "update_rule": "Replace when validation objective improves.",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "experiment_log",
+              "type": "vector",
+              "update_rule": "Append each trial’s params, seed, metrics, and artifacts.",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "construction_from_data": "Controller reads parsed datasets and defines train/validation/test partitions per holdout plan. It does not exist in the raw data; it is introduced to meet the requirement of calibrating using 2021 validation while fitting baseline on 2019–2020.",
+          "update_from_data": "Uses 2021 validation ground truth from 1921Y.json to compute objective; updates parameter vector based on optimization routine."
+        }
+      ]
+    },
+    "interaction_topology": {
+      "topology": "platform-level",
+      "layers": [
+        {
+          "name": "calibration_loop",
+          "from_role": "CalibrationController",
+          "to_role": "Resident",
+          "edge_rule": "Controller broadcasts a candidate abnormal-shift parameter vector and simulation configuration (seed, day subset); Residents simulate trajectories for the requested days; outputs are returned for scoring.",
+          "source_type": "designed",
+          "data_reference": null
+        },
+        {
+          "name": "shared_environment_lookup",
+          "from_role": "Resident",
+          "to_role": "Resident",
+          "edge_rule": "No direct resident-to-resident influence; all residents share the same POI catalog, category taxonomy, and global shift parameters.",
+          "source_type": "designed",
+          "data_reference": null
+        }
+      ],
+      "protocol": "Per calibration iteration: (1) Controller selects parameter vector θ and simulation seed(s). (2) For each resident/day in the calibration subset, residents generate trajectories using θ. (3) Controller computes metrics vs 2021 ground truth and updates θ. After tuning, run evaluation on held-out 2021 test split and report metrics."
+    },
+    "information_propagation": {
+      "exists": false,
+      "topology": "none (no explicit social diffusion in provided data)",
+      "mechanism": "Residents do not exchange messages; any global changes are modeled via exogenous abnormal-shift parameters applied uniformly or stratified by resident clusters (optional, designed).",
+      "source_type": "data_derived",
+      "data_reference": {
+        "file": "1921Y.json",
+        "fields": [
+          "user-indexed independent daily trajectories"
+        ],
+        "derivation": "Data contains per-user sequences without any explicit social links or interactions; therefore diffusion is not directly supported."
+      }
+    },
+    "exogenous_signals": [
+      {
+        "name": "abnormal_period_shift",
+        "effect_on_agents": "Applies when simulating dates in 2021: reweights category/super-category choice, modifies stop-count distribution, shifts start times, adjusts travel-radius/distance-decay, and adjusts propensity to include infrastructure categories (e.g., Toll Booth/Tunnel/Rest Area/Platform) as intermediate stops.",
+        "bounds": "Calibration bounds set to reasonable multiplicative/shift ranges around baseline (e.g., category weight multipliers in [0.25, 4], time shifts in [-120,+120] minutes, distance-decay scale multipliers in [0.5, 2.5]).",
+        "source_type": "mixed",
+        "data_reference": {
+          "file": "1921Y.json",
+          "fields": [
+            "2021 daily trajectories (locations and times)"
+          ],
+          "derivation": "Signal is designed as a parameterized mechanism; its parameters are calibrated to match distributional properties of 2021 trajectories."
+        }
+      },
+      {
+        "name": "day_type_proxy",
+        "effect_on_agents": "Optional: adjust schedule templates for weekday/weekend using only date-derived heuristics; used to condition start time and stop-count distributions.",
+        "bounds": "Binary {weekday, weekend} inferred from date; if timezone/calendar assumptions required, treat as heuristic with standard Gregorian calendar.",
+        "source_type": "designed",
+        "data_reference": null
+      }
+    ],
+    "action_decision_policy": {
+      "by_role": [
+        {
+          "role": "Resident",
+          "inputs": [
+            {
+              "name": "baseline_distributions_and_transition_models",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "2019–2020 parsed daily sequences"
+                ],
+                "derivation": "Fit per-user and global models from normal period only."
+              }
+            },
+            {
+              "name": "poi_catalog_with_latlon",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "poi_category_192021_longitude_latitude.json",
+                "fields": [
+                  "category -> list of [lat, lon, poi_id]"
+                ],
+                "derivation": "Index POIs by poi_id and by category; compute distances as needed."
+              }
+            },
+            {
+              "name": "category_to_supercategory_map",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "catto.json",
+                "fields": [
+                  "category -> super-category"
+                ],
+                "derivation": "Lookup for each fine category; if missing, treat super-category as 'Unknown' (designed fallback)."
+              }
+            },
+            {
+              "name": "abnormal_period_shift_parameters",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "current_state (current_poi, current_time, visited_sequence)",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "policy_form": "Hierarchical generative policy per day: (1) Sample start time and stop count from baseline distributions perturbed by abnormal shift (if 2021). (2) Sample a sequence of activity categories using a Markov model (category or super-category) with optional time-of-day conditioning and abnormal reweighting. (3) For each category, sample a concrete POI using a mixture of (a) personal historical preference (2019–2020 POI visit frequency) and (b) spatial distance-decay from current POI using lat/lon; optionally enforce feasibility by ensuring time gaps exceed a minimum travel-time proxy derived from distance. (4) Output ordered (POI, time) visits.",
+          "parameters": [
+            "theta_cat_weight_multiplier_by_supercategory",
+            "theta_stop_count_multiplier",
+            "theta_start_time_shift_minutes",
+            "theta_distance_decay_scale",
+            "theta_preference_vs_distance_mixture",
+            "theta_infrastructure_stop_bonus"
+          ]
+        },
+        {
+          "role": "CalibrationController",
+          "inputs": [
+            {
+              "name": "simulated_trajectories",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "validation_ground_truth_2021",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "1921Y.json",
+                "fields": [
+                  "2021 daily activity strings"
+                ],
+                "derivation": "Parse 2021 dates/visits for validation subset."
+              }
+            }
+          ],
+          "policy_form": "Outer-loop calibration policy: propose θ, run simulation on 2021 validation subset, compute objective from metrics, update θ using selected black-box optimization strategy.",
+          "parameters": [
+            "optimizer_hyperparams",
+            "metric_weights"
+          ]
+        }
+      ]
+    },
+    "holdout_plan": {
+      "method": "temporal_holdout",
+      "time_ordering": {
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "1921Y.json",
+          "fields": [
+            "date token in each daily record string: 'Activities at YYYY-MM-DD'"
+          ],
+          "derivation": "Parse YYYY-MM-DD and sort chronologically; year used for regime split."
+        }
+      },
+      "train_range": "Fit baseline only on dates with year in {2019, 2020}. Within 2021, do not use for baseline fitting.",
+      "validation_range": "Within 2021 dates, use first 80% of dates in chronological order as validation for abnormal-shift calibration (per user or globally; implement globally by date ordering). (FIXED SPLIT RULE: per-user-by-date only) For each resident independently, sort that resident's 2021 day-records by date ascending; assign the first 80% of that resident's 2021 records to V_calib and the last 20% to V_test (deterministic, no global mixing). If a resident has fewer than 5 total 2021 records, exclude that resident entirely from calibration/test with explicit logging (default), or assign all their 2021 records to V_test only (allowed fallback) — but never include them in V_calib.",
+      "notes": "Final test is the remaining last 20% of 2021 dates chronologically. If some users have sparse 2021 records, apply the 80/20 rule per-user to preserve personalization (designed choice); record which approach is used. Split strategy is fixed to per-user-by-date as specified above; do not use global-by-date splitting."
+    },
+    "simulation_evaluation": {
+      "metrics": [
+      {
+        "name": "DARD",
+        "definition": "Daily Activity Rhythm Divergence: a symmetric divergence between simulated vs ground-truth daily activity-rhythm distributions over time-of-day bins (optionally conditioned on activity categories), capturing phase shifts and missing/extra peaks in the daily schedule."
+      },
+      {
+        "name": "STVD",
+        "definition": "Spatio-Temporal Visit Distribution distance: a transportation-based distance (e.g., Wasserstein/EMD) between simulated vs ground-truth empirical distributions of visits in joint (space, time) space, capturing coupled footprint errors such as correct locations at wrong times (and vice versa)."
+      }
+    ],
+      "comparison_method": "Compute metrics on the 2021 validation split for each calibration trial; select theta minimizing a weighted sum of metrics (objective). After calibration, compute the same metrics on the 2021 test split and report. Hard constraint: best_params selection and early stopping must use ONLY V_calib; V_test must be evaluated exactly once after selection and must not affect any choice (no tuning, no re-selection, no peeking)."
+    },
+    "calibratable_parameters": [
+      {
+        "name": "theta_cat_weight_multiplier_by_supercategory",
+        "range_bounds": "Multipliers per super-category in [0.25, 4.0]",
+        "source": "constrained by modeling",
+        "notes": "Reweights baseline category/super-category selection in 2021 to match abnormal mix."
+      },
+      {
+        "name": "theta_stop_count_multiplier",
+        "range_bounds": "[0.5, 1.8]",
+        "source": "constrained by modeling",
+        "notes": "Scales expected number of daily stops in 2021 vs baseline."
+      },
+      {
+        "name": "theta_start_time_shift_minutes",
+        "range_bounds": "[-120, 120]",
+        "source": "constrained by modeling",
+        "notes": "Shifts start-time distribution in 2021."
+      },
+      {
+        "name": "theta_distance_decay_scale",
+        "range_bounds": "[0.5, 2.5]",
+        "source": "constrained by modeling",
+        "notes": "Controls travel radius by scaling distance sensitivity in POI choice."
+      },
+      {
+        "name": "theta_preference_vs_distance_mixture",
+        "range_bounds": "[0.0, 1.0]",
+        "source": "constrained by modeling",
+        "notes": "Mixture weight: 1.0=personal preference only; 0.0=distance-only within category."
+      },
+      {
+        "name": "theta_infrastructure_stop_bonus",
+        "range_bounds": "[0.0, 3.0]",
+        "source": "constrained by modeling",
+        "notes": "Boosts probability of selecting travel/infrastructure-like categories as intermediate stops in 2021."
+      }
+    ]
+  }
+}
+\end{lstlisting}
+\end{AIBoxBreak}

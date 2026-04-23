@@ -1,0 +1,205 @@
+{
+  "stop-count-mismatch-day-truncation-and-no-return-home": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "objective: ordered sequences of (POI_location_id, time) visits, matching empirical temporal patterns",
+      "metrics: daily_stop_count_distribution_kl",
+      "action_decision_policy: \"decide whether to end day based on time and fatigue/time_budget\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator._simulate_days_with_windows",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._end_day_hazard",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._sample_stop_count",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "stop_count_abs_mean_error\u22481.64, stop_count_kl\u22480.403 (validation)"
+    },
+    "error_identification": "Simulated days have substantially wrong number of stops (mean absolute error ~1.64 stops/day; KL ~0.40).",
+    "root_cause_analysis": "The simulator samples a stop count (n_stops) but then can end early via a time-based hazard gate and also stops when t reaches day end; it never plans an explicit end-of-day home return or guarantees completion of sampled stops. This disconnect between sampled stop-count distribution and realized execution produces stop-count divergence.",
+    "correct_approach": "Make realized stop counts consistent with sampled stop counts: (1) generate a daily plan with target number of stops and time windows, then execute it; (2) only allow early termination as an explicit model component (fatigue/time_budget) calibrated to match observed early-stop behavior; (3) optionally add an explicit final 'home' visit (if home exists in data) or enforce day-end closure after last activity rather than truncation mid-plan.",
+    "key_insight": "If you sample a quantity that is evaluated (e.g., stops/day), enforce it during rollout or model the reasons it deviates and calibrate that deviation directly."
+  },
+  "category-time-of-day-jsd-high-missing-time-conditioned-category-choice": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "policy_form: \"sample next coarse_category ... conditioned on time-of-day and day_type\"",
+      "metrics: time_of_day_histogram_jsd_by_category"
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator._mix_category_transition",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "estimate_models_from_training",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "tod_jsd_avg\u22480.130; some categories very high (e.g., Shop & Service ~0.32, Food ~0.21)"
+    },
+    "error_identification": "Time-of-day visit start distributions by coarse category are poorly matched (average JSD ~0.13; specific categories much worse).",
+    "root_cause_analysis": "Category choice is influenced by time-of-day only via multiplying transition probs by minute-bin probabilities from per-agent/per-global histograms at the current t, but the simulator does not explicitly model (a) departure time distributions by category, (b) dwell-time interactions that shift subsequent arrival times, or (c) day-type conditioned category mixtures beyond transitions. This is weaker than the blueprint\u2019s \u201cschedule constraints\u201d and \u201ctime-of-day departure patterns\u201d components, making it hard to hit per-category timing targets.",
+    "correct_approach": "Introduce an explicit schedule model: sample (category, target_start_time) pairs for the day from fitted per-category time-of-day priors (conditioned on day_type), then choose POIs/transitions consistent with those target times (e.g., penalize |arrive_time - target_start_time| in utility). Keep transition priors as a secondary term instead of the sole driver of timing.",
+    "key_insight": "To match time-of-day patterns, timing must be a first-class variable (planned or strongly constrained), not just a weak multiplicative prior in a Markov transition."
+  },
+  "poi-recall-low-candidate-set-and-utility-weights-not-calibrated": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "metrics: topk_poi_recall",
+      "policy_form: utility combines personal POI affinity, global attractiveness, distance decay, optional recency penalty",
+      "calibratable_parameters: w_personal_poi_affinity, w_global_poi_popularity, softmax_temperature, candidate_set_topk_from_transition_graph"
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator._candidate_pois",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._choose_poi",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "RandomSearchCalibrator._sample_params",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "topk_poi_recall\u22480.220; best candidate_set_topk_from_transition_graph=157; softmax_temperature\u22480.47"
+    },
+    "error_identification": "Top-K POI recall is low (~0.22), indicating the simulator misses many agents\u2019 frequent validation POIs.",
+    "root_cause_analysis": "The candidate generation draws many POIs (up to ~40) and uses a large global transition topk (best ~157) filtered by category; then utilities rely on fixed weights for affinity/popularity/transition and only calibrate temperature. Because weights like w_personal_poi_affinity and w_global_poi_popularity are not calibrated (fixed at 1.0), calibration cannot shift probability mass toward anchor POIs enough to improve recall, and large candidate sets dilute selection.",
+    "correct_approach": "Expose and calibrate POI utility weights that the blueprint lists (w_personal_poi_affinity, w_global_poi_popularity, and possibly a separate weight for POI-transition prior). Also reduce candidate set size or make it adaptive: always include top-N anchor POIs and only a small exploration tail. Consider adding a recency penalty term (blueprint optional) to prevent repetitive non-anchor churn while preserving anchor revisits.",
+    "key_insight": "If a metric targets specific items (top-K POIs), ensure the model has calibratable knobs that can concentrate probability mass on those items; temperature alone can\u2019t fix systematic misspecification."
+  },
+  "travel-time-speed-calibrates-to-unrealistic-high-value-dwell-travel-decomposition-unstable": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "calibratable_parameters: travel_time_speed_kmph (used to match inter-event time gaps distribution)",
+      "dwell_time_params_by_coarse_category: \"only arrival timestamps are observed; dwell inferred/latent\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "estimate_models_from_training",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._travel_time_minutes",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._sample_dwell_minutes",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "RandomSearchCalibrator._sample_params",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "best travel_time_speed_kmph\u224874.3; trip_distance_wasserstein\u22480.713"
+    },
+    "error_identification": "Calibration selects very high effective travel speed (~74 km/h), suggesting the simulator is compensating for timing misfit via unrealistic travel times.",
+    "root_cause_analysis": "Dwell-time fitting subtracts an estimated travel time using a fixed DEFAULT_DWELL_FIT_SPEED_KMPH (30 km/h), while simulation travel time uses a calibrated speed. This mismatch means dwell-time parameters are learned under one travel-time assumption but used under another, encouraging calibration to push speed high to reconcile arrival times without re-fitting dwell accordingly.",
+    "correct_approach": "Couple dwell/travel estimation: either (1) fit dwell-time parameters with the same speed used in simulation (iterate: estimate speed \u2192 refit dwell \u2192 recalibrate), or (2) treat dwell-time params and travel speed jointly in the calibration objective by recomputing dwell-time model per sampled speed (expensive but consistent). At minimum, log and compare implied dwell distributions vs observed inter-event gaps on validation to ensure plausibility.",
+    "key_insight": "Do not fit latent components (dwell) using a fixed decomposition if another decomposed component (travel speed) is later calibrated\u2014otherwise calibration will push to implausible extremes."
+  },
+  "candidate-set-topk-from-transition-graph-used-as-filter-not-topk-candidate-creation": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "calibratable_parameters: \"candidate_set_topk_from_transition_graph\" = \"How many next-POI candidates to consider from the empirical mobility graph before adding exploration\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator._candidate_pois",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "best candidate_set_topk_from_transition_graph=157 while final candidates are capped ~12-40"
+    },
+    "error_identification": "The calibrated parameter candidate_set_topk_from_transition_graph takes large values, but actual candidate list size is capped (~40), so the parameter\u2019s effect is muted/non-identifiable.",
+    "root_cause_analysis": "In _candidate_pois, topk controls how many neighbors are scanned from the transition graph, but then candidates are filtered by category and the final set is capped by target_total (12\u201340). With many categories, few graph neighbors pass the filter, and the cap dominates; calibration can\u2019t reliably use this parameter to shape behavior as intended by the blueprint.",
+    "correct_approach": "Make candidate_set_topk_from_transition_graph directly control the number of graph-derived candidates included (after category filtering), and separate it from the overall cap. For example: include up to K graph neighbors that match the target category, then add exploration candidates up to an independent exploration cap.",
+    "key_insight": "A calibratable parameter must have a clear, monotonic effect on the generated behavior; otherwise optimization drifts and you get misleading \u2018best\u2019 values."
+  },
+  "colocation-implementation-is-summary-only-not-dynamic-occupancy-updates": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "low",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "interaction_topology: \"Update place occupancy accordingly\"",
+      "place dynamic_states: \"Increment when resident arrives; decrement when resident departs\"",
+      "co_location_contact: overlap of time windows within time_bin"
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator._compute_contacts_and_occupancy_stats",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "POI.current_occupancy",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "interaction_summaries present; POI.current_occupancy is set per bin then reset (no dynamic simulation loop)"
+    },
+    "error_identification": "Occupancy/contact are computed as post-hoc summaries, not as part of the event-driven place state updates described in the blueprint.",
+    "root_cause_analysis": "The code resets POI.current_occupancy and sets it to the bin occupancy during aggregation, then resets again; it does not maintain occupancy increment/decrement on resident arrivals/departures during simulation. This limits extensibility for congestion/crowding feedback or any contact-dependent mechanisms.",
+    "correct_approach": "If occupancy is intended to influence choice or be a true dynamic state, update POI.current_occupancy during simulation as events occur (increment on arrival, schedule decrement on departure). Keep the post-hoc bin-based contact counting, but derive it from the same event stream to avoid two inconsistent representations.",
+    "key_insight": "If a state variable is defined as dynamic in the spec, update it in the simulator\u2019s core loop; post-hoc recomputation is fine for metrics but shouldn\u2019t masquerade as state."
+  },
+  "main-executes-on-import-side-effect": {
+    "issue_type": "CODE_BUG",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [],
+    "code_refs": [
+      {
+        "symbol": "main (module bottom)",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "execution succeeded, but module ends with main() unguarded"
+    },
+    "error_identification": "The script calls main() at import time, which can break reuse/testing and some harnesses that import modules.",
+    "root_cause_analysis": "At the end of the file, main() is called without an `if __name__ == \"__main__\":` guard.",
+    "correct_approach": "Wrap the call in the standard guard:\n- replace trailing `main()` with:\n  `if __name__ == \"__main__\":\n      main()`",
+    "key_insight": "Never execute CLI entrypoints on import; always guard main to keep code composable and testable."
+  }
+}

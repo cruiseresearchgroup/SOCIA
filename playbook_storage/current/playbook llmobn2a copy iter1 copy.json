@@ -1,0 +1,91 @@
+{
+  "strategies": {
+    "transition-divergence-stuck-at-ln2-indicates-degenerate-transition-distribution": {
+      "reflection": {
+        "blueprint_refs": [
+          "baseline_category_transition_model: \"fit Markov transition probabilities ...\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "Evaluator.compute_metrics"
+          },
+          {
+            "symbol": "Resident.simulate_day"
+          },
+          {
+            "symbol": "build_network_and_agents"
+          }
+        ],
+        "evidence": {
+          "metrics": "transition_divergence ~= 0.6931471803 (≈ ln(2)) consistently across calibration and evaluation"
+        },
+        "error_identification": "Transition divergence is pegged at ~ln(2), a common maximum for JSD between two highly distinct distributions, suggesting simulated vs GT transition bigram distributions share little overlap or the computation is collapsing to a two-point support.",
+        "root_cause_analysis": "Two likely contributing mechanisms in code: (1) The simulator generates super-category sequences (sc_seq) and then selects POIs by supercat; if GT transitions are computed over fine categories or have different supercat mapping, overlap can be low. (2) In Evaluator.compute_metrics(), if either gt_bigram or sim_bigram is empty it falls back to {\"None\":1.0}; but here value is ln(2) not 0, implying both are non-empty but possibly dominated by disjoint keys due to inconsistent category->supercat mapping or because simulation uses a restricted tuned_supercats subset while GT uses full supercat space.",
+        "correct_approach": "Disambiguate then fix:\n- Add diagnostics: number of unique bigrams in GT vs SIM; top-20 bigrams and overlaps.\n- Ensure both GT and SIM transitions are computed on the same taxonomy (either fine categories or super-categories per catto.json).\n- Avoid restricting the transition support to tuned_supercats during simulation; keep full supercat support from dataset.poi_tokens_by_supercat keys + 'Unknown' so simulated bigrams can match GT support.\n- Consider adding per-user smoothing rather than hard global fallback to reduce mode collapse.",
+        "metric_links": [
+          {
+            "name": "transition_divergence"
+          }
+        ]
+      }
+    },
+    "radius-of-gyration-not-computable-because-gt-distance-steps-zero": {
+      "reflection": {
+        "blueprint_refs": [
+          "radius_of_gyration_error: \"requires POI lat/lon\"; \"handle missing POIs by excluding those visits\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "Evaluator.compute_metrics"
+          },
+          {
+            "symbol": "load_poi_catalog"
+          }
+        ],
+        "evidence": {
+          "metrics": "diagnostics.distance_missingness: gt_total_steps=0, gt_missing_step_fraction=null, while sim_total_steps=28"
+        },
+        "error_identification": "Ground-truth step distances are never computed (gt_total_steps=0) on the evaluated split, making any distance-based comparison unreliable and indicating GT POIs may not join to coordinates or GT sequences are too short after parsing.",
+        "root_cause_analysis": "Evaluator.add_step_dist() increments gt_total_steps for i in range(1,len(gt)), so gt_total_steps=0 implies almost all GT days have <=1 visit after parsing, or POI tokens in GT do not match dataset.poi_by_token keys (so visits exist but steps not counted would still increment totals—however totals increment before coord check, so this points to len(gt)<=1). That suggests parse_1921y_records() may be splitting incorrectly for the dataset delimiter (expects ';'), causing it to treat multi-visit strings as a single token or fail to parse additional visits.",
+        "correct_approach": "Make parsing robust to the true delimiter(s) in 1921Y.json:\n- Inspect raw day strings to confirm whether visits are separated by ';' or ','.\n- Update parse_1921y_records() to split on both ';' and ',' (careful to not split inside categories/POI names) or use a regex to extract repeated \"<loc> at <time>\" patterns.\n- After fix, assert per-day visit counts distribution for GT has reasonable mean >1 and gt_total_steps>0 in diagnostics.\nAlso implement radius_of_gyration_error per blueprint once coordinates join is working.",
+        "metric_links": [
+          {
+            "name": "trip_distance_wasserstein",
+            "direction": "lower_is_better",
+            "weight": 1.0
+          }
+        ]
+      }
+    },
+    "poi-recall-near-zero-personal-preference-model-too-sparse": {
+      "reflection": {
+        "blueprint_refs": [
+          "baseline_poi_choice_model: mixture of (a) empirical POI popularity ... and (b) distance-decay ...",
+          "poi_topk_recall definition"
+        ],
+        "code_refs": [
+          {
+            "symbol": "Resident.simulate_day"
+          },
+          {
+            "symbol": "build_network_and_agents"
+          },
+          {
+            "symbol": "Evaluator.compute_metrics"
+          }
+        ],
+        "evidence": {
+          "metrics": "topk_poi_recall=0.001734 (validation); calibration iterations topk_poi_recall mostly ~0.0004–0.0018"
+        },
+        "error_identification": "POI top-k recall is essentially zero, meaning simulated days almost never include any ground-truth POIs even as a set match.",
+        "root_cause_analysis": "POI sampling within a super-category uses per-user POI preference weights (baseline.poi_pref) plus distance, but preference mass is extremely sparse (only on POIs seen in 2019–2020). With w_pref often high (best params ~0.94), the sampler concentrates on a small set of historically seen POIs, which in 2021 often differs from the user’s actual POIs; simultaneously, candidates per supercat are huge (all POIs in that supercat), and distance decay is computed from a context POI that may not be aligned to the day’s actual starting anchor, further reducing overlap with ground truth. Net: almost no exact token matches.",
+        "correct_approach": "Make the POI-choice model less brittle and more user-anchored:\n1) In Resident.simulate_day, define candidates as a union of (a) supercat candidates and (b) user-specific top-M POIs within that supercat (from baseline counts) plus (c) global top-M POIs within that supercat; then sample from this reduced candidate set.\n2) Smooth poi_pref within a supercat: if a candidate is unseen by the user, give it a small prior proportional to global popularity (already computed in build_network_and_agents as global_poi_counts; reuse by exposing a per-supercat global popularity table rather than only a global list).\n3) Lower default w_pref (e.g., 0.3–0.7) and widen calibration search; current best pushes it to ~0.94, reinforcing sparsity.\n4) Ensure a consistent “start anchor” for distance: if ctx_poi exists but is not in the POI catalog / lacks coords, fall back to a home/anchor POI with coords.",
+        "metric_links": [
+          {
+            "name": "topk_poi_recall",
+          }
+        ]
+      }
+    }
+  }
+}

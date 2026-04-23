@@ -1,0 +1,257 @@
+{
+  "playbook_metadata": {
+    "version": "v0.1",
+    "project_name": "",
+    "last_updated_time": "2026-01-24T14:48:55.942901",
+    "last_updated_iteration": "0"
+  },
+  "strategies": {
+    "calibration-not-used-in-evaluation-argmax-update-convention": {
+      "meta_info": {
+        "token_count": 361,
+        "status": "in_progress",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "update_convention is calibratable discrete choice controlling within-step event order",
+          "calibrate unknown parameters ... by minimizing trajectory-level discrepancy ... between simulated and observed trajectories"
+        ],
+        "code_refs": [
+          {
+            "symbol": "BeerGameModel._select_update_convention",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BeerGameModel.step",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "NPECalibrator.fit",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "train_loss=165.17, val_loss=140.34 unchanged; posterior_samples_std ~20 for update_convention logits suggests non-identifiability"
+        },
+        "error_identification": "Validation loss remains high (140.34) with large inventory/backlog MSE, while the calibrated update_convention is effectively chosen by argmax of logits, making the simulator nearly deterministic in this discrete choice and preventing calibration from expressing posterior uncertainty.",
+        "root_cause_analysis": "The blueprint treats update_convention as a calibratable discrete choice; however, the simulator converts update_convention_logits into a hard argmax in BeerGameModel._select_update_convention, discarding uncertainty and making this latent choice difficult to learn with NPE. The posterior stds (~20) indicate the network is essentially uninformative, and the hard selection prevents any averaging that could reduce expected loss.",
+        "correct_approach": "In BeerGameModel.step, change update convention selection to be stochastic from a softmax over update_convention_logits (categorical draw) using the provided rng, and keep that convention fixed within the step. During evaluation rollouts, either (a) run multiple stochastic rollouts per trajectory and average the encoded states before MSE, or (b) deterministically use the softmax probabilities to compute an expected next-state mixture for features if feasible. Ensure the choice uses calibrated logits rather than argmax.",
+        "key_insight": "If a parameter is modeled as discrete/latent in the spec, avoid hard argmax decisions in the simulator; sample or marginalize so calibration can exploit uncertainty and reduce expected validation error.",
+        "metric_links": [
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "val_loss_per_dim",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "latent-demand-model-mismatch-poisson-with-additive-gaussian-noise": {
+      "meta_info": {
+        "token_count": 339,
+        "status": "in_progress",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "demand_dist_type categorical:{poisson, negbin, empirical_discrete}",
+          "Latent demand must be inferred from inventory/backlog transitions"
+        ],
+        "code_refs": [
+          {
+            "symbol": "BeerGameModel._sample_demand",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BeerGameModel.PARAMETER_NAMES",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BeerGameModel.get_parameters_uniform_prior_min_max",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "val_loss_per_dim backlog=373.79, inventory=185.47 dominate; demand_noise_scale posterior std ~19.56 indicates weak identifiability / compensating noise"
+        },
+        "error_identification": "Backlog and inventory errors dominate validation (backlog MSE ~374, inventory MSE ~185), and the calibrated demand parameters are unstable (very large posterior std), suggesting the demand process is not well captured by the current form.",
+        "root_cause_analysis": "BeerGameModel._sample_demand uses Poisson(softplus(theta)*10) plus additive Gaussian noise rounded/clipped. This is not one of the blueprint’s supported demand families (Poisson/NegBin/empirical discrete with appropriate parameterization), and additive Gaussian after Poisson can distort the implied variance/shape in ways that are hard to infer from inventory/backlog alone, leading to the posterior collapsing to near-uninformative.",
+        "correct_approach": "Refactor demand sampling to follow the blueprint: introduce a demand_dist_type switch (at least poisson vs negbin) controlled by calibrated logits/categorical parameter, and parameterize either (a) Poisson rate directly (no post-hoc Gaussian), or (b) Negative Binomial with mean/dispersion (where extra variance is intrinsic). If keeping a noise_scale, apply it as over-dispersion consistent with the chosen family (e.g., NB dispersion) rather than additive Gaussian on counts.",
+        "key_insight": "For count-valued latent processes, avoid ‘base distribution + additive Gaussian’ unless the spec demands it; model dispersion inside a proper count distribution to improve identifiability and generalization.",
+        "metric_links": [
+          {
+            "name": "val_loss_per_dim",
+            "direction": "lower_is_better",
+            "weight": 1.0
+          }
+        ]
+      }
+    },
+    "lead-time-and-pipeline-length-mismatch-ignores-empirical-countdown-structure": {
+      "meta_info": {
+        "token_count": 396,
+        "status": "in_progress",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Parse pipeline string as list of tuples; interpret tuple as (quantity, remaining_lead_time) consistent with observed countdown patterns",
+          "Lead time ... strongly constrained by observed remaining lead times (often 1-2)"
+        ],
+        "code_refs": [
+          {
+            "symbol": "BeerGameModel._apply_arrivals",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BeerGameModel._sample_lead_time",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BeerGameModel._place_order",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "pipeline_len MSE is low (~2.11) compared to inventory/backlog, but overall val_loss remains high; leadtime logits posterior std ~20 suggests non-identifiability"
+        },
+        "error_identification": "Even though pipeline_len error is relatively small, the lead-time posterior is essentially uninformative, implying the pipeline mechanism is not sufficiently anchored by the observed pipeline tuple countdown semantics; inventory/backlog errors remain high.",
+        "root_cause_analysis": "The simulator samples lead time from a free categorical over 1..5 each order, but does not use the observed pipeline tuple structure beyond decrementing tau and delivering at tau<=0. If the dataset’s pipeline tuples encode additional conventions (e.g., whether tau==1 arrives next step vs same step; or different within-step timing), the current implementation may be off by one relative to the data. This can shift arrivals timing and propagate into inventory/backlog mismatch while pipeline_len remains similar.",
+        "correct_approach": "Audit and align the pipeline countdown convention to the dataset semantics: specifically, define whether an order with lead_time_init=1 should arrive after one decrement at the next step or after zero steps. Implement an explicit rule consistent with observed transitions (e.g., (q,2)->(q,1) and arrival when it transitions from 1 to 0). Add a calibratable 'lead_time_offset' or incorporate the convention into update_convention choices (without inventing new external APIs), and constrain lead times to the empirically supported support (likely {1,2,3}) to reduce unidentifiable degrees of freedom.",
+        "key_insight": "In delayed-delivery systems, a single off-by-one in lead-time countdown can dominate inventory/backlog error while leaving pipeline length mostly unchanged—always match the dataset’s countdown convention explicitly.",
+        "metric_links": [
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "val_loss_per_dim",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "sbi-training-objective-mismatch-uses-single-trajectory-without-action-variation-coverage": {
+      "meta_info": {
+        "token_count": 376,
+        "status": "in_progress",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "SBI training uses ONLY train_states[0] ... as the single observation x_o",
+          "evaluate generalization on full validation/test sets"
+        ],
+        "code_refs": [
+          {
+            "symbol": "NPECalibrator.fit",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "train_loss (165.17) is worse than val_loss (140.34) and unchanged; posterior std ~20 across most parameters indicates weak learning from the single observation"
+        },
+        "error_identification": "The inferred posterior is nearly uninformative (very large std across parameters), and losses are not improving, suggesting the NPE setup is not extracting a usable inverse mapping from a single trajectory observation.",
+        "root_cause_analysis": "Although the blueprint restricts x_o to train trajectory 0, the current NPE is a simple conditional diagonal Gaussian trained on random theta samples with a fixed action sequence (from that trajectory). If the action sequence does not excite the system sufficiently, many parameters become unidentifiable from x, leading to near-prior posteriors and no effective calibration transfer.",
+        "correct_approach": "Within the blueprint constraint of using only train trajectory 0 as x_o, strengthen identifiability in code by (a) reducing parameterization degrees of freedom (remove or tightly bound shipment_quantity_noise_scale and demand_noise_scale unless clearly supported), (b) constrain lead-time support to observed values, and (c) add feature engineering inside trajectories_to_numpy for calibration only (not for official loss) such as first differences of inventory/backlog and pipeline_len to give the NPE more informative signals while keeping official evaluation unchanged. Implement this by building a separate calibration encoder inside NPECalibrator.fit rather than changing Evaluator encoding.",
+        "key_insight": "When calibration is forced to a single observed rollout, reduce simulator degrees of freedom and enrich calibration-side features (without changing evaluation features) to avoid non-identifiable posteriors.",
+        "metric_links": [
+          {
+            "name": "train_loss",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "unused-backlog-priority-parameter": {
+      "meta_info": {
+        "token_count": 249,
+        "status": "in_progress",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "backlog_service_priority categorical:{serve_backlog_first, serve_current_demand_first} (If included, must be clearly specified)"
+        ],
+        "code_refs": [
+          {
+            "symbol": "BeerGameModel.PARAMETER_NAMES",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BeerGameModel._fulfill",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "posterior_samples_std backlog_priority_logit ~20.14 indicates it is not affecting the likelihood; validation backlog MSE is high"
+        },
+        "error_identification": "A calibrated parameter (backlog_priority_logit) has no observable effect, leading to unidentifiable posterior and no ability to reduce backlog error.",
+        "root_cause_analysis": "backlog_priority_logit is included in BeerGameModel.PARAMETER_NAMES and calibrated, but BeerGameModel._fulfill always serves backlog + current demand together as a lumped required=backlog+demand, which is invariant to any service priority. The parameter is unused, so calibration can’t learn it and wastes capacity.",
+        "correct_approach": "Either remove backlog_priority_logit from the parameter vector and priors (simplify the model), or implement the blueprint’s optional backlog_service_priority: use backlog_priority_logit to probabilistically choose between serve_backlog_first vs serve_current_demand_first when inventory is insufficient, and update backlog accordingly (keeping total shipped constrained by inventory).",
+        "key_insight": "Never calibrate parameters that do not change simulated observations; unused parameters cause non-identifiability and degrade inference quality.",
+        "metric_links": [
+          {
+            "name": "val_loss_per_dim",
+            "direction": "lower_is_better",
+            "weight": 1.0
+          }
+        ]
+      }
+    }
+  }
+}

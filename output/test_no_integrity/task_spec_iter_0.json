@@ -1,0 +1,428 @@
+{
+  "title": "Simulation Task",
+  "description": "Develop a multi-agent simulation system that models the spread of mask-wearing behavior through social networks.",
+  "simulation_focus": [
+    "Predict agents' mask-wearing behavior over day 30 - day 39 (last ten days) based on their attributes, social connections, and past behavior",
+    "Model information propagation and behavioral changes triggered by social influence and government intervention starting on Day 10"
+  ],
+  "data_folder": "data_fitting/mask_adoption_data/",
+  "data_files": {
+    "agent_attributes.csv": "Contains demographic and behavioral attributes of each agent, including age, occupation, risk perception, and social connection counts",
+    "social_network.json": "Contains structured data representing a social network. Each entry corresponds to a user (identified by a unique integer ID), and the values describe the different types of relationships that user has with others. Data Structure: The top-level structure is a dictionary ({} in JSON). Keys: Each key is a unique user ID (as an integer, e.g., 0, 1, 2, etc.). Values: Each value is another dictionary with the following fields: \"family\": a list of user IDs representing family connections. \"work_school\": a list of user IDs representing colleagues or schoolmates. \"community\": a list of user IDs representing community-level acquaintances. \"all\": a merged list of all user IDs connected to the user across the three categories above.",
+    "train_data.csv": "Time series data for the first 30 days, used for training the model"
+  },
+  "evaluation_metrics": {
+    "RMSE": {
+      "description": "Root Mean Square Error measuring overall predictive accuracy of mask adoption rates",
+      "interpretation": "Directly interpretable as percentage deviations due to the 0-1 range",
+      "formula": "RMSE = sqrt(sum((predicted_rate - actual_rate)^2) / n)"
+    },
+    "Peak Adoption Rate Error": {
+      "description": "Measures model accuracy in predicting maximum mask adoption during intervention",
+      "formula": "abs(predicted_peak_rate - actual_peak_rate)"
+    },
+    "Time-to-Peak Error": {
+      "description": "Measures model accuracy in predicting the time lag from intervention to peak behavior change",
+      "formula": "abs(predicted_peak_day - actual_peak_day)"
+    }
+  },
+  "data_analysis_result": {
+    "data_summary": {
+      "key_patterns": [
+        {
+          "name": "Layered degree heterogeneity",
+          "description": "Agents have different connection counts across family, work_school, and community layers, with work_school varying strongly by occupation and age_group (e.g., students higher school ties).",
+          "relevance": "Supports multiplex network construction with layer-specific degree distributions and assortativity constraints."
+        },
+        {
+          "name": "Risk perception heterogeneity",
+          "description": "risk_perception is continuous in [0,1] and varies across agents; likely correlated with demographics (age_group) and occupation.",
+          "relevance": "Drives individual susceptibility to social influence or threshold for adoption."
+        },
+        {
+          "name": "Initial adoption seeding",
+          "description": "initial_mask_wearing identifies early adopters at t0; expected to be higher among agents with high risk_perception.",
+          "relevance": "Sets initial conditions for diffusion and calibrates early curve shape."
+        },
+        {
+          "name": "Temporal persistence (state inertia)",
+          "description": "wearing_mask in train_data.csv exhibits persistence (P(stay masked) > P(adopt on any given day when unmasked)).",
+          "relevance": "Requires separate parameters for adoption and discontinuation hazards."
+        },
+        {
+          "name": "Information effect on adoption",
+          "description": "received_info increases near-term adoption probability with a short lag (same-day or next-day).",
+          "relevance": "Separates exogenous information influence from endogenous peer effects."
+        },
+        {
+          "name": "Peer influence via neighbor adoption",
+          "description": "The probability of adopting increases with the proportion of masked neighbors, potentially nonlinearly and varying by layer.",
+          "relevance": "Calibrates layer-specific social influence coefficients or thresholds."
+        },
+        {
+          "name": "Layer importance hierarchy",
+          "description": "Family contacts are fewer but more influential; work_school moderate; community many but weaker.",
+          "relevance": "Informs layer weights for influence aggregation and contact scheduling."
+        },
+        {
+          "name": "Demographic moderation",
+          "description": "Age_group and occupation moderate both baseline propensity and layer weights (e.g., students weighted to school layer, retirees to family/community).",
+          "relevance": "Supports heterogeneity in parameters by subgroup for better fit."
+        },
+        {
+          "name": "Network reciprocity and clustering",
+          "description": "social_network.json may have non-symmetric edges; family layer likely high reciprocity and clustering; community lower.",
+          "relevance": "Guides network repair (symmetrization) and informs clustering targets in synthetic network construction."
+        },
+        {
+          "name": "Degree\u2013adoption timing",
+          "description": "High-degree agents (in community or work_school) may adopt earlier/later depending on info exposure and social influence strength.",
+          "relevance": "Supports targeting strategies and model validation by degree quantiles."
+        }
+      ],
+      "key_distributions": [
+        {
+          "name": "Family degree distribution",
+          "description": "Distribution of family_connections or family adjacency counts per agent.",
+          "parameters": "Mean (mu_fam), variance (sigma2_fam), candidate Poisson or Negative Binomial (r_fam, p_fam)."
+        },
+        {
+          "name": "Work/School degree distribution",
+          "description": "work_school_connections per agent, conditioned on occupation and age_group.",
+          "parameters": "Mean by subgroup (mu_ws|occ), overdispersion (k_ws), candidate Negative Binomial."
+        },
+        {
+          "name": "Community degree distribution",
+          "description": "community_connections per agent; likely heavy-tailed.",
+          "parameters": "Mean (mu_com), coefficient of variation (CV_com), candidate Lognormal (mu_ln, sigma_ln) or Power-law tail (alpha)."
+        },
+        {
+          "name": "Total degree",
+          "description": "total_connections distribution and its consistency with the sum of layer-specific degrees.",
+          "parameters": "Mean (mu_total), layer share proportions (pi_fam, pi_ws, pi_com)."
+        },
+        {
+          "name": "Risk perception",
+          "description": "Empirical distribution of risk_perception across agents and by demographics.",
+          "parameters": "Candidate Beta distribution (alpha_risk, beta_risk); mean and variance by subgroup."
+        },
+        {
+          "name": "Initial adoption rate",
+          "description": "Proportion of agents with initial_mask_wearing = true at t0.",
+          "parameters": "Overall rate (p_init) and subgroup rates (p_init|age_group, occupation, risk quartiles)."
+        },
+        {
+          "name": "Adoption and discontinuation hazards",
+          "description": "Daily transition probabilities from train_data.csv.",
+          "parameters": "p01 = P(wear_t=1 | wear_{t-1}=0), p10 = P(wear_t=0 | wear_{t-1}=1), optionally stratified by received_info."
+        },
+        {
+          "name": "Information receipt",
+          "description": "Daily probability that received_info=1 and its autocorrelation.",
+          "parameters": "p_info = P(info_t=1), persistence P(info_t=1 | info_{t-1}=1), bursts by day."
+        },
+        {
+          "name": "Lag from info to adoption",
+          "description": "Distribution of days between first info receipt and first adoption for previously unmasked agents.",
+          "parameters": "Geometric or discrete Weibull with mean lag L_info\u2192adopt."
+        },
+        {
+          "name": "Layer overlap",
+          "description": "Overlap between neighbors across layers (Jaccard indices).",
+          "parameters": "J_fam_ws, J_fam_com, J_ws_com; clustering coefficients per layer."
+        }
+      ],
+      "key_relationships": [
+        {
+          "variables": [
+            "risk_perception",
+            "initial_mask_wearing"
+          ],
+          "relationship": "Higher risk_perception associated with higher initial adoption probability.",
+          "strength": "Estimate via logistic regression; expected positive and significant."
+        },
+        {
+          "variables": [
+            "received_info(t)",
+            "wearing_mask(t+1)"
+          ],
+          "relationship": "Receiving info increases next-day adoption odds among previously unmasked.",
+          "strength": "Estimate as odds ratio; expected moderate-to-strong."
+        },
+        {
+          "variables": [
+            "neighbor_mask_share_by_layer(t)",
+            "adoption_hazard(t+1)"
+          ],
+          "relationship": "Adoption hazard increases with masked neighbor share; effect size varies by layer (family > work_school > community).",
+          "strength": "Estimate via multi-layer logistic model; expected positive with family strongest."
+        },
+        {
+          "variables": [
+            "age_group",
+            "layer_weights"
+          ],
+          "relationship": "Age group moderates influence weight per layer (e.g., students weight school more).",
+          "strength": "Estimate interaction terms; moderate."
+        },
+        {
+          "variables": [
+            "occupation",
+            "work_school_degree"
+          ],
+          "relationship": "Occupation strongly predicts work_school connections.",
+          "strength": "High; use as constraint in network synthesis."
+        },
+        {
+          "variables": [
+            "total_degree",
+            "probability_of_received_info"
+          ],
+          "relationship": "Higher degree may correlate with higher info receipt probability if info diffuses socially.",
+          "strength": "Assess via regression; uncertain without broadcast effects; likely positive."
+        },
+        {
+          "variables": [
+            "wearing_mask(t-1)",
+            "wearing_mask(t)"
+          ],
+          "relationship": "Strong persistence in behavior across days.",
+          "strength": "High; P(stay masked) and P(stay unmasked) both > 0.7 typically; quantify from data."
+        }
+      ]
+    },
+    "simulation_parameters": {
+      "population_and_network": {
+        "num_agents": {
+          "value": "Count of rows in agents CSV or number of keys in social_network.json",
+          "source": "agents CSV and social_network.json",
+          "confidence": "High",
+          "notes": "Ensure both sources align; reconcile if mismatch."
+        },
+        "degree_distribution_family": {
+          "value": "NegativeBinomial(r_fam, p_fam) fitted to family_connections or family adjacency",
+          "source": "agents CSV (family_connections) or social_network.json (family)",
+          "confidence": "Medium",
+          "notes": "If low overdispersion, Poisson is acceptable."
+        },
+        "degree_distribution_work_school": {
+          "value": "NegativeBinomial with occupation-stratified means",
+          "source": "agents CSV and social_network.json",
+          "confidence": "Medium",
+          "notes": "Fit separate parameters for Students vs White/Blue Collar vs Other."
+        },
+        "degree_distribution_community": {
+          "value": "Lognormal(mu_ln, sigma_ln) or Power-law tail with cutoff",
+          "source": "agents CSV and social_network.json",
+          "confidence": "Low",
+          "notes": "Choose by AIC/BIC; heavy tails typical for community contacts."
+        },
+        "assortativity_by_age_group": {
+          "value": "r_age_layer = {family: high, work_school: medium, community: low}",
+          "source": "social_network.json",
+          "confidence": "Medium",
+          "notes": "Compute Newman assortativity coefficients; enforce during synthetic wiring."
+        },
+        "assortativity_by_occupation": {
+          "value": "r_occ_work_school = medium-to-high",
+          "source": "social_network.json",
+          "confidence": "Medium",
+          "notes": "Constrain work/school edges to similar occupations or shared groups."
+        },
+        "reciprocity_rate": {
+          "value": "Proportion of edges that are mutual by layer",
+          "source": "social_network.json",
+          "confidence": "High",
+          "notes": "Symmetrize if undirected model is desired."
+        },
+        "layer_overlap": {
+          "value": "Jaccard overlaps between layers (J_fam_ws, J_fam_com, J_ws_com)",
+          "source": "social_network.json",
+          "confidence": "Medium",
+          "notes": "Useful for validating multiplex structure."
+        }
+      },
+      "layer_weights_and_contacts": {
+        "influence_weights": {
+          "value": {
+            "family": 0.5,
+            "work_school": 0.3,
+            "community": 0.2
+          },
+          "source": "Recommended prior; refine via calibration",
+          "confidence": "Low",
+          "notes": "Normalize to sum to 1; update using fit to adoption transitions."
+        },
+        "contact_frequency_per_day": {
+          "value": {
+            "family": 1.0,
+            "work_school": 0.6,
+            "community": 0.3
+          },
+          "source": "Recommended prior based on typical daily contact patterns",
+          "confidence": "Low",
+          "notes": "Use as weights if modeling contact-driven influence rather than static weights."
+        }
+      },
+      "behavior_dynamics": {
+        "baseline_adoption_hazard": {
+          "value": "Estimate p01_base = P(wear_t=1 | wear_{t-1}=0, no info, low neighbor masks)",
+          "source": "train_data.csv joined with network",
+          "confidence": "Medium",
+          "notes": "Compute from periods with received_info=0 and low neighbor_mask_share."
+        },
+        "peer_influence_coefficients": {
+          "value": {
+            "family": "beta_fam > 0",
+            "work_school": "beta_ws > 0",
+            "community": "beta_com > 0"
+          },
+          "source": "train_data.csv + social_network.json",
+          "confidence": "Medium",
+          "notes": "Estimate via logistic regression: logit(p01) = alpha + sum_w beta_layer * share_layer."
+        },
+        "risk_sensitivity": {
+          "value": "gamma_risk > 0 linking risk_perception to adoption propensity",
+          "source": "agents CSV + train_data.csv",
+          "confidence": "Medium",
+          "notes": "Model as interaction: logit(p01) includes gamma * risk_perception and risk x neighbor share terms."
+        },
+        "discontinuation_hazard": {
+          "value": "p10 = P(wear_t=0 | wear_{t-1}=1)",
+          "source": "train_data.csv",
+          "confidence": "High",
+          "notes": "Estimate overall and by info exposure; often lower than p01_base."
+        },
+        "adoption_function": {
+          "value": "Logistic choice with layer-weighted neighbor shares and individual risk modifier",
+          "source": "Design recommendation",
+          "confidence": "High",
+          "notes": "Alternatively, threshold model with thresholds drawn from Beta linked to risk_perception."
+        }
+      },
+      "information_dynamics": {
+        "info_broadcast_rate": {
+          "value": "rho_broadcast = baseline P(received_info_t=1) independent of network",
+          "source": "train_data.csv",
+          "confidence": "Medium",
+          "notes": "Estimate from periods with minimal neighbor info exposure if modeled separately."
+        },
+        "info_peer_spillover": {
+          "value": "phi_peer = effect of neighbors with info on one's received_info",
+          "source": "train_data.csv + social_network.json",
+          "confidence": "Low",
+          "notes": "Optional; only if modeling info diffusion endogenously."
+        },
+        "info_to_adoption_lag": {
+          "value": "Mean lag L_info\u2192adopt in days",
+          "source": "train_data.csv",
+          "confidence": "Medium",
+          "notes": "Use to set immediate vs delayed effect; can be 0\u20131 days typically."
+        },
+        "info_effect_multiplier": {
+          "value": "theta_info = multiplicative increase in adoption odds given info",
+          "source": "train_data.csv",
+          "confidence": "High",
+          "notes": "Estimate odds ratio from logistic regression with received_info as predictor."
+        }
+      },
+      "demographic_modifiers": {
+        "age_group_weight_adjustment": {
+          "value": "Delta weights per age_group (e.g., students: +0.2 to work_school, -0.1 family, -0.1 community)",
+          "source": "agents CSV + calibration",
+          "confidence": "Low",
+          "notes": "Constrain adjustments to keep weights in [0,1] and sum to 1."
+        },
+        "occupation_baseline_shift": {
+          "value": "alpha_occ: baseline adoption shift by occupation",
+          "source": "agents CSV + train_data.csv",
+          "confidence": "Medium",
+          "notes": "Include as fixed effects in adoption model."
+        }
+      },
+      "initialization_and_noise": {
+        "initial_mask_fraction": {
+          "value": "p_init from initial_mask_wearing or from earliest day in train_data.csv",
+          "source": "agents CSV and train_data.csv",
+          "confidence": "High",
+          "notes": "Use agents CSV if provided; otherwise derive from day 0/earliest observed."
+        },
+        "measurement_error_rate": {
+          "value": 0.0,
+          "source": "Assumption",
+          "confidence": "Low",
+          "notes": "Set >0 if evidence of reporting noise; otherwise assume perfect observation."
+        }
+      },
+      "scheduling": {
+        "time_step_days": {
+          "value": 1,
+          "source": "train_data.csv (day column)",
+          "confidence": "High",
+          "notes": "One simulation tick equals one day."
+        },
+        "update_scheme": {
+          "value": "Synchronous daily updates using states at t to determine transitions to t+1",
+          "source": "Design recommendation",
+          "confidence": "High",
+          "notes": "Ensures alignment with discrete-time data."
+        }
+      }
+    },
+    "calibration_strategy": {
+      "preprocessing_steps": [
+        {
+          "step": "Validate and coerce data types",
+          "purpose": "Ensure integers, floats in [0,1], and booleans are correctly parsed; fix capitalization and missing values."
+        },
+        {
+          "step": "Consistency checks on degrees",
+          "purpose": "Verify total_connections equals family + work_school + community; correct or flag inconsistencies."
+        },
+        {
+          "step": "Network hygiene",
+          "purpose": "Remove self-loops, deduplicate neighbors, enforce symmetry if needed, and recompute 'all' adjacency."
+        },
+        {
+          "step": "Merge datasets",
+          "purpose": "Join train_data.csv with agents CSV on agent_id; map network IDs to agent IDs; ensure full coverage."
+        },
+        {
+          "step": "Compute neighbor mask shares by layer per day",
+          "purpose": "Create time-varying covariates: share_family(t), share_work_school(t), share_community(t)."
+        },
+        {
+          "step": "Construct lag features",
+          "purpose": "Create wear_{t-1}, received_info_{t-1}, and rolling averages to model short lags."
+        },
+        {
+          "step": "Stratify by demographics and occupation",
+          "purpose": "Enable subgroup parameter estimation and interactions."
+        },
+        {
+          "step": "Estimate degree and risk distributions",
+          "purpose": "Fit parametric forms (Poisson/NegBin/Lognormal/Beta) for use in synthetic network generation."
+        }
+      ],
+      "calibration_approach": "Two-stage estimation with validation via simulation: (1) Information and behavior transitions: Fit discrete-time logistic regressions (or hierarchical Bayesian models) for adoption (P(wear_t=1 | wear_{t-1}=0)) and discontinuation (P(wear_t=0 | wear_{t-1}=1)). Predictors include received_info (current/lagged), layer-specific neighbor mask shares, risk_perception, degree, and demographic interactions. Estimate layer-specific peer influence coefficients and info effect multiplier. (2) Network parameters: Fit degree distributions and assortativities by layer from agents CSV or social_network.json; if synthesizing network, use configuration model per layer with attribute-constrained pairing to match assortativity and degree distributions. Optionally refine parameters via simulated method of moments to match observed adoption curves and transition rates. Use Bayesian priors for stability and to encode expected hierarchy (family > work_school > community influence).",
+      "validation_strategy": "Multi-level validation: (A) Micro-level: Out-of-sample predictive accuracy for next-day wearing_mask (AUC, log loss) using time-split validation. (B) Meso-level: Compare adoption/discontinuation hazards by degree quantile, age_group, occupation, and risk quartiles between simulation and data. (C) Macro-level: Compare aggregate adoption curves over time (RMSE, dynamic time warping) and peak timing. (D) Network-level: If synthesizing, validate degree distributions, assortativity, clustering coefficients, and layer overlaps against observed. (E) Policy sensitivity: Hold out periods with surges in received_info to verify model reproduces observed responsiveness. Use posterior predictive checks or bootstrap confidence intervals to assess uncertainty.",
+      "key_variables_to_calibrate": [
+        "baseline_adoption_hazard",
+        "peer_influence_coefficients_by_layer",
+        "info_effect_multiplier",
+        "discontinuation_hazard",
+        "influence_weights_by_layer",
+        "risk_sensitivity",
+        "degree_distribution_parameters_by_layer",
+        "assortativity_by_age_and_occupation",
+        "info_broadcast_rate",
+        "info_to_adoption_lag"
+      ]
+    },
+    "file_summaries": [
+      "- Data structure and type\n  - CSV of individual-level records; one row per agent.\n  - Mixed types: integers (agent_id, age, connection counts), categorical strings (age_group, occupation), float in [0,1] (risk_perception), boolean (initial_mask_wearing).\n\n- Meaning of columns\n  - agent_id: Unique agent identifier (row key).\n  - age, age_group: Demographics; age_group is derived from age.\n  - occupation: Socio-role; includes \u201cStudent,\u201d \u201cBlue Collar,\u201d \u201cWhite Collar,\u201d etc.\n  - risk_perception: Normalized propensity (0\u20131) to value/adhere to protective behavior; higher values imply lower adoption threshold or higher compliance probability.\n  - initial_mask_wearing: Seed state for behavior at t0.\n  - family_connections, work_school_connections, community_connections: Intended degrees per social layer; counts of contacts in each network layer.\n  - total_connections: Expected overall degree; should equal the sum of the three layer-specific counts.\n\n- Relationships or nested elements\n  - No nested structures; flat schema.\n  - Derived fields:\n    - age_group from age.\n    - total_connections \u2248 family + work_school + community (consistency check).\n  - Implicit multi-layer network: three contact layers (family, work/school, community) per agent; edges are not provided\u2014only target degrees.\n\n- How this data should inform simulation entities or interactions\n  - Agent initialization:\n    - Create one agent per row with attributes: demographics, occupation, risk_perception, initial_mask_wearing.\n  - Network construction:\n    - Build three layer-specific graphs using the provided degree sequences (e.g., configuration model per layer), then combine into a multiplex network.\n    - Optionally constrain pairing by attributes (e.g., higher assortativity by household for family, by occupation/age_group for work/school).\n  - Interaction scheduling:\n    - Use layer-specific connection counts to set contact frequencies and weights; family > work/school > community or as calibrated.\n  - Behavior update rule:\n    - Social influence: probability of adopting or maintaining mask-wearing depends on the proportion of masked neighbors per layer, weighted by layer importance.\n    - Individual heterogeneity: risk_perception modulates susceptibility (e.g., higher risk_perception lowers required social threshold or increases adoption probability).\n    - Demographic/role effects: age_group and occupation can adjust layer weights (e.g., students emphasize school layer) or baseline propensity.\n    - Seed state: initial_mask_wearing sets starting adopters for diffusion dynamics.\n  - Validation/processing notes:\n    - Verify total_connections equals sum of layer counts; ensure counts are non-negative integers.\n    - Convert booleans from CSV correctly.\n    - Since explicit edges, households, and workplaces are absent, synthesize group assignments consistent with degrees and attributes.",
+      "Semantic metadata summary for social_network.json\n\n- Overall data structure and type\n  - JSON object (dictionary) where each top-level key is an agent identifier (as a stringified integer).\n  - Each agent maps to an object containing multiple adjacency lists of other agent IDs (integers).\n\n- Meaning of keys or columns\n  - Top-level keys (e.g., \"0\", \"1\", \"2\"): unique agent IDs. Convert to integers for modeling convenience.\n  - Nested keys per agent:\n    - family: list of agent IDs with familial ties.\n    - work_school: list of agent IDs connected via workplace or school.\n    - community: list of agent IDs connected via broader community interactions.\n    - all: union of the above three lists (no self, duplicates removed).\n\n- Relationships or nested elements\n  - Multi-layer (multiplex) social network: three distinct relationship layers plus a precomputed union.\n  - Adjacency lists specify neighbors by layer; edges are unweighted and static in this file. Reciprocity is plausible but not guaranteed\u2014verify if the graph is undirected (i.e., if A lists B, ensure B lists A) or enforce symmetry during ingestion.\n  - No timestamps, contact frequencies, or strengths are provided; any weighting must be imposed by the simulation.\n  - Potential data hygiene considerations: duplicates, self-loops, or missing agents should be checked; \u201call\u201d can be recomputed from the three layers for validation.\n\n- How this data should inform simulation entities or interactions\n  - Agents: one agent per top-level key. Each agent holds:\n    - State variables (e.g., mask-wearing status, propensity/threshold, susceptibility).\n    - Layer-specific neighbor sets for family, work/school, and community.\n  - Interactions and influence:\n    - Use \u201cfamily\u201d, \u201cwork_school\u201d, and \u201ccommunity\u201d to model layer-specific influence with different weights or contact probabilities (e.g., family > work_school > community).\n    - Use \u201call\u201d for rules that do not distinguish layers or for performance when aggregating influence quickly.\n    - Policies can target layers (e.g., workplace mandates) by modifying influence or compliance parameters on that layer only.\n    - Seeding strategies can leverage degree (neighbors count) within layers to target hubs.\n  - Network construction:\n    - Build a multiplex graph: three edge sets over the same node set.\n    - Optionally collapse to a single-layer graph using \u201call\u201d when layer distinctions are unnecessary.\n    - Validate/repair symmetry if an undirected model is desired; otherwise, treat as directed influence edges.\n  - Dynamics:\n    - At each time step, compute adoption probability or threshold crossing from neighbors\u2019 current states, aggregated per layer with chosen weights.\n    - The absence of edge weights or frequencies implies the model must define contact rates or influence strengths externally.",
+      "Semantic metadata summary for train_data.csv\n\n- Data structure and type\n  - CSV file; each row is an observation for one agent on one discrete day (panel/time-series data).\n  - Columns: day (int), agent_id (int), wearing_mask (bool), received_info (bool).\n\n- Meaning of keys/columns\n  - day: Discrete timestep index for the simulation timeline.\n  - agent_id: Unique identifier for an agent (node) in the social network.\n  - wearing_mask: Agent\u2019s behavioral state at that timestep; true if wearing a mask.\n  - received_info: Agent\u2019s information state at that timestep; true if the agent received mask-related information during or before that day.\n\n- Relationships or nested elements\n  - No nesting; flat records.\n  - One-to-many relation: each agent_id has multiple rows across days (longitudinal trajectories).\n  - Temporal dependency: wearing_mask and received_info can change over time; past states may influence future states.\n  - No network topology provided; social connections must come from another source.\n\n- How this data should inform simulation entities or interactions\n  - Agent state variables:\n    - Behavior: wearing_mask(t)\n    - Information: received_info(t) and possibly memory of prior exposure\n  - Events/transitions to calibrate:\n    - Adoption: P(wearing_mask(t)=1 | wearing_mask(t-1)=0, received_info, neighbor behavior)\n    - Disadoption/decay: P(wearing_mask(t)=0 | wearing_mask(t-1)=1, \u2026)\n    - Information receipt: P(received_info(t)=1 | network exposures/broadcast)\n  - Parameter estimation:\n    - Derive transition probabilities/lag structures from observed sequences (e.g., hazard of adopting after info, persistence of wearing).\n    - Estimate baseline adoption without info vs. with info to separate social/broadcast effects.\n  - Initialization:\n    - Use earliest day per agent for initial states.\n    - Map booleans to 0/1 for modeling.\n  - Validation:\n    - Compare simulated aggregate adoption curves and per-agent switch rates against this training data.\n  - Missing components to supply externally:\n    - Social network graph, info diffusion mechanism, and any exogenous interventions/broadcast schedules."
+    ]
+  }
+}

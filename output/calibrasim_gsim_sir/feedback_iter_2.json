@@ -1,0 +1,178 @@
+{
+  "sbi-calibration-from-single-trajectory-cannot-generalize-across-heterogeneous-trajectories": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "objective: \"infer parameters from a single observed trajectory (train trajectory_id=0 only), then evaluate the inferred parameters on full train/val/test sets.\"",
+      "exogenous_signals: \"none_provided\" (constant parameters over time within a trajectory)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "DiscreteTimeSIRSimulator.rollout",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "train_loss=187.74 vs val_loss=320.64 and test_loss=272.32; large generalization gap; val_loss_per_dim shows S and R dominate (S=502.47, R=353.80)."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.1
+      }
+    ],
+    "error_identification": "Validation and test MSE are substantially worse than train, indicating the inferred global (beta,gamma) from trajectory 0 does not transfer to other trajectories.",
+    "root_cause_analysis": "The simulator assumes a single global beta and gamma apply to all trajectories, but the dataset likely contains multiple regimes or per-trajectory parameter variation (e.g., differing contact rates / recovery patterns). With only one observed trajectory used for SBI, the posterior mean is effectively fit to id=0 and cannot represent the full population of trajectories, creating irreducible validation error even if NPE is well-trained.",
+    "correct_approach": "Within the current blueprint constraints (still calibrate on trajectory_id=0 only), reduce cross-trajectory mismatch at evaluation by introducing a minimal, code-local heterogeneity mechanism that does not add new calibrated parameters: in DiscreteTimeSIRSimulator.step, compute an effective beta_t = beta * (N_ref / N_agent)^alpha with fixed alpha (e.g., 0.0 to 1.0) and N_ref taken from observation N (train id 0). This leverages known per-trajectory N differences already in data to partially align dynamics. Also, when computing infection probability, include S/N explicitly in hazard (e.g., p_inf = 1-exp(-beta*(I/N)) is already used; consider using p_inf = 1-exp(-beta*(I/N)) but apply binomial on S; keep as-is) and focus on population scaling across trajectories via this fixed adjustment. If N is constant across trajectories (no benefit), then acknowledge target \u22641e-6 is unrealistic and prioritize robustness rather than perfection.",
+    "key_insight": "When calibration is forced to a single trajectory but evaluation spans heterogeneous trajectories, add a principled, data-derived normalization (e.g., N-scaling) or accept an irreducible error floor; pure posterior training tweaks won\u2019t close the generalization gap."
+  },
+  "npe-training-data-leakage-through-shared-simulator-rng": {
+    "issue_type": "CODE_BUG",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "execution: \"simulate pairs (theta, x) by sampling theta from prior and rolling out the simulator\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Despite feature transforms, losses are unchanged from prior iteration; suggests training signal may be noisy/underpowered or simulation data generation is suboptimal."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      }
+    ],
+    "error_identification": "SBI uses a single DiscreteTimeSIRSimulator instance with one RNG stream for all simulated (theta,x) pairs, which can induce unwanted correlation between simulations and reduce effective sample diversity for NPE.",
+    "root_cause_analysis": "In SBINPECalibrator.fit, `simulator = DiscreteTimeSIRSimulator(self._rng)` is created once and reused for all simulations. This makes each subsequent simulation\u2019s randomness depend on how many random draws previous thetas consumed, creating order-dependent coupling and potentially reducing identifiability (especially for small simulation budgets).",
+    "correct_approach": "In SBINPECalibrator.fit, mirror the evaluation rollout seeding pattern: for each simulation n, draw a fresh seed from self._rng, create a local np.random.Generator from that seed, and instantiate a new DiscreteTimeSIRSimulator(local_rng) for that theta\u2019s rollout. This preserves independence of simulated x given theta and improves NPE training data quality without changing the simulator kernel.",
+    "key_insight": "For SBI, ensure each (theta, x) simulation is generated with an independent RNG stream; shared RNG state across simulations can silently reduce effective sample size and posterior quality."
+  },
+  "conservation-enforcement-adjusts-only-s-can-distort-dynamics": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "dynamic_states.conservation_adjustment: \"enforce S_{t+1}+I_{t+1}+R_{t+1}=N exactly by adjusting within valid bounds\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "DiscreteTimeSIRSimulator._enforce_conservation",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "DiscreteTimeSIRSimulator.step",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_conservation_violation_rate=0.0 (constraint met) but val_loss_per_dim is high, especially S and R, consistent with subtle bias in compartment updates."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "Conservation is enforced, but the correction method may bias S disproportionately, potentially shifting dynamics and degrading fit.",
+    "root_cause_analysis": "In _enforce_conservation, any mismatch is corrected primarily by adding `diff` to S (and only later clamping and recomputing R). This can systematically perturb S rather than distributing rounding/clamping corrections in a way that preserves the intended transition counts (new infections/recoveries). Because new infections are bounded by S and recoveries by I, biasing S post-hoc can feed back into subsequent dynamics and affect S/R errors most.",
+    "correct_approach": "Refactor _enforce_conservation so that conservation correction is applied to the compartment that is least semantically constrained for that step. For example: after computing (S1,I1,R1) from new_inf/new_rec, enforce bounds by first clamping S1 to [0,N], I1 to [0,N-S1], then set R1=N-S1-I1 (single final assignment) without an initial 'add diff to S'. Additionally, avoid modifying states before sampling within step; only enforce at the end of the step unless input state is invalid. This keeps corrections minimal and reduces systematic drift.",
+    "key_insight": "Constraint enforcement should be minimally invasive and semantically consistent; avoid always fixing conservation by altering the same compartment, or you introduce hidden bias that shows up as dimension-specific MSE."
+  },
+  "results-json-metrics-schema-mismatch-with-blueprint": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "io_contract.results_json.metrics_schema: train_mse_overall, val_mse_overall, val_mse_S, val_mse_I, val_mse_R, test_mse_overall, conservation_violation_rate"
+    ],
+    "code_refs": [
+      {
+        "symbol": "Evaluator.compute_metrics",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "save_results",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Program outputs metrics under keys train_loss/val_loss/test_loss and nested val_loss_per_dim, not the required metrics_schema names in the blueprint."
+    },
+    "metric_links": [],
+    "error_identification": "Output metrics naming does not match the blueprint IO contract, risking downstream evaluation misread or ignored fields even if simulation quality improves.",
+    "root_cause_analysis": "Evaluator.compute_metrics populates keys inconsistent with the required results.json schema. save_results writes these keys verbatim. If an external grader expects the blueprint schema, it may not correctly read metrics, potentially causing evaluation failure unrelated to simulation correctness.",
+    "correct_approach": "In Evaluator.compute_metrics and/or save_results, add the blueprint-required keys in parallel (do not remove existing keys to preserve backward compatibility): map train_loss->train_mse_overall, val_loss->val_mse_overall, test_loss->test_mse_overall, val_loss_per_dim.S->val_mse_S, etc., and val_conservation_violation_rate->conservation_violation_rate. Keep existing keys as additional diagnostics.",
+    "key_insight": "Always satisfy the exact output schema expected by the task spec; metric naming mismatches can negate real modeling improvements by breaking evaluation ingestion."
+  },
+  "environment-variable-hard-fail-reduces-portability": {
+    "issue_type": "CODE_BUG",
+    "severity": "low",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "initialization.data_reference.file: \"train_seed_10_n_100.csv\" (does not require env vars)",
+      "io_contract (no env var requirement specified)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "main",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "load_data",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "No crash in current run, but main will raise EnvironmentError if PROJECT_ROOT/DATA_PATH are absent."
+    },
+    "metric_links": [],
+    "error_identification": "Program requires PROJECT_ROOT and DATA_PATH environment variables and hard-fails otherwise, even though the blueprint only requires loading CSVs from a directory.",
+    "root_cause_analysis": "In main, the code raises EnvironmentError if env vars are missing, preventing use in environments where data_dir is known or fixed. This is not required by the blueprint and can cause avoidable runtime failures.",
+    "correct_approach": "Make env vars optional: if PROJECT_ROOT/DATA_PATH are not set, fall back to a default data directory (e.g., current working directory or a CLI argument like --data_dir). Since adding a new CLI arg is a structural change, the minimal patch is: if env vars missing, set data_dir to os.getcwd() (or cfg.output_dir\u2019s parent) and let load_data validate files. Keep the existing env-var snippet when provided.",
+    "key_insight": "Do not introduce mandatory environment dependencies unless explicitly required; prefer optional configuration with clear fallbacks and let file existence checks handle errors."
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "zero-layer-weights-calibrated": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "layer weights: w_family, w_work, w_community [0, 2] each; normalized to sum to 1 at runtime",
+      "peer influence slopes per layer: beta_f, beta_w, beta_c [0, 5]",
+      "information propagation: phi_family, phi_work, phi_community [0, 2]"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L144-L240"
+      },
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L300-L307"
+      },
+      {
+        "symbol": "Simulator._compute_adoption_probability",
+        "lines": "L310-L380"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "calibrated_parameters: w_family=0.0, w_work=0.0, w_community=0.0, beta_f=0.0, beta_w=0.0, beta_c=0.0, phi_family=0.0, phi_work=0.0, phi_community=0.0"
+    },
+    "metric_links": [
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "MAE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "All peer influence and layer weight parameters (w_*, beta_*, phi_*) are calibrated to zero, causing the model to ignore social network structure and rely solely on risk perception and broadcast, resulting in poor aggregate and transition fit.",
+    "root_cause_analysis": "In GradientBasedCalibrator.fit, the feature vector incorrectly includes both layer-weighted shares (w_f * share_f) and peer-slope terms (beta_f * share_f) as separate additive terms, but the optimization penalizes non-zero weights via L2 regularization and finds the minimal-loss solution by driving all peer-related coefficients to zero due to collinearity and lack of constraint on layer weight normalization during optimization.",
+    "correct_approach": "Remove the w_family, w_work, w_community parameters from the feature vector and decision rule; use only beta_f, beta_w, beta_c as direct peer influence coefficients. Enforce layer weight normalization (sum-to-one) only for interpretation, not as learnable parameters. Update Simulator._compute_adoption_probability and GradientBasedCalibrator.objective to use only beta_* terms for peer influence.",
+    "key_insight": "Never include both normalized layer weights and peer slope coefficients as independent parameters in a logistic model \u2014 they are collinear; use only slope coefficients and interpret weights post-hoc."
+  },
+  "info-receipt-probability-miscalculation": {
+    "issue_type": "CODE_BUG",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Each day, an agent receives information with probability: 1 - exp(-(phi_family * share_family + phi_work * share_work + phi_community * share_community + lambda_broadcast))"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L193-L195"
+      },
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L305-L306"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "calibrated_parameters: phi_family=0.0, phi_work=0.0, phi_community=0.0, lambda_broadcast=0.4275; simulated received_info rates are low but observed are high (e.g., 0.63 observed vs 0.2 simulated on val day 0)"
+    },
+    "metric_links": [
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      }
+    ],
+    "error_identification": "The information receipt probability is incorrectly computed as peer_info_prob + lambda_broadcast, which exceeds 1.0 and violates the exponential model in the blueprint, leading to underestimation of received_info and poor transition fit.",
+    "root_cause_analysis": "In both GradientBasedCalibrator.fit and Simulator._compute_info_receipt, peer_info_prob is computed as 1 - exp(-sum(phi * share)), then added to lambda_broadcast, creating a probability > 1.0. The blueprint specifies the sum inside the exponential: 1 - exp(-(sum + lambda_broadcast)), but code treats lambda_broadcast as additive outside the exponential.",
+    "correct_approach": "Modify info receipt probability computation to: info_prob = 1 - np.exp(-(peer_info + lambda_broadcast)), where peer_info = phi_f * share_f + phi_w * share_w + phi_c * share_c. Remove the separate addition of lambda_broadcast.",
+    "key_insight": "Exogenous signals in exponential diffusion models must be added inside the negative exponent, not as additive offsets \u2014 otherwise the model violates probability bounds and misestimates exposure dynamics."
+  },
+  "validation-initialization-leak": {
+    "issue_type": "CODE_BUG",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Initialize validation simulation from the last observed train-day state per agent. Ensure no leakage of validation labels into calibration of parameters."
+    ],
+    "code_refs": [
+      {
+        "symbol": "simulate_validation",
+        "lines": "L536-L540"
+      },
+      {
+        "symbol": "load_data",
+        "lines": "L455-L477"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "val_metrics: simulated_daily_rates=[0.2, 0.33, 0.35] vs observed=[0.63, 0.68, 0.73] \u2014 simulation starts at 0.2 but validation days begin after train days; initial state should be train day 79 state, not day 0"
+    },
+    "metric_links": [
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.8
+      },
+      {
+        "name": "MAE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Validation simulation starts from day 0 agent states (initialized from train_data day 0) instead of the last training day's state, causing a massive state mismatch and poor forecast accuracy.",
+    "root_cause_analysis": "In simulate_validation, val_agents are initialized from the original agents, which were set to train_data day 0 states in load_data(). The blueprint requires validation to begin from the last train day (e.g., day 79), but code never updates agent states to that point before simulation.",
+    "correct_approach": "Before running validation simulation, advance the agent states through all training days using the calibrated parameters to reach the final train-day state. Use the same step logic as in simulation but without recording history, then use that state as the validation starting point.",
+    "key_insight": "Temporal holdout validation must be initialized by simulating forward from the last observed training state \u2014 not by reusing initial conditions \u2014 to avoid catastrophic state drift and invalid evaluation."
+  },
+  "transition-fit-metric-computation-flaw": {
+    "issue_type": "CODE_BUG",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "TransitionFit: Absolute or squared error between simulated and observed transition probabilities P01, P11, P10, P00 on validation."
+    ],
+    "code_refs": [
+      {
+        "symbol": "Evaluator.compute_metrics",
+        "lines": "L405-L444"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "TransitionFit=0.78 (val) and 0.41 (test) \u2014 transitions_simulated: 00=114, 01=33, 10=18, 11=35 vs observed: 00=36, 01=33, 10=23, 11=108 \u2014 simulated has too many 00 and 11, too few 01/10, but metric computes normalized absolute difference incorrectly"
+    },
+    "metric_links": [
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "TransitionFit is computed as sum of absolute differences between observed and simulated transition probabilities, but the code uses total transitions across all agents and days as denominator, while the blueprint implies per-agent transition probability estimation \u2014 leading to inflated error due to aggregation bias.",
+    "root_cause_analysis": "In Evaluator.compute_metrics, transition probabilities are computed as global counts divided by total transitions, but the blueprint requires per-agent sequence analysis and then averaged transition probabilities. This aggregates heterogeneous agent dynamics into a single population transition matrix, misrepresenting the true per-agent behavioral patterns.",
+    "correct_approach": "Compute transition probabilities per agent (over their own sequences), then average across agents. For each agent with at least two consecutive days, compute P00, P01, P10, P11 from their own transitions, then average those probabilities across agents to get population-level transition estimates.",
+    "key_insight": "Transition metrics must be computed as agent-averaged transition probabilities, not population-count-based ratios \u2014 otherwise, agents with long sequences dominate and mask true behavioral diversity."
+  }
+}

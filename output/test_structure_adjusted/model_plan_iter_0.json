@@ -1,0 +1,426 @@
+{
+  "model_type": "agent_based",
+  "description": "A multi-layer social-network agent-based model where individuals decide daily whether to wear a mask based on prior behavior, risk perception, perceived norms within family/work/community layers, received information, and government mandates. Parameters are calibrated from days 0-29 and used to forecast days 30-39.",
+  "entities": [
+    {
+      "name": "PersonAgent",
+      "attributes": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "neighbors_family (set[int])",
+        "neighbors_work_school (set[int])",
+        "neighbors_community (set[int])",
+        "degree_family",
+        "degree_work_school",
+        "degree_community",
+        "total_connections"
+      ],
+      "behaviors": [
+        "UpdatePerceivedNorms",
+        "DecideMaskWearing",
+        "ReceiveBroadcastInfo",
+        "RelayPeerInfo",
+        "RespondToMandate"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "attributes_source": "agent_attributes.csv",
+          "network_source": "social_network.json",
+          "state_history_source": "train_data.csv",
+          "init_state_day": 0,
+          "override_initial_mask_wearing_with_train": true
+        }
+      }
+    },
+    {
+      "name": "GovernmentBroadcaster",
+      "attributes": [
+        "mask_mandate_schedule (dict[int->0/1])",
+        "campaign_intensity_schedule (dict[int->float])",
+        "targeting_rules (function or spec)"
+      ],
+      "behaviors": [
+        "BroadcastInfo",
+        "ApplyMandate"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "mask_mandate_start_day": 10,
+          "mask_mandate_default": 1,
+          "campaign_intensity_default": 0.0
+        }
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "UpdatePerceivedNorms",
+      "description": "Compute per-layer perceived norms as exponentially smoothed fractions of masked neighbors.",
+      "applicable_to": [
+        "PersonAgent"
+      ],
+      "parameters": {
+        "memory_decay": "float in [0,1]; 0 uses only current day, 1 accumulates full history",
+        "epsilon_degree": 1e-09
+      },
+      "algorithm": "For each layer L in {family, work_school, community}: frac_L(t) = (# neighbors in L wearing_mask at t-1) / max(1, degree_L). perceived_norm_L(t) = memory_decay * perceived_norm_L(t-1) + (1 - memory_decay) * frac_L(t). If degree_L == 0, carry forward perceived_norm_L(t-1) or default to global mean that day."
+    },
+    {
+      "name": "DecideMaskWearing",
+      "description": "Update mask intention via a role-specific logistic policy, then sample wearing_mask ~ Bernoulli(mask_intent).",
+      "applicable_to": [
+        "PersonAgent"
+      ],
+      "parameters": {
+        "temperature": "decision noise scaling > 0",
+        "role_specific_coeffs": "per-occupation logistic coefficients",
+        "age_group_dummies": "optional intercept adjustments"
+      },
+      "algorithm": "For agent i with occupation role R, compute z = b0_R + b_prev_R * mask_{t-1} + b_risk_R * risk_perception + wF_R * perceived_norm_family + wW_R * perceived_norm_work_school + wC_R * perceived_norm_community + b_info_R * received_info_t + b_man_R * mask_mandate_t + age_group_dummies. Optionally divide z by temperature. mask_intent = sigmoid(z). Draw wearing_mask_t ~ Bernoulli(mask_intent)."
+    },
+    {
+      "name": "ReceiveBroadcastInfo",
+      "description": "Governmental broadcast exposes targeted agents to information.",
+      "applicable_to": [
+        "PersonAgent",
+        "GovernmentBroadcaster"
+      ],
+      "parameters": {
+        "campaign_intensity": "probability in [0,1] per targeted agent per day",
+        "targeting_rules": "cohorts to target (e.g., by occupation, low adoption clusters, or all)"
+      },
+      "algorithm": "On day t, for each targeted agent i, set received_info_i,t = 1 with probability campaign_intensity(t); otherwise 0 unless already set by peer relay."
+    },
+    {
+      "name": "RelayPeerInfo",
+      "description": "Informed agents may pass info to their neighbors as a per-edge stochastic event.",
+      "applicable_to": [
+        "PersonAgent"
+      ],
+      "parameters": {
+        "gamma_info": "per-edge relay probability in [0,1]"
+      },
+      "algorithm": "For each informed agent i and for each neighbor j across all layers, if received_info_i,t == 1 then set received_info_j,t = 1 with probability gamma_info (if not already 1)."
+    },
+    {
+      "name": "RespondToMandate",
+      "description": "Mandate adds a positive shift in the adoption logit; optional occupation multipliers for compliance.",
+      "applicable_to": [
+        "PersonAgent",
+        "GovernmentBroadcaster"
+      ],
+      "parameters": {
+        "b_man": "logit weight of mandate",
+        "occupation_multipliers": "multiplicative or additive adjustments"
+      },
+      "algorithm": "mask_mandate_t provided by GovernmentBroadcaster. Contribution b_man_R * mask_mandate_t is added to z in DecideMaskWearing; optionally scale by occupation multiplier."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "PeerInfluenceByLayer",
+      "description": "Per-layer social influence via perceived norms computed from neighbors' mask states.",
+      "entities_involved": [
+        "PersonAgent"
+      ],
+      "trigger": "time (daily update)",
+      "effect": "Adjusts adoption logit via wF, wW, wC times perceived norms."
+    },
+    {
+      "name": "InformationBroadcast",
+      "description": "Exogenous information exposure from GovernmentBroadcaster to agents.",
+      "entities_involved": [
+        "GovernmentBroadcaster",
+        "PersonAgent"
+      ],
+      "trigger": "time (daily schedule)",
+      "effect": "Sets received_info=1 for exposed agents; increases adoption via b_info."
+    },
+    {
+      "name": "PeerInformationRelay",
+      "description": "Informed agents can inform neighbors over existing edges.",
+      "entities_involved": [
+        "PersonAgent"
+      ],
+      "trigger": "time (daily update after broadcast)",
+      "effect": "Spreads received_info to neighbors with probability gamma_info per edge."
+    },
+    {
+      "name": "MandateEffect",
+      "description": "System-wide mandate that increases adoption propensity.",
+      "entities_involved": [
+        "GovernmentBroadcaster",
+        "PersonAgent"
+      ],
+      "trigger": "time (from day 10 onward or per schedule)",
+      "effect": "Adds b_man to logit; optional enforcement boosts work/school weight."
+    }
+  ],
+  "environment": {
+    "type": "network",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "parameters": {
+    "b0": {
+      "range": [
+        -5.0,
+        5.0
+      ],
+      "description": "Baseline bias (intercept) for logistic adoption; role-specific variants allowed"
+    },
+    "b_prev": {
+      "range": [
+        0.0,
+        5.0
+      ],
+      "description": "Inertia of prior-day mask wearing; role-specific"
+    },
+    "b_risk": {
+      "range": [
+        -5.0,
+        5.0
+      ],
+      "description": "Effect of risk_perception on adoption; role-specific"
+    },
+    "wF": {
+      "range": [
+        0.0,
+        3.0
+      ],
+      "description": "Influence weight of family norms; role-specific"
+    },
+    "wW": {
+      "range": [
+        0.0,
+        3.0
+      ],
+      "description": "Influence weight of work/school norms; role-specific"
+    },
+    "wC": {
+      "range": [
+        0.0,
+        3.0
+      ],
+      "description": "Influence weight of community norms; role-specific"
+    },
+    "b_info": {
+      "range": [
+        0.0,
+        5.0
+      ],
+      "description": "Effect of received_info on adoption; role-specific"
+    },
+    "b_man": {
+      "range": [
+        0.0,
+        5.0
+      ],
+      "description": "Effect of mask mandate; role-specific"
+    },
+    "age_group_multipliers": {
+      "range": [
+        -2.0,
+        2.0
+      ],
+      "description": "Additive adjustments to logit by age_group"
+    },
+    "occupation_multipliers": {
+      "range": [
+        -2.0,
+        2.0
+      ],
+      "description": "Adjustments by occupation (either on intercept or layer weights)"
+    },
+    "memory_decay": {
+      "range": [
+        0.0,
+        1.0
+      ],
+      "description": "Smoothing of perceived norms over days"
+    },
+    "gamma_info": {
+      "range": [
+        0.0,
+        1.0
+      ],
+      "description": "Per-edge probability of relaying info"
+    },
+    "campaign_intensity": {
+      "range": [
+        0.0,
+        1.0
+      ],
+      "description": "Daily broadcast exposure probability for targeted agents"
+    },
+    "temperature": {
+      "range": [
+        0.1,
+        5.0
+      ],
+      "description": "Decision noise scaling (higher equals more randomness)"
+    },
+    "mandate_schedule": {
+      "default": {
+        "start_day": 10,
+        "value": 1
+      },
+      "description": "Day-indexed schedule of mandate on/off"
+    },
+    "contact_layer_weights_enforcement_boost": {
+      "default": {
+        "work_school_multiplier_when_mandate": 1.0
+      },
+      "description": "Optional multiplier on wW during mandate to represent enforcement"
+    }
+  },
+  "initialization": {
+    "population_size": "Number of unique agent_ids in intersection of agent_attributes.csv and social_network.json keys",
+    "random_seed": 42,
+    "network_processing": {
+      "symmetrize_edges": true,
+      "deduplicate_neighbors": true,
+      "validate_degrees_against_csv": true,
+      "prefer_network_json_on_conflict": true,
+      "avoid_double_count_across_layers": true
+    },
+    "state_initialization": {
+      "use_train_day0": true,
+      "fallback_to_initial_mask_wearing": true,
+      "received_info_from_train": true
+    },
+    "scenario": {
+      "mask_mandate_start_day": 10,
+      "campaign_intensity_schedule": "dict[int->float], default 0 unless specified",
+      "peer_relay_enabled": true
+    },
+    "calibration": {
+      "train_range_days": [
+        0,
+        29
+      ],
+      "holdout_strategy": "temporal_holdout within days 0-29 for model selection; final refit on days 0-29 for forecasting 30-39"
+    }
+  },
+  "algorithms": {
+    "NetworkBuildAndValidation": "Load social_network.json; for each agent, parse lists into sets per layer; symmetrize: if u lists v in any layer, add undirected edge in that layer; deduplicate; compute degrees; compare to agent_attributes.csv degree columns; log discrepancies; proceed with network.json as authoritative for edges.",
+    "PerceivedNormsUpdate": "For each agent and layer L, compute frac_L(t) from neighbors' wearing_mask at t-1; update perceived_norm_L(t) via exponential smoothing using memory_decay.",
+    "RoleSpecificLogisticPolicy": "Estimate logistic regressions per occupation role: wear_t ~ mask_{t-1} + risk_perception + perc_norm_family + perc_norm_work_school + perc_norm_community + received_info_t + mandate_t + age_group_dummies. Use statsmodels or sklearn with L2 regularization (C chosen via inner temporal CV) and clustered SEs optional. If some roles have few samples, use hierarchical shrinkage to a global model.",
+    "InformationDynamics": "On day t: (1) Broadcast: for targeted agents, set received_info=Bernoulli(campaign_intensity(t)); (2) Peer relay: for each informed agent, for each neighbor across layers, set neighbor.received_info=1 with probability gamma_info; ensure received_info is binary OR of sources.",
+    "DailySimulationStep": "Order per day t: (a) Set mask_mandate_t from schedule; (b) Apply BroadcastInfo; (c) Apply PeerInformationRelay; (d) UpdatePerceivedNorms using t-1 states; (e) DecideMaskWearing for all agents to get wearing_mask_t; (f) Log outputs.",
+    "CalibrationProcedure": "Compute perceived norms for days 1..29 using observed wearing_mask(t-1) to align predictors; fit role-specific logistic models on training portion (0..floor(0.8*T)-1); select hyperparameters via temporal holdout; then refit on all days 0..29 with chosen settings for final forecasting.",
+    "Forecasting": "Initialize at end of day 29 with observed wearing_mask_29; simulate days 30..39 using calibrated parameters and scenario-driven received_info/mandate; output per-agent probabilities and sampled states.",
+    "Evaluation": "For temporal holdout within 0..29: compute RMSE_aggregate, MAE_aggregate, Brier, and TransitionFit between simulated vs observed. For 30..39: if ground truth becomes available, compute same; otherwise report predicted aggregates and uncertainties."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agent attributes and validate network degrees",
+      "fields_used": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "initial_mask_wearing",
+        "family_connections",
+        "work_school_connections",
+        "community_connections",
+        "total_connections"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Construct multiplex social network layers",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibrate model parameters and initialize day-0 and history for norms",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.yaml",
+        "description": "Configuration for paths, random seeds, schedules, and hyperparameters"
+      },
+      {
+        "name": "data_loader.py",
+        "description": "Load CSV/JSON data, clean types, merge IDs, and provide dataframes/structures"
+      },
+      {
+        "name": "network_builder.py",
+        "description": "Build multiplex network, symmetrize edges, validate degrees, expose neighbor queries"
+      },
+      {
+        "name": "agents.py",
+        "description": "Define PersonAgent and GovernmentBroadcaster classes and their state containers"
+      },
+      {
+        "name": "policies.py",
+        "description": "Role-specific logistic policy implementation and parameter container"
+      },
+      {
+        "name": "calibration.py",
+        "description": "Prepare panel features (lags, norms, signals) and fit logistic models with temporal holdout"
+      },
+      {
+        "name": "simulation.py",
+        "description": "Main simulation loop implementing daily order of updates and state transitions"
+      },
+      {
+        "name": "information.py",
+        "description": "Broadcast and peer relay mechanisms for received_info state updates"
+      },
+      {
+        "name": "evaluation.py",
+        "description": "Compute RMSE, MAE, Brier, TransitionFit metrics and produce diagnostic summaries"
+      },
+      {
+        "name": "scenarios.py",
+        "description": "Define and manage policy schedules (mandate, campaign intensity, targeting)"
+      },
+      {
+        "name": "run.py",
+        "description": "Entry point to calibrate, simulate, and evaluate; outputs predictions for days 30-39"
+      }
+    ],
+    "dependencies": [
+      "pandas",
+      "numpy",
+      "networkx",
+      "scipy",
+      "statsmodels",
+      "scikit-learn",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE_aggregate",
+    "MAE_aggregate",
+    "Brier",
+    "TransitionFit"
+  ]
+}

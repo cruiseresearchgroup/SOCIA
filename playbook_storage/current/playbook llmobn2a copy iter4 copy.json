@@ -1,0 +1,86 @@
+{
+  "strategies": {
+    "stop-count-mae-high-from-no-2021-calibrated-stopcount-shift-structure": {
+      "reflection": {
+        "blueprint_refs": [
+          "theta_stop_count_multiplier",
+          "baseline_stop_count_dist: \"fit a per-user distribution\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "Resident.simulate_day"
+          },
+          {
+            "symbol": "Resident._tilt_count_pmf_to_target_mean"
+          }
+        ],
+        "evidence": {
+          "metrics": "stop_count_abs_mean_error=1.9610; stop_count_kl=0.0834"
+        },
+        "error_identification": "Stop-count error is large (~2 visits/day MAE), indicating daily chain length is not being matched well.",
+        "root_cause_analysis": "Stop count is sampled by tilting the 2019–2020 per-user PMF to match a scaled mean (theta_stop_count_multiplier). This single scalar mean-tilt may not reproduce 2021’s changed distribution shape (e.g., heavier tails or mass shifts), and the clamp of start_min with `start_min = min(start_min, end_min - (stop_count-1))` plus remaining-budget gap compression can create implicit correlations that distort realized stop counts vs what the PMF intended across users/day-types.",
+        "correct_approach": "Calibrate a distribution-shape adjustment, not just mean scaling: e.g., add a temperature/dispersion parameter for stop counts (tilt strength) or fit a 2021-validation correction table per daytype (weekday/weekend) at the population level. Also log realized stop_count histogram on V_calib to verify tilt works before time-feasibility adjustments; ensure feasibility logic does not implicitly reduce/increase stops (it currently doesn’t drop stops, but it can force extremely small gaps and end-of-day piling).",
+        "metric_links": [
+          {
+            "name": "stop_count_abs_mean_error"
+          },
+          {
+            "name": "stop_count_kl"
+          }
+        ]
+      }
+    },
+    "time-of-day-mismatch-from-single-global-shift-and-gap-sampling": {
+      "reflection": {
+        "blueprint_refs": [
+          "theta_start_time_shift_minutes",
+          "baseline_inter_event_time_dist",
+          "time_of_day_emd"
+        ],
+        "code_refs": [
+          {
+            "symbol": "Resident.simulate_day"
+          },
+          {
+            "symbol": "Evaluator.compute_metrics"
+          }
+        ],
+        "evidence": {
+          "metrics": "tod_jsd_avg=0.0563"
+        },
+        "error_identification": "Time-of-day distribution divergence is moderate (tod_jsd_avg≈0.056), indicating visit-time placement is not well-matched.",
+        "root_cause_analysis": "The simulator uses a single global start-time shift parameter for all users/days and then samples gaps from an unconditional gap pool per daytype, with additional remaining-budget compression. This can distort the intra-day temporal structure (e.g., clustering visits late/near end-of-day or compressing gaps) and cannot capture heterogeneous 2021 temporal shifts (weekday/weekend or user-specific changes).",
+        "correct_approach": "Make time shift conditional (at least by daytype, ideally by user cluster) and fit a gap model conditioned on time-of-day or previous category (as allowed by blueprint). Replace hard budget compression with a forward scheduling model: sample a normalized set of inter-visit proportions (Dirichlet over remaining time) then scale to fit the day, preserving shape while ensuring feasibility.",
+        "metric_links": [
+          {
+            "name": "tod_jsd_avg"
+          }
+        ]
+      }
+    },
+    "distance-metric-unstable-due-to-high-coordinate-missingness": {
+      "reflection": {
+        "blueprint_refs": [
+          "radius_of_gyration_error metric requires POI lat/lon; handle missing POIs by excluding those visits",
+          "radius_of_gyration_error definition"
+        ],
+        "code_refs": [
+          {
+            "symbol": "Evaluator.compute_metrics"
+          }
+        ],
+        "evidence": {
+          "metrics": "trip_distance_wasserstein=0.5255; diagnostics show gt_missing_step_fraction≈0.70 vs sim_missing_step_fraction≈0.62"
+        },
+        "error_identification": "Trip distance Wasserstein is moderate (0.525) but computed under severe coordinate missingness mismatch between GT and sim, making it noisy and hard to optimize reliably.",
+        "root_cause_analysis": "Evaluator mixes paired-step distances when possible, else falls back to marginal steps. With ~70% GT step coordinate missingness and ~62% sim missingness, the set of scored steps differs systematically. This can bias the distance distribution comparison and create unstable gradients for calibration (random search may chase noise).",
+        "correct_approach": "Enforce identical missingness policy between GT and sim for this metric: compute distances only on POI tokens that have coordinates in both sequences under an explicit matching rule (e.g., align by step index and require both endpoints in both sequences), and if coverage drops below a threshold, report metric as NaN and exclude from objective for that trial with logged coverage. Alternatively, pre-filter days with sufficient coordinate coverage for distance scoring and calibrate distance only on those.",
+        "metric_links": [
+          {
+            "name": "trip_distance_wasserstein",
+          }
+        ]
+      }
+    }
+  }
+}

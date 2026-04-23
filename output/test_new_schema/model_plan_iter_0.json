@@ -1,0 +1,422 @@
+{
+  "model_type": "agent_based",
+  "description": "Multiplex network agent-based simulation of mask-wearing behavior diffusion with logistic state-updates driven by persistence, information exposure, peer influence by layer, individual risk perception, and a government intervention starting Day 10.",
+  "entities": [
+    {
+      "name": "Agent",
+      "attributes": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "mask_state",
+        "mask_state_prev",
+        "neighbors_family",
+        "neighbors_work_school",
+        "neighbors_community",
+        "deg_family",
+        "deg_work_school",
+        "deg_community",
+        "received_info_today",
+        "received_info_lag1",
+        "adoption_propensity",
+        "abandonment_propensity"
+      ],
+      "behaviors": [
+        "ReceiveInformation",
+        "ComputePeerExposure",
+        "UpdateMaskState",
+        "ShareInformationOptional"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "attributes_file": "data_fitting/mask_adoption_data/agent_attributes.csv",
+          "train_timeseries_file": "data_fitting/mask_adoption_data/train_data.csv",
+          "network_file": "data_fitting/mask_adoption_data/social_network.json",
+          "use_provided_network": "auto_true_if_file_exists",
+          "symmetrize_family": true,
+          "directed_layers": {
+            "work_school": "auto_decide",
+            "community": "auto_decide"
+          },
+          "initial_mask_from_day0": true
+        }
+      }
+    },
+    {
+      "name": "GovernmentPolicy",
+      "attributes": [
+        "intervention_day",
+        "info_shock_additive_logit",
+        "info_rate_multiplier",
+        "abandonment_reduction",
+        "targeting_rules"
+      ],
+      "behaviors": [
+        "BroadcastCampaign",
+        "ApplyMandateEffects"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "intervention_day": 10,
+          "info_shock_additive_logit": 0.0,
+          "info_rate_multiplier": 1.5,
+          "abandonment_reduction": 0.0,
+          "targeting_rules": {
+            "by_occupation": [],
+            "by_age_group": []
+          }
+        }
+      }
+    },
+    {
+      "name": "MetricsCollector",
+      "attributes": [
+        "daily_prevalence",
+        "daily_adoption_rate",
+        "daily_abandonment_rate",
+        "spell_lengths",
+        "stratified_prevalence"
+      ],
+      "behaviors": [
+        "RecordDailyMetrics",
+        "ComputeEvaluationMetrics"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {}
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "ReceiveInformation",
+      "description": "Agents receive exogenous information events and optional neighbor-driven info, with boosts after government intervention.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "lambda_info_base": "to_calibrate_from_train",
+        "neighbor_info_prob": 0.0,
+        "policy_info_rate_multiplier": "from GovernmentPolicy"
+      },
+      "algorithm": "For each agent i: p_info = lambda_info_base; if current_day >= intervention_day then p_info *= info_rate_multiplier. Optional: If neighbor_info_prob > 0, increase p_info by neighbor_info_prob * fraction_of_informed_neighbors_prev. Draw received_info_today ~ Bernoulli(p_info). Set received_info_lag1 = 1 if agent received info on previous day else 0."
+    },
+    {
+      "name": "ComputePeerExposure",
+      "description": "Compute fraction of masked neighbors per network layer using previous-day states.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "layers": [
+          "family",
+          "work_school",
+          "community"
+        ],
+        "edge_directionality": {
+          "family": "undirected",
+          "work_school": "directed_or_undirected_auto",
+          "community": "directed_or_undirected_auto"
+        },
+        "layer_weights": {
+          "family": 0.5,
+          "work_school": 0.3,
+          "community": 0.2
+        }
+      },
+      "algorithm": "For each layer l in {family, work_school, community}, compute frac_masked_l = (# of neighbors in layer l with mask_state_prev == 1) / (degree in layer l; define 0 if degree=0). Optionally cap influence by daily_contacts per layer. Store per-layer fractions and a weighted exposure = sum_l (layer_weights[l] * frac_masked_l)."
+    },
+    {
+      "name": "UpdateMaskState",
+      "description": "Logistic adoption/continuation decision with persistence, exogenous info effects, peer influence by layer, and individual risk perception.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "adoption_model": {
+          "form": "logistic",
+          "alpha": "to_calibrate",
+          "rho_persistence": "to_calibrate",
+          "beta_info_0": "to_calibrate",
+          "beta_info_1": "to_calibrate_or_zero",
+          "beta_family": "to_calibrate",
+          "beta_work_school": "to_calibrate",
+          "beta_community": "to_calibrate",
+          "beta_risk": "to_calibrate",
+          "gamma_demographics": "optional"
+        },
+        "policy_effects": {
+          "mandate_additive_logit": "from GovernmentPolicy.info_shock_additive_logit",
+          "abandonment_reduction": "from GovernmentPolicy.abandonment_reduction"
+        }
+      },
+      "algorithm": "For agent i at day t: Compute linear predictor z = alpha + rho_persistence * mask_state_prev + beta_info_0 * received_info_today + beta_info_1 * received_info_lag1 + beta_family * frac_masked_family + beta_work_school * frac_masked_work_school + beta_community * frac_masked_community + beta_risk * risk_perception + gamma_demographics' * X_i. If day >= intervention_day then z += mandate_additive_logit. Convert to probability p = 1 / (1 + exp(-z)). Sample mask_state ~ Bernoulli(p). Optionally implement explicit abandonment hazard: if mask_state_prev == 1, reduce abandonment probability by abandonment_reduction."
+    },
+    {
+      "name": "ShareInformationOptional",
+      "description": "Optional social info transmission mechanism from masked neighbors to unmasked agents.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "p_share_if_masked": 0.0
+      },
+      "algorithm": "If enabled: For unmasked agents, probability to receive_info increases by p_share_if_masked * fraction_masked_neighbors_all."
+    },
+    {
+      "name": "BroadcastCampaign",
+      "description": "Government policy elevates information exposure and/or shifts adoption propensity after Day 10.",
+      "applicable_to": [
+        "GovernmentPolicy"
+      ],
+      "parameters": {
+        "intervention_day": 10,
+        "info_rate_multiplier": 1.5,
+        "info_shock_additive_logit": 0.0,
+        "abandonment_reduction": 0.0
+      },
+      "algorithm": "At start of each day: if current_day >= intervention_day then set global info multipliers and additive logit shifts accessible by agents' UpdateMaskState and ReceiveInformation."
+    },
+    {
+      "name": "RecordDailyMetrics",
+      "description": "Collect prevalence, transition rates, and spell-length statistics.",
+      "applicable_to": [
+        "MetricsCollector"
+      ],
+      "parameters": {},
+      "algorithm": "After all agents update: prevalence_t = mean(mask_state). adoption_rate_t = # {mask_state_prev=0 and mask_state=1} / # {mask_state_prev=0}. abandonment_rate_t = # {mask_state_prev=1 and mask_state=0} / # {mask_state_prev=1}. Update wearing spell lengths for agents currently in wearing spells. Store stratified prevalence by age_group and occupation."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "PeerInfluenceByLayer",
+      "description": "Agents influence each other's adoption through layer-specific masked neighbor fractions computed from previous-day states.",
+      "entities_involved": [
+        "Agent",
+        "Agent"
+      ],
+      "trigger": "time",
+      "effect": "Modulates adoption probability via beta_family, beta_work_school, beta_community coefficients."
+    },
+    {
+      "name": "InformationExposure",
+      "description": "Agents receive exogenous information; optional neighbor-originating information.",
+      "entities_involved": [
+        "Agent"
+      ],
+      "trigger": "time",
+      "effect": "Increases adoption probability through beta_info coefficients; may also decrease abandonment indirectly."
+    },
+    {
+      "name": "GovernmentIntervention",
+      "description": "Policy intervention starting Day 10 alters info rates and/or adoption log-odds.",
+      "entities_involved": [
+        "GovernmentPolicy",
+        "Agent"
+      ],
+      "trigger": "time",
+      "effect": "Multiplies info arrival rate, adds to adoption logit, and can reduce abandonment."
+    }
+  ],
+  "environment": {
+    "type": "network_multiplex",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "parameters": {
+    "simulation_horizon_days": 40,
+    "adoption_model": {
+      "form": "logistic",
+      "alpha": "to_calibrate",
+      "rho_persistence": "to_calibrate",
+      "beta_info_0": "to_calibrate",
+      "beta_info_1": "to_calibrate_or_zero",
+      "beta_family": "to_calibrate",
+      "beta_work_school": "to_calibrate",
+      "beta_community": "to_calibrate",
+      "beta_risk": "to_calibrate",
+      "gamma_demographics": "optional_dict"
+    },
+    "layer_weights": {
+      "family": 0.5,
+      "work_school": 0.3,
+      "community": 0.2
+    },
+    "daily_contacts": {
+      "scale_factors": {
+        "family": 1.0,
+        "work_school": 0.6,
+        "community": 0.3
+      },
+      "cmax": {
+        "family": 6,
+        "work_school": 10,
+        "community": 12
+      }
+    },
+    "information_process": {
+      "lambda_info_base": "to_calibrate_from_train",
+      "neighbor_info_prob": 0.0
+    },
+    "policy": {
+      "intervention_day": 10,
+      "info_rate_multiplier": 1.5,
+      "info_shock_additive_logit": 0.0,
+      "abandonment_reduction": 0.0,
+      "targeting_rules": {
+        "by_occupation": [],
+        "by_age_group": []
+      }
+    },
+    "network_options": {
+      "use_provided_network": "auto_true_if_file_exists",
+      "symmetrize_family": true,
+      "directed_layers": {
+        "work_school": "auto_decide_by_reciprocity",
+        "community": "auto_decide_by_reciprocity"
+      },
+      "avoid_double_count_overlap": true
+    },
+    "risk_perception_distribution": {
+      "type": "Beta",
+      "a": "fit_from_data",
+      "b": "fit_from_data"
+    },
+    "random_seed": 42
+  },
+  "initialization": {
+    "population_size": "infer_from_data",
+    "random_seed": 42,
+    "steps": [
+      "Load agent_attributes.csv; validate degrees and ranges.",
+      "Load train_data.csv; construct panel with day 0..29; set each agent's mask_state at day 0.",
+      "If social_network.json exists: ingest multiplex adjacency; compute reciprocity per layer; symmetrize family; decide directionality for other layers based on reciprocity threshold (e.g., if reciprocity < 0.4 keep directed). If no network, generate per-layer configuration-model graphs matching degree targets and homophily by age_group and occupation.",
+      "Merge attributes with time series; ensure one row per (agent,day); compute mask_state_prev and info lags.",
+      "Stage 1 calibration: fit logistic model without peer terms to estimate alpha, rho_persistence, beta_info_0, beta_info_1, beta_risk, and optional demographics.",
+      "If network available: augment regression with lagged peer exposure per layer to estimate beta_family, beta_work_school, beta_community. Else Stage 2: simulation-based calibration (SMM/ABC) to fit peer coefficients and layer weights to match prevalence and transition moments.",
+      "Fit lambda_info_base from received_info frequency in training data.",
+      "Optionally fit abandonment-specific hazard from wearing to not-wearing transitions and map into rho/alpha adjustments.",
+      "Set policy parameters; validate intervention starts at Day 10."
+    ]
+  },
+  "algorithms": {
+    "SimulationLoop": "For day t in 0..T-1: 1) For all agents, set mask_state_prev = mask_state. 2) GovernmentIntervention: update global policy effects if t >= intervention_day. 3) ReceiveInformation for all agents. 4) ComputePeerExposure for all agents using states at t. 5) UpdateMaskState for all agents synchronously to obtain states at t+1. 6) RecordDailyMetrics.",
+    "LogisticUpdate": "p = 1 / (1 + exp(-(alpha + rho*mask_prev + beta_info_0*info_t + beta_info_1*info_{t-1} + sum_l beta_l*frac_masked_l + beta_risk*risk + gamma*X + mandate_shift))). Sample Bernoulli(p).",
+    "NetworkGeneration": "If needed, build each layer via configuration model with degree sequence from attributes; enforce even sum of degrees; apply homophily mixing matrices by age_group and occupation; add triadic closure to match clustering if specified.",
+    "PeerExposureComputation": "For each layer and agent, compute masked fraction from previous-day neighbor states; handle zero-degree safely.",
+    "CalibrationStage1": "Logistic regression or mixed-effects: mask_t ~ mask_{t-1} + received_info_t + received_info_{t-1} + risk_perception + demographics.",
+    "CalibrationStage2": "If network available: logistic with peer fractions. Else SMM/ABC: sample beta_family/work/community and layer_weights; simulate days 0..29; minimize distance between observed and simulated moments (prevalence path, adoption/abandonment rates, spell-length distribution).",
+    "Evaluation": "Using held-out days 30..39, compute RMSE of prevalence, Peak Adoption Rate Error, and Time-to-Peak Error against observed if available."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agents (demographics, risk, initial degrees); network generation targets if adjacency absent.",
+      "fields_used": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "initial_mask_wearing",
+        "family_connections",
+        "work_school_connections",
+        "community_connections",
+        "total_connections"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Construct empirical multiplex network per layer; compute reciprocity and degrees.",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibrate transition dynamics and information process; set initial states at day 0; validate persistence and hazards.",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.yaml",
+        "description": "Configuration for parameters, paths, policy settings, and toggles."
+      },
+      {
+        "name": "data_loader.py",
+        "description": "Load and validate CSV/JSON; merge datasets; create lags; compute degrees and reciprocity."
+      },
+      {
+        "name": "network_builder.py",
+        "description": "Ingest or generate multiplex network; symmetrization; homophily mixing; clustering adjustments."
+      },
+      {
+        "name": "agents.py",
+        "description": "Agent and GovernmentPolicy class definitions with attributes and behavior methods."
+      },
+      {
+        "name": "dynamics.py",
+        "description": "Core behavior algorithms: information arrival, peer exposure, logistic update, policy effects."
+      },
+      {
+        "name": "calibration.py",
+        "description": "Stage 1 logistic fitting; Stage 2 SMM/ABC; parameter persistence."
+      },
+      {
+        "name": "simulate.py",
+        "description": "Main simulation loop; initialization; stepping; metrics collection."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Compute daily/stratified metrics and evaluation metrics (RMSE, peak error, time-to-peak)."
+      },
+      {
+        "name": "evaluation.py",
+        "description": "Run prediction for days 30-39 and compare with observed if available."
+      },
+      {
+        "name": "utils.py",
+        "description": "Utility functions: random seeds, logging, reproducibility, plotting (optional)."
+      },
+      {
+        "name": "main.py",
+        "description": "CLI entry point to run calibration, simulation, and evaluation modes."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "statsmodels",
+      "scikit-learn",
+      "tqdm",
+      "pyyaml",
+      "joblib"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "Peak Adoption Rate Error",
+    "Time-to-Peak Error"
+  ]
+}

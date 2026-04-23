@@ -1530,8 +1530,7 @@ def sbi_simulation_test() -> None:
     print(f"Starting SBI simulation test with double Monte Carlo approach...")
     
     # SBI configuration
-    # NOTE: this path must match the checkpoint directory written by the SBI calibration script
-    checkpoint_dir = "data_fitting/mask_adoption_data/outputs_SBI_posterior_pathology/sbi_checkpoint_K5"
+    checkpoint_dir = "data_fitting/mask_adoption_data/outputs_SBICalibrator_K5"
     M = 50  # Number of posterior parameter samples
     K = 20  # Number of simulation runs per parameter set (same as other calibrators)
     

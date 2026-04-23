@@ -1,0 +1,171 @@
+{
+  "evaluation-not-reflecting-code-changes-stale-or-dead-mechanisms": {
+    "issue_type": "CODE_BUG",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Evaluation: using optimized_parameters, evaluate on ALL trajectories from train/val/test via the existing evaluation functions"
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel.__init__",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel._get_arrival_random_effect",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "main",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Current iteration metrics exactly match prior iteration metrics (train_loss=26.697189..., val_loss=26.546065..., test_loss=28.382810..., state_consistency_rate=1.0)."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.25
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.25
+      }
+    ],
+    "error_identification": "Despite substantive model changes (arrival dispersion, per-trajectory scaling, artifact cleanup), train/val/test losses are identical to the previous best run, which is unlikely if the new mechanisms are actually affecting simulation and scoring.",
+    "root_cause_analysis": "At least one of the intended changes is not actually active during evaluation: (1) use_arrival_random_effects is hardcoded False in HospitalFlowModel.__init__, so the random-effects layer never influences rollouts; (2) output artifacts may still be read from an old run if the harness does not execute main() as expected or reads from a different output_dir, so the deletion in main() may not take effect; (3) the evaluation may be using a different entry point than main(), leaving stale artifacts untouched. These factors can make results appear unchanged even when code is modified.",
+    "correct_approach": "Make changes verifiably effective in the codepath used by the harness: (a) remove/disable the unused random-effects mechanism entirely or wire it to a config/CLI flag that is actually set in main() and defaults to the intended behavior; (b) add an internal, saved run-signature into results.json (e.g., a deterministic hash of key implementation toggles like 'use_arrival_random_effects', 'dispersion_k', and 'arrival_profile_scale' shape) so stale reads are detectable without relying on artifact deletion; (c) ensure artifact deletion happens before any evaluation/saving and in the same function that the harness calls (if harness calls main(), keep there; otherwise move cleanup into save_results() before writing files).",
+    "key_insight": "If metrics do not change across iterations, first confirm the harness is running the new codepath and that new mechanisms are actually enabled; add self-auditing signatures in outputs to detect stale artifact reads and dead toggles."
+  },
+  "trajectory-scaling-from-init-state-is-spec-misaligned-and-likely-harms-generalization": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Initialize each simulated rollout from the provided initial state at time_step=0",
+      "Execution is ... (3) generate new arrivals by disease via calibrated arrival processes",
+      "IMPORTANT ALIGNMENT NOTE: ... Ensure the patient roster/occupancies are internally consistent so the induced 7-D features match the data."
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel._trajectory_arrival_scale_from_init_state",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel.rollout",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Validation error dominated by standard_occupancy and total_alive (val_loss_per_dim.standard_occupancy=70.0179, total_alive=55.6884)."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      }
+    ],
+    "error_identification": "Validation loss is dominated by standard occupancy and total alive counts, consistent with systematic over/under-shooting of arrivals and/or discharge balance across trajectories.",
+    "root_cause_analysis": "The deterministic arrival multiplier derived from init_state adds an extra, non-calibrated cross-trajectory scaling (1 + 0.02*(icu0+std0+alive0)) that is not part of the blueprint parameterization and is weakly identifiable because many time_step=0 rows have zero occupancy/patients. This mechanism can introduce bias or reduce identifiability of arrival_lambda and LOS means across splits, especially if init_state occupancy is not informative in val/test (or differs in distribution).",
+    "correct_approach": "Remove the init_state-derived global arrival scaling from rollout, or replace it with a blueprint-aligned, data-derived covariate that is guaranteed to exist and be consistent (e.g., day/time_step seasonal scaling only). If cross-trajectory heterogeneity is needed, implement it as a calibrated parameter (not allowed here due to fixed theta=12), so the best structural move within constraints is to delete the scaling and focus on day-varying arrival profiles estimated from training.",
+    "key_insight": "Do not add uncalibrated trajectory-level multipliers when evaluation compares absolute occupancy levels across trajectories; if you can\u2019t add parameters, prefer purely time-covariate (day) effects that generalize."
+  },
+  "arrival-profile-leakage-and-misalignment-across-trajectories": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "exogenous_signals: day_index ... covariate for arrival rates",
+      "Infer admissions counts by parsing patients at consecutive time steps and counting entries with day_in_hospital==1"
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel.ingest_training_statistics",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel._arrival_lambda_for_day",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss_per_dim.standard_occupancy is extremely high (70.0179) relative to icu_occupancy (10.8528), indicating arrival/LOS mismatch likely concentrated in Standard bed flow."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      },
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      }
+    ],
+    "error_identification": "Day-varying arrival modulation is computed using time-step alignment to train_states[0] length and then applied to all trajectories by index, which can be incorrect if trajectories have different horizons/lengths or different day offsets, and can overfit the training time index pattern in a way that doesn\u2019t generalize.",
+    "root_cause_analysis": "ingest_training_statistics sets T_profile = len(train_states[0]) and builds _arrival_profile_scale[did, t] based on admissions at index t across trajectories, truncating/padding by min(T_profile, len(traj)). This assumes that time_step indices have identical meaning and length across all trajectories, and that using only the first trajectory\u2019s length is representative. When applied in _arrival_lambda_for_day, the index is clamped to the profile length, which can distort later days for longer trajectories and flatten distinct patterns for shorter ones.",
+    "correct_approach": "Rebuild the arrival profile using the maximum observed horizon across all training trajectories (max len(traj)), and compute mean admissions per disease per time_step using only trajectories that actually have that time_step (track counts per t). Then apply the profile by true time_step (or day) directly without clamping distortion: if a trajectory exceeds profile length, either extend the profile by holding the last valid scale at 1.0 or repeat a learned seasonal period only if supported. This keeps the day-covariate effect consistent and reduces index-based overfitting.",
+    "key_insight": "When learning time-varying effects from multiple trajectories, aggregate by actual time_step support across trajectories (with per-t denominators) and avoid clamping that changes dynamics for longer horizons."
+  },
+  "los-model-mean-only-parameterization-cannot-match-observed-service-time-shape": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Prefer empirical discrete distribution over observed initial los_remaining (day_in_hospital==1) to match integer nature.",
+      "los_dist_params[disease_id, bed_type] ... probabilities ... or parametric mean/dispersion"
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel._sample_los",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel._tilted_probs_on_support",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Persistently high val_loss with especially large standard_occupancy and total_alive components suggests systematic mismatch in discharge dynamics, which are heavily driven by LOS distribution shape, not just mean."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "Even after calibration, the model fails to match occupancy/alive dynamics, implying the LOS distribution\u2019s hazard/shape is not captured well enough to reproduce census trajectories.",
+    "root_cause_analysis": "LOS is effectively controlled only by a target mean per (disease, bed) (6 parameters). The tilting mechanism warps an empirical support but cannot represent dispersion independently; when the true LOS distribution differs in variance/skew across disease/bed and across splits, mean-only control forces arrival_lambda to compensate, leading to large errors (especially in Standard). Given theta is fixed at 12, the model is under-parameterized for matching both mean and variance of service times.",
+    "correct_approach": "Within the fixed 12-parameter constraint, reduce degrees of freedom spent on bed-type routing and reallocate to LOS shape using existing fields: keep p_icu_given_disease as-is, but modify _sample_los to use a two-parameter family per disease shared across bed types (e.g., geometric with shared dispersion-like tweak) while letting bed-type mean shift be deterministic from the empirical distribution itself (no extra parameters). Concretely: learn empirical discrete LOS per (disease, bed) from training and sample directly from it (no tilting) while using the mean parameters only as a mild temperature/tilt capped tightly (e.g., alpha range narrower than [-10,10]) to avoid unrealistic shape distortion that overfits training.",
+    "key_insight": "If validation errors are driven by occupancy (a queueing outcome), matching LOS distribution shape (not just mean) is critical; when parameter budget is fixed, constrain tilting strength and lean more on empirical discrete LOS learned from data."
+  }
+}

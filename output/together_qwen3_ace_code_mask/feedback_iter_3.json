@@ -1,0 +1,171 @@
+{
+  "zero-peer-influence-parameters": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": true,
+    "blueprint_refs": [
+      "peer-influence-scales-mismatch",
+      "action_decision_policy.by_role.resident.policy_form: beta_f, beta_w, beta_c (peer influence slopes per layer)",
+      "calibratable_parameters: beta_f, beta_w, beta_c range [0,5]"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L120-L125"
+      },
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L320-L325"
+      },
+      {
+        "symbol": "Simulator._compute_adoption_probability",
+        "lines": "L350-L360"
+      }
+    ],
+    "evidence": {
+      "user_feedback": "Calibrated parameters show beta_f, beta_w, beta_c are all near zero, and peer influence mechanisms are inactive, causing simulated mask-wearing rates to diverge severely from observed data (simulated 0.78-0.93 vs observed 0.65-0.53). Blueprint requires beta_f, beta_w, beta_c as calibrated sensitivity parameters to scale peer influence per layer.",
+      "error_logs": null,
+      "metrics": "calibrated_parameters: {\"beta_f\": 0.0, \"beta_w\": 0.0, \"beta_c\": 0.0}; transitions_simulated: {\"00\": 228, \"01\": 123, \"10\": 137, \"11\": 412} vs transitions_observed: {\"00\": 172, \"01\": 214, \"10\": 226, \"11\": 288} \u2014 simulated shows excessive persistence and low switching, indicating no peer sensitivity."
+    },
+    "metric_links": [
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "Peer influence sensitivity parameters (beta_f, beta_w, beta_c) are calibrated to zero, causing simulated behavior to ignore neighbor mask shares, resulting in excessive persistence (high 11\u219211) and poor fit to observed transitions and aggregate rates.",
+    "root_cause_analysis": "The calibration objective function in GradientBasedCalibrator.fit uses the beta_* parameters in the feature vector but does not constrain them to be non-zero during optimization; the L2 regularization and initial values of 1.0 are overridden by the optimizer converging to zero due to lack of gradient signal from mis-specified peer influence in the info receipt computation.",
+    "correct_approach": "Modify the peer_info computation in _compute_info_receipt to use beta_* * w_* * phi_* * share_* only if beta_* > 0, and add a hard constraint or penalty in the objective function to prevent beta_* from collapsing to zero; alternatively, initialize beta_* with a small positive prior and use a bounded optimizer with lower bound > 0.",
+    "key_insight": "Never allow multiplicative sensitivity parameters to be optimized without a non-zero lower bound or structural constraint \u2014 zero values break peer influence mechanisms and cause model collapse."
+  },
+  "peer-influence-scales-mismatch": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": true,
+    "blueprint_refs": [
+      "information_propagation.mechanism: 1 - exp(-(phi_family * share_family + ...))",
+      "action_decision_policy.by_role.resident.policy_form: beta_f * w_f * share_f + ...",
+      "calibratable_parameters: w_family, w_work, w_community normalized to sum to 1"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L187-L190"
+      },
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L320-L325"
+      },
+      {
+        "symbol": "Simulator._compute_adoption_probability",
+        "lines": "L350-L360"
+      }
+    ],
+    "evidence": {
+      "user_feedback": "Simulated transitions show extreme persistence (705 of 800 are 11\u219211) vs observed (288), indicating missing multiplicative sensitivity (beta_*) to neighbor mask shares. Code uses w_* * share_* directly without beta_* scaling, causing runaway adoption.",
+      "error_logs": null,
+      "metrics": "calibrated_parameters: {\"w_family\": 0.0, \"w_work\": 0.0, \"w_community\": 0.0}; simulated daily rates (0.26\u20130.45) are far below observed (0.63\u20130.73) in validation; transitions_simulated show 412 11\u219211 vs 288 observed \u2014 indicates no peer-driven adoption, only inertia."
+    },
+    "metric_links": [
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      }
+    ],
+    "error_identification": "Layer weights (w_family, w_work, w_community) are calibrated to zero, eliminating all peer influence scaling despite beta_* being present; this contradicts blueprint requirement that w_* are normalized weights and beta_* are sensitivity multipliers.",
+    "root_cause_analysis": "In GradientBasedCalibrator.fit, w_* are normalized to sum to 1, but the optimization is performed on unnormalized weights; when w_* are driven to zero during optimization, normalization produces undefined/zero influence, and the model defaults to inertia and exogenous broadcast only.",
+    "correct_approach": "Optimize w_* on the simplex (sum-to-one constraint) using a transformed parameter space (e.g., softmax) rather than raw [0,2] bounds; remove raw w_* from optimization and fix them as normalized outputs of beta_*-weighted layer salience or use Dirichlet prior.",
+    "key_insight": "Layer weights must be optimized under a simplex constraint \u2014 raw optimization of unnormalized weights with normalization post-hoc invites collapse to zero and breaks multiplicative interaction structure."
+  },
+  "exogenous-broadcast-overfit": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "exogenous_signals.name: received_info_broadcast.bounds: [0,1] daily probability",
+      "calibratable_parameters: lambda_broadcast range [0, 0.5]"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L120-L125"
+      },
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L320-L325"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "calibrated_parameters: {\"lambda_broadcast\": 0.5}; simulated daily rates in validation: 0.26\u20130.45 vs observed 0.63\u20130.73 \u2014 exogenous broadcast is at max, yet simulation underpredicts adoption, indicating it cannot compensate for missing peer influence."
+    },
+    "metric_links": [
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "lambda_broadcast is calibrated to its upper bound (0.5), yet simulated adoption rates are significantly lower than observed, indicating the model is over-relying on exogenous signals while peer influence is nullified.",
+    "root_cause_analysis": "With peer influence (beta_* and w_*) collapsed to zero, the optimizer compensates by pushing lambda_broadcast to its maximum allowed value (0.5) to force adoption, but this is insufficient to match observed rates, revealing a structural misalignment between the model's components.",
+    "correct_approach": "Add a soft penalty in the objective function for lambda_broadcast approaching its upper bound, or constrain it to be less than a fraction of the observed received_info prevalence in training data to prevent overfitting to exogenous signals.",
+    "key_insight": "Exogenous signals should not be used as a crutch to compensate for broken peer mechanisms \u2014 constrain them to plausible empirical ranges to avoid masking structural model failures."
+  },
+  "info-decay-zero": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "information_propagation.parameters.rho_info_decay: [0,1] controls persistence of received_info memory",
+      "agent_archetypes.dynamic_states: memory_of_info_t (continuous 0\u20131, optional for decay)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "Simulator.__init__",
+        "lines": "L292"
+      },
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L320-L325"
+      },
+      {
+        "symbol": "Simulator.step",
+        "lines": "L375-L379"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "calibrated_parameters: {\"rho_info_decay\": 0.0}; simulated received_info is binary and instantaneous, ignoring persistence, which may dampen adoption dynamics in validation."
+    },
+    "metric_links": [
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "rho_info_decay is calibrated to zero, meaning received_info has no memory effect; this eliminates temporal persistence of information influence, causing abrupt state changes that mismatch observed smoother transitions.",
+    "root_cause_analysis": "The optimization converged to rho_info_decay=0.0 because the model lacks sufficient signal to distinguish between instantaneous and decaying information effects, and the objective function treats received_info as a binary proxy via info_prob, not a continuous memory state.",
+    "correct_approach": "Modify _compute_info_receipt to use the continuous memory_of_info as input to the adoption probability (not just binary received_today), and ensure the calibration objective uses the continuous memory state to compute info_prob likelihood.",
+    "key_insight": "Memory decay parameters must be coupled to continuous state updates \u2014 binary proxies break temporal dynamics and cause calibration to ignore persistence effects."
+  }
+}

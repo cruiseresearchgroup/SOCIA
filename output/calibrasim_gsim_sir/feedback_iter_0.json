@@ -1,0 +1,178 @@
+{
+  "evaluation-uses-wrong-metrics-schema-vs-blueprint": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "io_contract.results_json.metrics_schema",
+      "\"train_mse_overall\", \"val_mse_overall\", \"test_mse_overall\", \"conservation_violation_rate\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "Evaluator.compute_metrics",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "save_results",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Program outputs metrics keys train_loss/val_loss/test_loss and val_conservation_violation_rate, while BLUEPRINT requires train_mse_overall/val_mse_overall/test_mse_overall and conservation_violation_rate."
+    },
+    "metric_links": [],
+    "error_identification": "Output schema deviates from the BLUEPRINT results.json contract, risking downstream evaluation mismatch even if simulation quality improved.",
+    "root_cause_analysis": "Evaluator.compute_metrics returns non-contract keys (train_loss, val_loss, test_loss, val_conservation_violation_rate, plus extra diagnostics) and save_results serializes them as-is; BLUEPRINT specifies different required names and a single conservation_violation_rate field.",
+    "correct_approach": "In Evaluator.compute_metrics and/or save_results, map the computed MSEs to the required BLUEPRINT metric names (train_mse_overall/val_mse_overall/test_mse_overall, val_mse_S/I/R, conservation_violation_rate). Keep extra diagnostics if desired, but ensure required keys exist exactly as specified.",
+    "key_insight": "Always emit the exact metric and field names required by the task\u2019s IO contract; treat schema mismatches as evaluation failures, not just cosmetic differences."
+  },
+  "sbi-conditioning-on-raw-counts-causes-scale-dominance": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\"flattening the full (T+1)x3 trajectory\"",
+      "SBI calibration via NPE using ONLY the single observed trajectory from training set (trajectory_id=0)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "flatten_states",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss=280.2196 with val_loss_per_dim S=415.5392 and R=334.1107 dominating I=91.0089; suggests inference/prediction errors concentrated in large-magnitude compartments."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.55
+      },
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.45
+      }
+    ],
+    "error_identification": "Validation error is dominated by S and R, consistent with posterior learning being driven by large raw count scales rather than informative epidemic shape features.",
+    "root_cause_analysis": "SBINPECalibrator.fit conditions NPE on flattened raw integer counts (S,I,R) without normalization by N or variance stabilization. This makes the density estimator prioritize fitting large-scale dimensions (often S, R) and can reduce parameter identifiability/generalization across trajectories with different N and epidemic sizes.",
+    "correct_approach": "Within SBINPECalibrator.fit, transform both simulated x and observed x_o before passing to NPE: at minimum normalize compartments by N (fractions) using the observation N for simulation and the same N for x_o; optionally also center/scale across time or use logit/clipped transform for proportions. Ensure the same transform is applied consistently to xs and x_o. Keep simulator in counts; only transform the observation vector used by NPE.",
+    "key_insight": "When using NPE on time-series vectors, normalize inputs to comparable scales (e.g., per-trajectory proportions) to prevent large compartments from dominating posterior learning and harming cross-trajectory generalization."
+  },
+  "single-trajectory-sbi-lacks-summary-statistics-for-cross-trajectory-generalization": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Objective: infer parameters from a single observed trajectory (train trajectory_id=0 only), then evaluate on full train/val/test sets"
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "DiscreteTimeSIRSimulator.rollout",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "train_loss=186.3568 vs val_loss=280.2196 (large generalization gap); val_peak_I_error peak_time_mae=5.15 indicates timing mismatch."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "val_peak_I_error",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Posterior inferred from trajectory_id=0 produces trajectories whose epidemic timing generalizes poorly (peak-time MAE ~5 days) and yields substantially higher validation MSE than training.",
+    "root_cause_analysis": "Conditioning NPE on the full raw trajectory vector from a single realization encourages overfitting to that realization\u2019s stochastic noise and idiosyncratic timing, especially with a flexible density estimator and without summary statistics emphasizing invariant epidemic features. This is structural: the simulator is evaluated across many trajectories with varying initial conditions and N, but inference is anchored to one path without invariance-inducing features.",
+    "correct_approach": "In SBINPECalibrator.fit, replace (or augment) the flattened full-trajectory vector with a compact, more invariant summary vector derived from the trajectory, while still complying with the 'flattening' spirit if required. Practical options within current code: compute and concatenate (i) normalized initial fractions, (ii) peak I fraction and its time, (iii) final R fraction, (iv) a few early growth indicators (e.g., I[t+1]-I[t] averaged over first k steps), and (v) optionally a downsampled trajectory at fixed intervals. Train NPE on these summaries consistently for simulations and x_o. This typically improves identifiability and generalization under single-trajectory SBI constraints.",
+    "key_insight": "With single-trajectory SBI, use invariance-focused summaries (peak size/time, final size, early growth) rather than the entire noisy path to reduce overfitting and improve transfer to other initial conditions."
+  },
+  "determinism-settings-risk-runtime-or-accuracy-regressions": {
+    "issue_type": "CODE_BUG",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\"Random seed optionally set for reproducibility.\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "set_global_seed",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "No crash in current run; risk is environment/version dependent."
+    },
+    "metric_links": [],
+    "error_identification": "Potential non-portable determinism configuration: may raise errors or slow training in some environments, harming practical evaluation stability.",
+    "root_cause_analysis": "set_global_seed unconditionally calls torch.use_deterministic_algorithms(True). On some torch builds/operators, deterministic implementations are unavailable and this can throw at runtime; additionally it can degrade NPE training performance/quality by changing allowed kernels. BLUEPRINT only calls for optional reproducibility, not strict deterministic enforcement.",
+    "correct_approach": "In set_global_seed, make deterministic algorithms optional/configurable (CLI flag), and/or wrap torch.use_deterministic_algorithms(True) in a try/except with a clear warning fallback to non-deterministic mode. Keep manual seeds as the default reproducibility mechanism.",
+    "key_insight": "Prefer seed-setting over strict deterministic-enforcement unless required; determinism flags should be optional and resilient to missing deterministic kernels."
+  },
+  "holdout-split-dead-code-confuses-calibration-flow": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "low",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\"No within-file temporal holdout is required.\"",
+      "\"SBI calibration uses ONLY train trajectory_id==0 as the single observation.\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "holdout_split",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "main",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "holdout is computed but ignored in SBINPECalibrator.fit."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "A temporal holdout split is implemented and passed around but not used, increasing complexity and obscuring the intended calibration logic.",
+    "root_cause_analysis": "main computes holdout_split and passes it to calibrator.fit, but SBINPECalibrator.fit explicitly discards it. This diverges from the BLUEPRINT, which does not require within-trajectory holdout at all, and makes it harder to reason about possible leakage/generalization controls.",
+    "correct_approach": "Remove HoldoutBundle and holdout_split usage entirely (simplify signatures), or explicitly document and use it for an optional diagnostic (e.g., posterior predictive check on the suffix of trajectory_id=0). If kept, ensure it does not contradict the blueprint evaluation plan.",
+    "key_insight": "Eliminate unused pipeline components in calibration/evaluation code; dead splits and unused arguments hide real generalization problems and slow iteration."
+  }
+}

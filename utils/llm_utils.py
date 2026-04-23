@@ -7,6 +7,7 @@ import json
 import logging
 from typing import Dict, Any, List, Union, Optional
 from pathlib import Path
+from together import Together
 
 def load_api_key(key_name: str) -> Optional[str]:
     """
@@ -380,6 +381,74 @@ class LlamaProvider(LLMProvider):
             return f"Error: {str(e)}"
 
 
+class TogetherProvider(LLMProvider):
+    """
+    LLM provider using Together.ai's API.
+    """
+
+    def call(self, prompt: str, reasoning: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Call Together.ai's API with the provided prompt.
+
+        Args:
+            prompt: The prompt to send to the LLM
+            reasoning: Optional reasoning parameters (not used by Together)
+
+        Returns:
+            The LLM's response
+        """
+        try:
+            api_key = load_api_key("TOGETHER_API_KEY")
+            if not api_key:
+                api_key = self.config.get("api_key") or os.environ.get("TOGETHER_API_KEY")
+            if not api_key:
+                self.logger.error("Together API key not found (TOGETHER_API_KEY or config)")
+                return "Error: Together API key not found in keys.py or environment"
+
+            client = Together(api_key=api_key)
+
+            model = self.config.get("model", "meta-llama/Llama-3.3-70B-Instruct-Turbo")
+            temperature = self.config.get("temperature", 0.7)
+            max_tokens = self.effective_max_tokens
+            stream = self.config.get("stream", False)
+
+            if stream:
+                # Stream mode: collect chunks and return full content
+                self.logger.debug("Using stream mode for Together.ai API")
+                stream_response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                )
+                
+                full_content = ""
+                for chunk in stream_response:
+                    if chunk.choices and len(chunk.choices) > 0:
+                        delta_content = chunk.choices[0].delta.content
+                        if delta_content:
+                            full_content += delta_content
+                
+                return full_content
+            else:
+                # Non-stream mode: standard request
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                return response.choices[0].message.content or ""
+
+        except ImportError:
+            self.logger.error("together package not installed")
+            return "Error: together package not installed"
+        except Exception as e:
+            self.logger.error(f"Error calling Together API: {e}")
+            return f"Error: {str(e)}"
+
+
 class MockProvider(LLMProvider):
     """
     Mock LLM provider for testing and development.
@@ -441,6 +510,8 @@ def get_llm_provider(config: Dict[str, Any]) -> LLMProvider:
             return GeminiProvider(provider_config)
         elif provider_name == "anthropic":
             return AnthropicProvider(provider_config)
+        elif provider_name == "together.ai":
+            return TogetherProvider(provider_config)
         elif provider_name == "llama":
             return LlamaProvider(provider_config)
         else:
@@ -455,6 +526,8 @@ def get_llm_provider(config: Dict[str, Any]) -> LLMProvider:
             return GeminiProvider({})
         elif provider_name == "anthropic":
             return AnthropicProvider({})
+        elif provider_name == "together.ai":
+            return TogetherProvider({})
         elif provider_name == "llama":
             return LlamaProvider({})
         else:

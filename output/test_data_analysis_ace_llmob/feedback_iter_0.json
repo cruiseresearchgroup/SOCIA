@@ -1,0 +1,181 @@
+{
+  "summary": "The code is a solid first-pass end-to-end pipeline (load \u2192 parse \u2192 fit priors \u2192 calibrate \u2192 simulate \u2192 evaluate \u2192 save), but it currently deviates from the task specification in two key ways: (1) it does not enforce regime-separated experimental settings (2019\u21922019, 2021\u21922021, 2019\u21922021 OOD), and (2) the \u201cLLM generator\u201d pathway is not actually used to generate the evaluated trajectories (it only produces a small sample artifact via a dummy client). In addition, there are several modeling/implementation mismatches that will likely inflate JSD on SD/SI/DARD/STVD (time feasibility, category semantics, transition candidate sets, dwell estimation).",
+  "critical_issues": [
+    {
+      "issue": "No separation of experimental regimes (2019\u20132020 normal vs 2021 pandemic) and no OOD protocol",
+      "impact": "This violates the task spec and makes results non-interpretable: training mixes regimes, so validation JSD does not measure generalization within-regime or OOD shift. It also risks leakage of 2021 behavioral constraints into 2019-style generation (and vice versa).",
+      "solution": "Add a CLI flag for experimental setting and filter trajectories by date range before holdout split and model fitting. Maintain distinct train/val ranges per regime; for 2019\u21922021, fit on 2019\u20132020 and validate on 2021.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "LLM pipeline is not used to generate the evaluated rollouts (only a dummy sample output is produced)",
+      "impact": "The system claims to support an LLM-based generation pipeline, but evaluation is performed on the statistical simulator outputs. This fails the requirement \u201cPrompt LLM with {Pattern, Persona, Motivation} to output a trajectory string\u201d for the main generation path.",
+      "solution": "When --generator=llm, generate trajectories for all validation days via LLMPipelineGenerator (with a real LLM client or a pluggable interface), parse them back to DayTrajectory, then evaluate those. Keep the statistical simulator as fallback only.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Event.place_type semantics are inconsistent: simulator stores coarse category as place_type, while real data uses fine-grained place types",
+      "impact": "DARD depends on mapping place_type\u2192coarse_category via catto.json. With simulated events already using coarse categories, the union of categories in evaluation can change, and the mapping path differs between real/sim. This can inflate DARD JSD and distort category-based temporal distributions.",
+      "solution": "Store the fine-grained POI category (base POI name, e.g., \u201cConvenience Store\u201d) in Event.place_type and let Evaluator map it to coarse categories consistently for both real and simulated. Keep a separate field if you need the coarse category for internal sampling.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Category inference in training uses poi_id prefix fallback instead of POI catalog mapping, which can misclassify categories when place_type tokens differ from catalog category strings",
+      "impact": "Misclassification affects: (a) learned category preferences, (b) transition matrices, (c) dwell inference by category, and thus SD/SI/DARD/STVD JSD. Inconsistent labels like 'small lodging establishment' vs catalog keys can fragment categories.",
+      "solution": "Prefer POI catalog lookup by poi_id (poi_by_id[poi_id].coarse_category/category) when available; fall back to place_type_to_coarse; only then fall back to poi_id prefix.",
+      "introduced_by_changes": false
+    },
+    {
+      "issue": "Calibration objective uses TRAIN days as both \u201creal\u201d and \u201cvalidation_split\u201d simulation target, and compares simulated to the full train list (not per-agent, not per-day alignment)",
+      "impact": "This makes calibration noisy and potentially biased: simulated days are generated for a subset of train days but evaluated against all_train_days, mixing agents/dates unevenly. The optimizer can overfit global histograms rather than day-level realism.",
+      "solution": "During calibration, simulate exactly the same day set you evaluate against (same agent-date pairs) and compute metrics per-agent then average, or at minimum use the same flattened list for both sim and real.",
+      "introduced_by_changes": false
+    }
+  ],
+  "model_improvements": [
+    {
+      "aspect": "Regime-aware behavior (pandemic vs normal)",
+      "current_approach": "Single pooled model fitted on whatever dates are in each agent\u2019s first 80% of records.",
+      "suggested_approach": "Fit separate global transition/time/dwell models per regime; include a regime indicator in the simulator (or just filter by setting). For 2019\u21922021, freeze 2019 parameters and only allow limited adaptation (e.g., increased 'Home' propensity, reduced leisure categories) via calibratable knobs.",
+      "expected_benefit": "Large JSD reduction in DARD/STVD under OOD; improves interpretability and compliance with experimental settings."
+    },
+    {
+      "aspect": "Time-feasible schedule generation (SI realism)",
+      "current_approach": "Arrival times = current_time + travel_time(distance), then current_time advances by dwell. But dwell is sampled from a lognormal fitted from observed inter-event gaps, which already include travel time, so travel is double-counted.",
+      "suggested_approach": "Decompose observed gap into travel + dwell by estimating travel time from distance and a speed prior, and set dwell \u2248 max(gap - travel, min_dwell). Fit dwell distributions on these residuals. Alternatively, set travel_time=0 in dwell fitting or in simulation when using gap-based dwell.",
+      "expected_benefit": "Improves SI distribution and reduces SI JSD; stabilizes day length and prevents pushing activities unrealistically late."
+    },
+    {
+      "aspect": "Destination choice candidate sets",
+      "current_approach": "Candidates are restricted to next-POI neighbors whose coarse matches target; if none, fall back to all POIs in that coarse category.",
+      "suggested_approach": "Use a two-stage candidate mix: top-K neighbors regardless of coarse, plus nearest-M POIs in the target category within a radius around current location, plus a small exploration sample from global popularity.",
+      "expected_benefit": "Improves SD and STVD by preventing extreme jumps and by preserving realistic local movement patterns."
+    },
+    {
+      "aspect": "Home/anchor modeling",
+      "current_approach": "Home inferred via time-of-day heuristic; not enforced as start/end anchor; day can end anywhere.",
+      "suggested_approach": "Introduce an explicit \u201creturn home\u201d end-of-day action: hazard that increases after a threshold, and if triggered, destination is sampled from home_poi_candidates. Add a 'home anchor' constraint (e.g., first or last stop is home with some probability).",
+      "expected_benefit": "Improves DARD (late-night 'Home') and SI (long late-night gaps) and reduces STVD spread at night."
+    }
+  ],
+  "code_improvements": [
+    {
+      "file": "main() / data preparation",
+      "modification": "Implement experimental setting filters and pass filtered trajectories into holdout_split and ModelFitter",
+      "reason": "Required for spec compliance and meaningful evaluation for 2019\u21922019, 2021\u21922021, and 2019\u21922021 OOD.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "MobilitySimulator.simulate_day",
+      "modification": "Store Event.place_type as the base POI category (from poi_id prefix or POI catalog), not the coarse category; keep coarse in a local variable only",
+      "reason": "Ensures consistent semantics across real/sim and consistent mapping for DARD.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "ModelFitter._coarse_from_place_type_or_poi",
+      "modification": "Prefer poi_by_id[poi_id].coarse_category when available",
+      "reason": "Reduces category fragmentation and improves learned transitions/preferences/dwell models.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "ModelFitter.fit (dwell fitting) + MobilitySimulator._sample_dwell_minutes",
+      "modification": "Fit dwell on residual time after subtracting estimated travel time, or stop adding travel to arrival when using gap-based dwell",
+      "reason": "Fixes double-counting travel, which otherwise inflates SI and pushes events late.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "main() generation path",
+      "modification": "When --generator=llm, generate all validation trajectories via LLMPipelineGenerator, parse them, then evaluate those instead of statistical rollouts",
+      "reason": "Aligns execution with the LLM-based specification; current code only emits LLM samples and evaluates statistical trajectories.",
+      "related_to_recent_changes": false
+    },
+    {
+      "file": "RandomSearchCalibrator.fit",
+      "modification": "Evaluate candidate params on the same agent-date set it simulates, and optionally average metrics per agent",
+      "reason": "Prevents calibration mismatch and improves stability/meaningfulness of the optimized parameters.",
+      "related_to_recent_changes": false
+    }
+  ],
+  "data_alignment_suggestions": [
+    {
+      "metric": "Step interval (SI)",
+      "current_gap": "Likely inflated intervals and late-day piling due to dwell sampled from inter-event gaps plus additional travel time",
+      "suggestion": "Fit dwell on (gap - estimated_travel) residuals or remove travel addition when dwell already captures travel."
+    },
+    {
+      "metric": "Daily activity routine distribution (DARD)",
+      "current_gap": "Category-time joint distribution can be distorted by inconsistent category semantics and missing home-return structure",
+      "suggestion": "Unify place_type semantics and add explicit home return/end-of-day modeling; condition category choice on day_type and time-of-day more strongly (e.g., commute peaks)."
+    },
+    {
+      "metric": "Spatial-temporal visits distribution (STVD)",
+      "current_gap": "Spatial spread may be too wide when candidate sets fall back to the full category list; also could be too random with high temperature",
+      "suggestion": "Add spatially local candidates (nearest within radius) and tune distance decay/temperature; enforce anchor locations (home/work-like) based on learned frequent POIs."
+    },
+    {
+      "metric": "Step distance (SD)",
+      "current_gap": "Tail risk of long jumps when fallback uses full category POI pool; lack of radius constraint",
+      "suggestion": "Use mobility_radius_km as a hard/soft constraint (e.g., strong penalty beyond 2\u20133\u00d7 median) and include nearest-neighbor candidates."
+    }
+  ],
+  "prioritized_actions": [
+    "Implement regime-separated experimental settings and OOD protocol (filter trajectories by date and setting before fitting/splitting).",
+    "Fix time modeling: remove double-counting of travel vs dwell (re-fit dwell residuals or adjust simulation timing).",
+    "Make --generator=llm actually generate the evaluated trajectories (parse LLM outputs back to DayTrajectory for evaluation).",
+    "Unify category semantics by storing base POI type in Event.place_type and mapping via catto.json in evaluation.",
+    "Improve destination candidate sets with spatial locality and exploration mix to reduce SD/STVD divergence.",
+    "Stabilize calibration by matching simulated evaluation sets and optionally computing per-agent averaged JSD."
+  ],
+  "additional_comments": "Because verification/execution/evaluation were skipped in ACE mode, the feedback above is based on static code inspection. Several of these issues (especially dwell/travel double counting and missing regime splits) are high-likelihood drivers of poor JSD in practice. Also note: the current \u201cLLM pipeline\u201d uses DummyLLMClient, which will generally echo FALLBACK_TRAJECTORY; that\u2019s fine for offline testing, but the system should support a real LLM client and robust output validation/retry logic (e.g., re-prompting on formatting errors) for production.",
+  "code_snippets": [
+    {
+      "file": "simulation.py",
+      "before": "def _coarse_from_place_type_or_poi(self, place_type: str, poi_id: str) -> str:\n    if place_type in self.place_type_to_coarse:\n        return self.place_type_to_coarse[place_type]\n    if \"#\" in poi_id:\n        return poi_id.split(\"#\")[0].strip() or place_type\n    return place_type\n",
+      "after": "def _coarse_from_place_type_or_poi(self, place_type: str, poi_id: str) -> str:\n    # Prefer POI catalog when available (most consistent)\n    poi = self.poi_by_id.get(poi_id)\n    if poi is not None and poi.coarse_category:\n        return poi.coarse_category\n\n    # Next best: mapping from the raw place_type token\n    if place_type in self.place_type_to_coarse:\n        return self.place_type_to_coarse[place_type]\n\n    # Fallback: infer from poi_id prefix\n    if \"#\" in poi_id:\n        return poi_id.split(\"#\")[0].strip() or place_type\n    return place_type\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "events.append(Event(place_type=target_cat, poi_id=next_poi, minute_of_day=arrival))\n",
+      "after": "base_place_type = next_poi.split(\"#\")[0].strip() if \"#\" in next_poi else target_cat\nevents.append(Event(place_type=base_place_type, poi_id=next_poi, minute_of_day=arrival))\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "gap = int(b.minute_of_day) - int(a.minute_of_day)\nif gap > 0:\n    dwell_samples_by_cat.setdefault(ca, []).append(float(max(5, min(gap, 8 * 60))))\n",
+      "after": "gap = int(b.minute_of_day) - int(a.minute_of_day)\nif gap > 0:\n    # Estimate travel from distance; fit dwell on residual to avoid double-counting.\n    caa = self._poi_coords(a.poi_id)\n    cbb = self._poi_coords(b.poi_id)\n    if caa is not None and cbb is not None:\n        dist_km = haversine_km(caa[0], caa[1], cbb[0], cbb[1])\n        # Use a conservative default speed during fitting (or make it configurable)\n        travel_min = dist_km / 25.0 * 60.0\n    else:\n        travel_min = 0.0\n\n    dwell_min = max(5.0, min(float(gap) - travel_min, 8.0 * 60.0))\n    dwell_samples_by_cat.setdefault(ca, []).append(dwell_min)\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "p.add_argument(\"--generator\", type=str, choices=[\"statistical\", \"llm\"], default=\"statistical\", help=\"Trajectory generator.\")\n...\nsimulated_rollouts = simulator.rollout(validation_split=val_map, n_runs=args.eval_runs)\n",
+      "after": "p.add_argument(\n    \"--generator\",\n    type=str,\n    choices=[\"statistical\", \"llm\"],\n    default=\"statistical\",\n    help=\"Trajectory generator (evaluated output).\",\n)\n...\nif args.generator == \"statistical\":\n    simulated_rollouts = simulator.rollout(validation_split=val_map, n_runs=args.eval_runs)\nelse:\n    # LLM generation for ALL validation days (with fallback allowed)\n    llm = DummyLLMClient()\n    llm_generator = LLMPipelineGenerator(\n        llm=llm,\n        evaluator_place_type_to_coarse=context[\"place_type_to_coarse\"],\n        fallback_simulator=simulator,\n    )\n\n    simulated_rollouts = {}\n    for run in range(args.eval_runs):\n        run_days = []\n        for aid, real_days in val_map.items():\n            hist = train_map.get(aid, [])\n            for real_day in sorted(real_days, key=lambda x: x.d):\n                s = llm_generator.generate_day_string(aid, real_day.d, hist)\n                # Parse generated string back into DayTrajectory\n                d = parse_date_from_activity_string(s)\n                events_part = split_events_part(s)\n                tokens = _split_event_tokens(events_part)\n                evs = []\n                for tok in tokens:\n                    place_type, poi_id, minute = parse_event_token(tok)\n                    evs.append(Event(place_type=place_type, poi_id=poi_id, minute_of_day=minute))\n                evs.sort(key=lambda e: e.minute_of_day)\n                run_days.append(DayTrajectory(agent_id=aid, d=d, events=tuple(evs)))\n        simulated_rollouts[run] = run_days\n",
+      "addresses_recent_changes": false
+    },
+    {
+      "file": "simulation.py",
+      "before": "def holdout_split(trajectories: List[DayTrajectory]) -> Dict[str, Dict[str, List[DayTrajectory]]]:\n    ...\n",
+      "after": "def filter_trajectories_by_setting(\n    trajectories: List[DayTrajectory],\n    setting: str,\n) -> List[DayTrajectory]:\n    # settings: '2019-2019', '2021-2021', '2019-2021'\n    if setting == \"2019-2019\":\n        return [t for t in trajectories if t.d.year in (2019, 2020)]\n    if setting == \"2021-2021\":\n        return [t for t in trajectories if t.d.year == 2021]\n    if setting == \"2019-2021\":\n        # Keep all; split later by year for train vs val\n        return trajectories\n    raise ValueError(f\"Unknown setting: {setting}\")\n\n\ndef holdout_split_by_setting(\n    trajectories: List[DayTrajectory],\n    setting: str,\n) -> Dict[str, Dict[str, List[DayTrajectory]]]:\n    by_agent: Dict[str, List[DayTrajectory]] = {}\n    for t in trajectories:\n        by_agent.setdefault(t.agent_id, []).append(t)\n\n    split: Dict[str, Dict[str, List[DayTrajectory]]] = {}\n    for aid, days in by_agent.items():\n        days_sorted = sorted(days, key=lambda x: x.d)\n        if setting == \"2019-2021\":\n            train_days = [d for d in days_sorted if d.d.year in (2019, 2020)]\n            val_days = [d for d in days_sorted if d.d.year == 2021]\n            if not train_days:\n                # fallback to temporal split if missing years\n                train_days, val_days = days_sorted[: max(1, len(days_sorted) // 2)], days_sorted[max(1, len(days_sorted) // 2) :]\n        else:\n            n = len(days_sorted)\n            if n <= 1:\n                train_days, val_days = days_sorted, []\n            else:\n                train_n = max(1, min(n - 1, int(math.floor(0.8 * n))))\n                train_days, val_days = days_sorted[:train_n], days_sorted[train_n:]\n        split[aid] = {\"train\": train_days, \"validation\": val_days}\n    return split\n",
+      "addresses_recent_changes": false
+    }
+  ],
+  "change_analysis": {
+    "summary": "No diff was provided beyond the note that this is the first iteration, so there is no prior-iteration delta to assess. The current implementation introduces both a statistical simulator and an LLM pipeline scaffold, but the LLM path is not yet integrated into the main evaluated generation flow.",
+    "positive_impacts": [
+      "Robust parsing utilities (supports single-digit hours, flexible separators, tolerant punctuation cleanup).",
+      "End-to-end reproducible pipeline with seeding, calibration loop, evaluation, and artifacts saved to disk.",
+      "Implements the required SD/SI/DARD/STVD + JSD evaluation in a self-contained way."
+    ],
+    "negative_impacts": [
+      "Spec mismatch: regime separation and OOD settings are not implemented.",
+      "Spec mismatch: LLM generator is not used for the evaluated rollouts; DummyLLMClient effectively bypasses the LLM step.",
+      "Likely SI distortion from travel/dwell double-counting; category semantic mismatch between real and simulated events."
+    ],
+    "suggestions": [
+      "Add explicit experimental setting control and filtering; do not mix regimes unless explicitly requested.",
+      "Make --generator=llm produce the trajectories used in evaluation, and parse/validate them robustly (with retries).",
+      "Fix dwell/travel decomposition to avoid SI inflation and late-day drift.",
+      "Standardize event place_type semantics to match raw data and rely on catto.json for coarse mapping."
+    ]
+  }
+}

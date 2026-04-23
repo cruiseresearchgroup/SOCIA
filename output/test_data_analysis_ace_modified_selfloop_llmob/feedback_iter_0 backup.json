@@ -1,0 +1,108 @@
+{
+  "date-token-parsing-includes-colon": {
+    "issue_type": "CODE_BUG",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Parse each daily string: extract date after 'Activities at ', then split events by comma"
+    ],
+    "code_refs": [
+      {
+        "symbol": "TrajectoryParser._extract_date_prefix",
+        "lines": "L310-L327"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": "ValueError: Invalid isoformat string: '2019-01-09:' ... Failed to parse date from token '2019-01-09:' in string: 'Activities at 2019-01-09: Rest Area#1120 at 10:50:00, ...'",
+      "metrics": null
+    },
+    "error_identification": "Simulator crashes during parsing because extracted date token includes a trailing colon (e.g., '2019-01-09:') and dt.date.fromisoformat rejects it.",
+    "root_cause_analysis": "TrajectoryParser._extract_date_prefix() extracts the date by taking the substring before the first comma, then taking the first whitespace token. For inputs formatted as 'Activities at YYYY-MM-DD: ...' there is no comma before the colon, and no whitespace between date and ':', so date_token becomes 'YYYY-MM-DD:' and parsing fails at dt.date.fromisoformat(date_token).",
+    "correct_approach": "Harden date extraction to strip punctuation after the date. Minimal patch: after computing date_token, apply date_token = date_token.rstrip(',:;') (and optionally handle '.'), then parse. More robust: use a regex to capture ISO date right after 'Activities at ' (e.g., r\"Activities at\\s*(\\d{4}-\\d{2}-\\d{2})\"). Also adjust how 'rest' is computed: compute the rest starting from the end of the matched date in the original substring (not using len(date_token) after mutation). Add a unit test covering 'Activities at 2019-01-09: ...' and 'Activities at 2019/01/09, ...'.",
+    "key_insight": "When parsing semi-structured logs, never rely on whitespace tokenization for fields that may be followed by punctuation; explicitly strip delimiters or regex-match the field."
+  },
+  "stop-count-distribution-smoothing-support-mismatch": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "daily_stop_count_distribution_kl: Compute distribution of number of events per day in simulated vs validation ... KL divergence (with smoothing)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "Evaluator._stop_count_dist",
+        "lines": "L676-L687"
+      },
+      {
+        "symbol": "Evaluator.compute_metrics",
+        "lines": "L742-L769"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": null
+    },
+    "error_identification": "Even if execution succeeds, the current stop-count KL implementation does not apply proper smoothing across the union support, which can distort KL and make it insensitive/unstable when simulated introduces unseen counts.",
+    "root_cause_analysis": "Evaluator._stop_count_dist() only adds smoothing to keys already present in the counter (support = sorted(ctr.keys())), so unseen counts get zero probability before later ad-hoc EPS addition in compute_metrics. Blueprint calls for KL \u201cwith smoothing\u201d, typically meaning smoothing over a shared support (union of bins) before normalization.",
+    "correct_approach": "Build stop-count distributions over a shared support: in compute_metrics, create support = union of observed counts (gt and sim) and apply additive smoothing to both p and q on that support before normalizing. Alternatively, in _stop_count_dist accept an explicit support list and smooth all bins. This makes the KL comparable and stable.",
+    "key_insight": "For divergence metrics, smoothing must be applied on the same bin support for both distributions; smoothing only on observed bins is not equivalent and can bias comparisons."
+  },
+  "missing-validation-calibration-loop": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Optimize calibratable parameters ... by minimizing validation loss across multiple metrics",
+      "Holdout plan ... train_range ... validation_range"
+    ],
+    "code_refs": [
+      {
+        "symbol": "main",
+        "lines": "L910-L1015"
+      },
+      {
+        "symbol": "RandomSearchCalibrator.fit",
+        "lines": "L832-L901"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": null
+    },
+    "error_identification": "Calibration is currently performed on training days (train_ground_truth_by_agent=train_by_agent, train_dates_by_agent=train_dates), not on the validation range as required; this risks overfitting and invalidates \u2018evaluation on validation\u2019 claims.",
+    "root_cause_analysis": "In main(), RandomSearchCalibrator.fit() is invoked using train_by_agent as the ground truth and train_dates as the simulation targets. The blueprint specifies calibrating parameters by minimizing validation loss; training should only fit profiles/models, while calibration objective should be computed on the validation split.",
+    "correct_approach": "Change calibration inputs to use validation: pass val_by_agent as ground truth and val_dates as dates_by_agent; keep train_by_agent for fitting agent_profiles/global_models and for personal transition estimation. Concretely: calibrator.fit(train_ground_truth_by_agent=val_by_agent, train_dates_by_agent=val_dates, train_days_by_agent_for_transition=train_by_agent). Optionally rename arguments to avoid confusion (e.g., objective_ground_truth_by_agent, objective_dates_by_agent).",
+    "key_insight": "Never tune parameters on the same data used to fit priors; keep a clean separation between fitting (train) and calibration/selection (validation) to prevent leakage."
+  },
+  "place-occupancy-and-colocation-layer-not-implemented": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "place.current_occupancy: Increment when resident arrives; decrement when resident departs; used for co-location",
+      "co_location_contact: connect if overlapping time windows (within time_bin)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator.simulate_days",
+        "lines": "L563-L668"
+      },
+      {
+        "symbol": "POI",
+        "lines": "L142-L151"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": null
+    },
+    "error_identification": "Although POI has current_occupancy, the simulator never updates occupancy, never produces dwell intervals explicitly, and does not compute co-location contacts; this omits a blueprint interaction layer.",
+    "root_cause_analysis": "MobilitySimulator.simulate_days() generates arrival events with sampled dwell but does not create departure events nor update POI.current_occupancy. No component aggregates overlapping dwell windows into resident-resident contact events.",
+    "correct_approach": "If contacts/occupancy are required outputs/used later: represent visits as intervals (arrive_min, depart_min=arrive_min+dwell). Update POI.current_occupancy in an event queue (arrival +1, departure -1). For co-location, bin time (e.g., 10 min) and for each POI/time-bin collect resident IDs with overlapping intervals; emit contact edges. If not needed for current metrics, at least keep occupancy consistent or remove the unused state to avoid misleading design drift.",
+    "key_insight": "If the blueprint defines an interaction layer (occupancy/co-location), implement it end-to-end (state updates + event representation), or explicitly scope it out to avoid silent spec drift."
+  }
+}

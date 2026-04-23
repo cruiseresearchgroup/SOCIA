@@ -1,0 +1,130 @@
+{
+  "calibration-does-not-follow-blueprint-npe-posterior": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Blueprint: \"SBI calibration via NPE ... train NPE to approximate p(theta|x); sample posterior conditioned on x_o and take posterior mean as optimized_parameters\"",
+      "CODING PATCH: \"Use NPE on collected (theta, x) to learn p(theta | x)\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "_MLPGaussianNPE.loss_and_grads",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss=259.1369 vs train_loss=135.8805; best_candidate loss on x_o is low (~6.94) but does not translate to dataset MSE."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.1
+      }
+    ],
+    "error_identification": "Posterior inference is effectively a regression-from-x-to-theta objective, and posterior sampling uses an artificial variance floor; the learned posterior mean (beta\u22480.716, gamma\u22480.104) yields poor generalization (validation MSE much worse than training).",
+    "root_cause_analysis": "The implemented \"NPE\" is not NPE: _MLPGaussianNPE is trained to predict theta (in z-space) from x (supervised regression NLL), not to learn a conditional density consistent with a simulation-based likelihood-free posterior estimator. Additionally, SBINPECalibrator.fit forces std_o >= 0.15, injecting excessive posterior uncertainty unrelated to the learned model and potentially biasing posterior mean after sigmoid/logit transforms.",
+    "correct_approach": "In SBINPECalibrator.fit, remove the hard posterior std floor and instead calibrate posterior spread from the network output (or a small, learned global std scaling). More importantly, restructure the estimator to be a proper conditional density model trained by maximizing log p_z(z|x) with a flexible conditional distribution (e.g., mixture density network with K Gaussians in z-space) rather than a single diagonal Gaussian that behaves like point-regression. Keep the prior bounds via z-transform. This is a structural change in _MLPGaussianNPE (output mixture weights/means/log_stds) and sampling (sample mixture component then z).",
+    "key_insight": "If posterior samples/mean are sensitive to an arbitrary variance floor or a near-deterministic regressor, it is not doing SBI; use a conditional density family with enough capacity (e.g., mixture) and avoid hand-forced posterior uncertainty."
+  },
+  "posterior-predictive-evaluation-uses-first-m-thetas-not-randomized": {
+    "issue_type": "CODE_BUG",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Blueprint: \"sample posterior ... take posterior mean ... evaluate ... optionally run K stochastic rollouts\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "DiscreteTimeSIRSimulator.rollout",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss remains high; posterior_predictive_num_thetas=50 and rollout deterministically uses posterior_samples[:50]."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Posterior-predictive mean can be biased because evaluation uses the first 50 posterior draws rather than an unbiased subset/shuffle; this can over/under-represent parts of the posterior and increase MSE.",
+    "root_cause_analysis": "SBINPECalibrator.fit sets params._posterior_thetas = posterior_samples[:m_eval] without shuffling. DiscreteTimeSIRSimulator.rollout then uses posterior_thetas[:num_thetas_used] deterministically, so any ordering artifacts from sampling (or correlations) persist into predictions.",
+    "correct_approach": "In SBINPECalibrator.fit, randomly permute posterior_samples before selecting the m_eval subset (using the calibrator RNG). Alternatively, in DiscreteTimeSIRSimulator.rollout, draw theta indices at random per rollout (with replacement) from posterior_thetas to approximate posterior predictive expectation without dependence on ordering.",
+    "key_insight": "When approximating posterior predictive means with a finite theta set, always randomize or resample theta usage; never take a fixed prefix of samples."
+  },
+  "objective-mismatch-single-trajectory-calibration-vs-multi-trajectory-eval": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Blueprint: \"infer parameters from a single observed trajectory (train trajectory_id=0 only), then evaluate ... on full train/val/test sets.\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "Evaluator.compute_metrics",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "train_loss=135.8805 but val_loss=259.1369 (large generalization gap). Per-dim: val_loss_per_dim.S=412.52 dominates."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "Even with seemingly reasonable inferred parameters, validation error is much larger than training error, especially in S; suggests the single observed trajectory is not representative of other trajectories under the assumed constant-parameter SIR.",
+    "root_cause_analysis": "This may be an inherent identifiability/domain-shift limit: one trajectory (id 0) may not pin down a (beta,gamma) that explains heterogeneous trajectories. The current code also calibrates on raw counts MSE on the flattened vector; that objective overweights early high-S periods and trajectories with larger N, which can worsen cross-trajectory fit when N differs.",
+    "correct_approach": "Within the blueprint constraint (use only trajectory_id=0 as observation for SBI), improve robustness by changing x representation during calibration: normalize x by N (use S/N, I/N, R/N) and/or use a variance-stabilized transform (e.g., sqrt counts) before feeding to NPE and computing best_candidate loss. Apply the same transform consistently to simulated x and x_o. This is a structural change in SBINPECalibrator.fit where x_o/x_sims are constructed. Be realistic: if trajectories truly require varying beta/gamma across ids, a single global theta cannot reach near-zero val_loss; the best achievable is likely bounded away from 1e-6.",
+    "key_insight": "If calibrating from one trajectory but evaluating many, make the calibration observation vector scale-invariant (normalize by N / stabilize variance) to reduce mismatch across trajectories."
+  }
+}

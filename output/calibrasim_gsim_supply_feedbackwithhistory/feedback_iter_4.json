@@ -1,0 +1,197 @@
+{
+  "latent-demand-model-unidentifiable-and-dominates-backlog-error": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\u201cLatent demand must be inferred via calibration from observed inventory/backlog transitions.\u201d",
+      "\u201cCalibrate unknown parameters ... by minimizing trajectory-level discrepancy ... between simulated and observed trajectories.\u201d"
+    ],
+    "code_refs": [
+      {
+        "symbol": "BeerGameModel._sample_demand_conditioned",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "NPECalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss=322.287 with backlog_mse=1245.910 dominating; train_loss=327.762 similar scale"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.8
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Validation loss is very high and is overwhelmingly driven by backlog error (backlog_mse ~1245.9), while inventory/pipeline_len errors are comparatively small. This indicates the simulator\u2019s latent demand process is not matching the implied demand in the data, causing systematic backlog drift.",
+    "root_cause_analysis": "BeerGameModel._sample_demand_conditioned uses a mostly free-form Gamma-Poisson mixture with ad-hoc state conditioning (seasonality/backlog/pipeline factors) but it is not constrained/identified from the single observed training trajectory used in SBI (NPECalibrator.fit). The calibrated demand_rate_raw ends up implying a low base mean (exp(-1.63)*10\u22482) and then tries to compensate via demand_noise_scale-driven dispersion/uplifts, which is structurally mismatched to the true latent process, yielding persistent backlog mismatch across all trajectories.",
+    "correct_approach": "Constrain and identify demand from the observed transitions rather than adding heuristic state-conditioning. In BeerGameModel, replace the current demand sampler with a simple parametric family whose parameters are directly inferable from implied demand in the observation trajectory: compute per-step implied demand bounds from observed inventory/backlog changes and arrivals (from parsed pipeline), then fit a stationary discrete distribution (e.g., Poisson or empirical discrete) to those implied values during calibration, and in step() sample demand from that fitted distribution. Keep optional noise as a small additive/overdispersed term but bound it to prevent backlog blow-ups. This reduces degrees of freedom and improves generalization under single-trajectory SBI.",
+    "key_insight": "When calibrating latent exogenous processes from a single trajectory, prefer demand models that are identifiable from state-transition constraints (implied demand) over flexible stochastic processes with heuristic state conditioning."
+  },
+  "stochastic-update-convention-sampling-adds-eval-noise-and-hurts-generalization": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\u201cupdate_convention ... selected by best validation loss.\u201d",
+      "\u201cupdate_convention selects between a small set of (A/B/C/D) orderings to best match data.\u201d"
+    ],
+    "code_refs": [
+      {
+        "symbol": "BeerGameSimulator.__init__",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "BeerGameSimulator.rollout_trajectory",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "BeerGameModel._select_update_convention_stochastic",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss=322.287; update logits are not extremely separated (mean logits: [0.754,0.245,-1.212]) so stochastic sampling can flip conventions across trajectories"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "Evaluation rollouts choose update_convention stochastically per trajectory, which can introduce unnecessary randomness and mismatch against the (fixed-but-unknown) convention used to generate the dataset. With similar-magnitude logits, the sampled convention can vary and amplify errors.",
+    "root_cause_analysis": "BeerGameSimulator.rollout_trajectory sets model._fixed_update_convention by sampling from softmax(logits) when stochastic_update_convention=True (default). The blueprint indicates update_convention should be a calibrated discrete choice selected to best match data; stochastic switching at evaluation time is not implied and can worsen losses.",
+    "correct_approach": "Make update_convention selection deterministic for evaluation by default: set BeerGameSimulator.stochastic_update_convention=False for val/test rollouts (and optionally for train). If you want robustness, perform multiple rollouts per trajectory for each convention and pick the convention that minimizes error on the observation trajectory during calibration, then reuse that single convention for all splits (or store per-trajectory convention only if evidence exists that conventions differ by trajectory, which is not stated in the blueprint).",
+    "key_insight": "Discrete mechanism choices intended to be calibrated (like event ordering) should not be randomly resampled at evaluation unless the ground-truth process is explicitly a mixture and the metric averages over that mixture."
+  },
+  "action-stream-parsing-likely-misaligned-with-transition-steps": {
+    "issue_type": "CODE_BUG",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\u201cAt each time step ... inject a replenishment order into the pipeline using the provided action input.\u201d",
+      "\u201cFor a trajectory of length 61 states (t=0..60) ... actions correspond to transitions.\u201d"
+    ],
+    "code_refs": [
+      {
+        "symbol": "DataLoader._parse_actions",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "BeerGameSimulator.rollout_trajectory",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Persistently high losses across all splits (train_loss=327.762, val_loss=322.287) consistent with systematic misalignment rather than only generalization gap"
+    },
+    "metric_links": [
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      }
+    ],
+    "error_identification": "Loss is very large even on train split (not just val/test), suggesting a systematic mismatch in rollout mechanics. A common cause in these datasets is that action rows are recorded per state time_step (61 rows), but transitions require only 60 actions; using all 61 causes a one-step shift in ordering and pipeline dynamics.",
+    "root_cause_analysis": "DataLoader._parse_actions returns the full per-trajectory 'action' (or 'order') column without trimming to num_states-1, despite the docstring stating actions length should be num_states-1. BeerGameSimulator.rollout_trajectory rolls for T=len(actions) and appends T+1 states. If actions has length 61 while states has length 61, the simulator will produce 62 simulated states (or if evaluator truncates via min(), it will compare misaligned time steps), harming all metrics.",
+    "correct_approach": "In DataLoader._parse_actions, enforce transition alignment: after sorting by time_step, truncate actions to length (num_states-1). If the CSV includes an action at time_step=0 that should be applied to transition 0->1, keep it; otherwise, if actions are aligned to next state, shift appropriately based on dataset convention. Add a consistency check when loading: assert len(actions) == len(states)-1 per trajectory; if not, log and fix by trimming/shifting deterministically.",
+    "key_insight": "Always enforce the invariant 'len(actions) = len(states)-1' at load time; otherwise even perfect dynamics will score poorly due to off-by-one transition misalignment."
+  },
+  "pipeline-arrival-threshold-incorrect-for-remaining-lead-time-semantics": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\u201cdecrement remaining_lead_time for all tuples by 1; tuples reaching 0 deliver quantity into inventory and are removed\u201d",
+      "\u201cinterpret tuple as (quantity, remaining_lead_time) consistent with observed countdown patterns (e.g., (4,2)->(4,1)).\u201d"
+    ],
+    "code_refs": [
+      {
+        "symbol": "BeerGameModel.step.do_arrivals",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "pipeline_len_mse=3.885 and inventory_mse=39.353 indicate nontrivial pipeline/inventory mismatch consistent with early arrivals/removals"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "Pipeline length and inventory errors suggest the pipeline countdown/arrival timing may be off. The blueprint specifies arrival when remaining_lead_time reaches 0 after decrement; the implementation delivers when tau<=1.",
+    "root_cause_analysis": "In BeerGameModel.step.do_arrivals, entries with tau<=1 are treated as arriving immediately, and others decrement by 1. This effectively makes tau=1 arrive one step earlier than a 'decrement-to-0 then deliver' convention, shifting arrivals earlier and altering both inventory and pipeline_len trajectories.",
+    "correct_approach": "Implement countdown exactly as specified: first decrement tau by 1 for all entries, then deliver those with tau==0 and remove them. Concretely, in do_arrivals, transform each (q,tau) to (q,tau-1), then if new_tau==0 deliver, else keep if new_tau>0. Keep invariants (tau nonnegative) by requiring tau>=1 for newly-sampled lead times and parsed data.",
+    "key_insight": "For pipeline models, a one-step shift in the 'arrival when tau hits 0' convention systematically biases both inventory and pipeline length\u2014match the dataset\u2019s countdown semantics exactly."
+  },
+  "demand-model-uses-state-t-not-within-step-timing-and-can-mismatch-update-convention": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\u201cPer time step: (A) arrivals, (B) demand, (C) fulfill, (D) append new order, (E) increment time t.\u201d",
+      "\u201cupdate_convention selects between a small set of (A/B/C/D) orderings.\u201d"
+    ],
+    "code_refs": [
+      {
+        "symbol": "BeerGameModel.step.do_demand",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "BeerGameModel._sample_demand_conditioned",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "backlog_mse=1245.910; update conventions change when demand is realized relative to arrivals/orders"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "Demand is sampled using state.t (pre-step) regardless of whether arrivals/order occurred earlier within the chosen update convention. This can create inconsistent within-step semantics between convention variants and make calibration unstable, harming backlog.",
+    "root_cause_analysis": "BeerGameModel.step.do_demand calls _sample_demand_conditioned with t=int(state.t) even when demand is executed after arrivals or order. If the underlying dataset convention treats demand as realized at the end of the step (or after arrivals), conditioning on the pre-step t can create a systematic timing mismatch.",
+    "correct_approach": "Define a single consistent 'demand time index' per update convention and use it. For example: if demand occurs after arrivals/order, pass t=state.t+1 (or maintain an internal within-step clock) so that t matches the resulting state index being compared in the encoded trajectory. Ensure this is consistent with how ground-truth states are recorded (state at time_step t reflects completion of step t-1). Add a small unit test: simulate one step and verify that the encoded t aligns with the row index used by the evaluator.",
+    "key_insight": "When event order is a calibrated discrete choice, all time-indexed stochastic processes must use a convention-consistent time index; otherwise the model becomes internally inconsistent and hard to calibrate."
+  }
+}

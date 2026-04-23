@@ -1,0 +1,1611 @@
+{
+  "title": "Simulation Task",
+  "description": "The goal of this task is to construct a multi-agent framework that simulates how a user rates (on a scale of 1\u20135 stars) and reviews a given item. The items are drawn from the platform Amazon. The multi-agent system must simulate different users providing ratings and reviews for items originating from these three sources. This task is designed to evaluate the ability of LLM-based agents to generate coherent and contextually appropriate reviews and preference ratings, demonstrating their capacity for user behavior modeling and preference learning. By assessing the effectiveness of LLM agents in simulating human review behaviors, the task contributes to advancing methods in behavioral simulation and offers insights for improving user experience on real-world online review platforms.\n",
+  "simulation_focus": "The framework consists of three key agents:\n 1. Planning Agent: Upon receiving a task input (typically a user ID and item ID), this agent is responsible for decomposing the task into executable steps. For example, it may first identify the user\u2019s profile information and then retrieve the item\u2019s attributes.\n 2. Memory Agent: This agent maintains all task-relevant historical information, including item details linked to the item ID, past reviews of the item, the user\u2019s profile, and the user\u2019s review history.\n 3. Reasoning Agent: Using information retrieved from memory (user and item data) and the plan provided by the planning agent, this agent performs reasoning with an LLM to simulate the user\u2019s behavior. It outputs a predicted star rating and review text as the final simulated result.",
+  "data_folder": "data_fitting/agent_society/",
+  "data_files": {
+    "amazon_train_sample.json": "The files contain records from Amazon platforms. The fields \"user_id\" and \"item_id\" should be used as task inputs. The fields \"stars\" and \"review\" represent the ground-truth outputs and are for validation only\u2014they must not be provided to the model to avoid data leakage.",
+    "amazon_test_sample.json": "The files contain records for Amazon use modelling testing. The format of this file is the same as amazon_train_sample.json.",
+    "user_sample.json": "Indexed by \"user_id\", this file contains detailed information about each user.",
+    "item_sample.json": "Indexed by \"item_id\", this file provides metadata about each item.",
+    "review_sample.json": "Indexed by \"user_id\" and \"item_id\", this file includes historical reviews written by users about specific items."
+  },
+  "evaluation_metrics": {
+    "Preference Estimation": {
+      "description": "The preference estimation is calculated based on the star rating accuracy.",
+      "metric": "1 - MAE of star ratings, indicating the deviation from actual preferences."
+    },
+    "Review Generation": {
+      "description": "The review generation is calculated based on the review metrics.",
+      "metric": "1 - (Emotional Tone Error * 0.25 + Sentiment Attitude Error * 0.25 + Topic Relevance Error * 0.5), indicating the deviation from actual reviews."
+    },
+    "Overall Quality": {
+      "description": "The overall quality is calculated based on the preference estimation and review generation.",
+      "metric": "Metric: (Preference Estimation + Review Generation) / 2, indicating the overall quality of the simulated reviews."
+    }
+  },
+  "data_analysis_result": {
+    "overall_simulation_design": {
+      "objective": "Simulate multi-user rating (1\u20135 stars) and review generation for items on an e-commerce platform (e.g., Amazon), with automatic parameter calibration against observed data and evaluation on held-out records.",
+      "initialization": "Load interaction records (user_id, item_id, stars, review, split label), optional user profiles, and optional item metadata. Build indices over users/items, derive user and item priors (e.g., average stars, sentiment embeddings), initialize agent parameters (biases, aspect weights, verbosity) from priors and global hyperparameters, and set random seeds for reproducibility.",
+      "execution": "For each (user_id, item_id) in the training set: (1) construct persona and item context via retrieval and profiling; (2) compose an aspect plan; (3) generate a draft review via LLM; (4) map draft sentiment to a star rating using a calibrated rating function; (5) verify rating\u2013text consistency and revise if needed. Calibrate tunable parameters by minimizing a weighted loss (rating error + text similarity/consistency loss) using gradient-free search or Bayesian optimization on the training split. Freeze parameters and run the simulator on the validation split.",
+      "outputs": [
+        "calibrated_parameters.json (all tuned hyperparameters and per-agent priors)",
+        "simulation_traces.jsonl (per-record logs: inputs, plans, generated text, stars, diagnostics)",
+        "evaluation_metrics.json (metrics on validation set: RMSE/MAE for stars, text similarity, consistency)",
+        "ablation_report.json (optional: metrics under different capability modes)"
+      ]
+    },
+    "scale_granularity": {
+      "time_step": "days",
+      "spatial_resolution": "non-spatial",
+      "population_size": "Number of unique user_ids in input data; items equal to number of unique item_ids.",
+      "rationale": "Each review event can be timestamped to a day but does not require fine temporal coupling; interactions are non-spatial for Amazon product reviews. Population size follows available users/items to preserve empirical diversity."
+    },
+    "agent_archetypes": {
+      "unit": "user",
+      "roles": [
+        {
+          "name": "DataIndexer",
+          "static_attributes": [
+            "user_index (user_id\u2192history refs)",
+            "item_index (item_id\u2192history refs)",
+            "split_index (datatype labels)",
+            "aspect_vocab (generic product aspects)",
+            "platform_policy (style and constraints)"
+          ],
+          "dynamic_states": [
+            "cache_hits",
+            "last_refreshed_version",
+            "embedding_store_refs"
+          ],
+          "construction_from_data": "Parse all records, group by user_id and item_id. Create lookups, precompute item and user priors (avg stars, variance), and optionally build text embeddings for reviews.",
+          "update_from_data": "On new data ingestion or calibration iteration, refresh caches, merge new priors, and update embedding store pointers."
+        },
+        {
+          "name": "PersonaProfiler",
+          "static_attributes": [
+            "user_id",
+            "baseline_leniency (from user average stars vs global)",
+            "verbosity_prior (from review_count/useful/fans if available; else global)",
+            "tone_style_prior (e.g., formal/humorous from text cues)",
+            "domain_familiarity (category/topic exposure)"
+          ],
+          "dynamic_states": [
+            "leniency_drift",
+            "aspect_preference_weights",
+            "style_vector",
+            "recent_sentiment_bias"
+          ],
+          "construction_from_data": "Aggregate user\u2019s past stars and texts to estimate baselines and style; fallback to global priors if sparse.",
+          "update_from_data": "Adjust drift and weights via exponential moving averages from recent interactions; during calibration, update weights by gradient-free search to reduce loss."
+        },
+        {
+          "name": "ItemProfiler",
+          "static_attributes": [
+            "item_id",
+            "quality_prior (avg stars, variance)",
+            "aspect_summary (pros/cons from past texts)",
+            "domain_tags (inferred category keywords)"
+          ],
+          "dynamic_states": [
+            "freshness_score (recency-weighted activity)",
+            "controversy (variance of stars)",
+            "aspect_confidence"
+          ],
+          "construction_from_data": "Aggregate item\u2019s review texts to extract aspects and sentiment; compute priors from historical stars.",
+          "update_from_data": "Update aspect_summary and confidence with new observations; recalibrate quality_prior when new labeled data appear."
+        },
+        {
+          "name": "PlanComposer",
+          "static_attributes": [
+            "planning_rules (rating-text consistency templates)",
+            "aspect_selection_rules",
+            "length_policy"
+          ],
+          "dynamic_states": [
+            "planned_aspects",
+            "tone_targets",
+            "length_target"
+          ],
+          "construction_from_data": "Initialize rules from corpus statistics (common aspect frequencies, typical review lengths).",
+          "update_from_data": "Adapt selection probabilities for aspects and length to minimize consistency/text loss on training runs."
+        },
+        {
+          "name": "ReviewAuthor",
+          "static_attributes": [
+            "generation_guidelines (platform-safe, concise, specific)",
+            "style_alignment_weight",
+            "temperature_schedule"
+          ],
+          "dynamic_states": [
+            "last_generated_text_quality_score",
+            "revision_count"
+          ],
+          "construction_from_data": "Set initial temperature and style weights from corpus diversity, and user/item priors.",
+          "update_from_data": "Adjust temperature and style weight based on evaluator feedback and loss gradients during calibration."
+        },
+        {
+          "name": "StarRater",
+          "static_attributes": [
+            "sentiment_to_star_mapping (ordinal link function)",
+            "user_bias_prior",
+            "item_bias_prior"
+          ],
+          "dynamic_states": [
+            "mapping_slope",
+            "mapping_intercept",
+            "uncertainty_scale"
+          ],
+          "construction_from_data": "Fit initial global mapping from text sentiment polarity to stars using training records.",
+          "update_from_data": "Calibrate slope/intercept and user/item random effects to minimize rating error."
+        },
+        {
+          "name": "QAConsistency",
+          "static_attributes": [
+            "consistency_rules",
+            "contradiction_patterns",
+            "thresholds"
+          ],
+          "dynamic_states": [
+            "consistency_score",
+            "auto_fix_attempts"
+          ],
+          "construction_from_data": "Derive phrase-to-rating lexicons and thresholds from labeled stars and sentiment cues in text.",
+          "update_from_data": "Tune thresholds to balance false positives/negatives using validation feedback."
+        },
+        {
+          "name": "ParameterTuner",
+          "static_attributes": [
+            "search_strategy (e.g., Bayesian, random)",
+            "objective_definition",
+            "bounds_spec"
+          ],
+          "dynamic_states": [
+            "current_params",
+            "best_params",
+            "history_of_trials"
+          ],
+          "construction_from_data": "Set objective as weighted sum of rating and text losses; define parameter bounds from corpus stats.",
+          "update_from_data": "Iteratively propose params, run simulation on training set, record objective, and update proposal distribution."
+        },
+        {
+          "name": "Evaluator",
+          "static_attributes": [
+            "metric_definitions",
+            "eval_protocol (record-level, aggregate)"
+          ],
+          "dynamic_states": [
+            "last_eval_metrics",
+            "by_segment_metrics (user/item segments)"
+          ],
+          "construction_from_data": "Configure metrics like RMSE for stars and text similarity metrics from available ground-truth.",
+          "update_from_data": "Compute metrics after each calibration round and on the validation split; store result trajectories."
+        }
+      ]
+    },
+    "interaction_topology": {
+      "topology": "hybrid",
+      "layers": [
+        "pipeline: DataIndexer \u2192 PersonaProfiler \u2192 ItemProfiler \u2192 PlanComposer \u2192 ReviewAuthor \u2192 StarRater \u2192 QAConsistency \u2192 Evaluator",
+        "peer_influence: PersonaProfiler \u2194 PersonaProfiler (optional social/friend links if available)",
+        "memory_bus: shared feature store accessible by all roles"
+      ],
+      "protocol": "For each (user,item) event: fetch contexts (DataIndexer) \u2192 build/refresh persona and item profiles \u2192 compose aspect/tone plan \u2192 draft review \u2192 map to stars \u2192 consistency check and optional revision loop (bounded) \u2192 emit final review+stars \u2192 evaluator logs metrics and feedback to tuner.",
+      "construction_from_data": "Build user/item edges from interaction records; optional social edges from user profiles if friend lists exist; initialize platform policy layer from source/type fields."
+    },
+    "information_propagation": {
+      "exists": true,
+      "topology": "peer_influence layer among PersonaProfilers and broadcast item reputation via ItemProfiler",
+      "mechanism": "User\u2019s leniency and aspect weights include a neighbor-averaged component over friends or cohort neighbors; item reputation prior is broadcast to all agents as an exogenous prior.",
+      "construction_from_data": "Friend edges from user profiles (if provided); otherwise set neighbor weight to 0. Item priors from aggregated item histories in training data.",
+      "parameters": {
+        "names": [
+          "neighbor_weight",
+          "neighbor_hop_limit",
+          "reputation_inertia",
+          "ctx_merge_weight"
+        ],
+        "notes": "Estimate neighbor_weight by cross-validation; set hop_limit=1 for sparse graphs; tune inertia for how quickly item priors update; ctx_merge_weight balances persona vs item context for planning."
+      }
+    },
+    "exogenous_signals": [
+      {
+        "name": "platform_policy",
+        "construction_from_data": "source/type fields define platform (e.g., amazon/product) and stylistic constraints (e.g., length, no profanity).",
+        "observability": "All roles; no delay.",
+        "effect_on_agents": "Constrains ReviewAuthor tone/length; informs QAConsistency rules.",
+        "bounds": "[0, 1] (applies as weight in penalty for violating style)"
+      },
+      {
+        "name": "item_reputation_prior",
+        "construction_from_data": "Average stars and variance per item from training interactions.",
+        "observability": "PersonaProfiler, ItemProfiler, StarRater, PlanComposer.",
+        "effect_on_agents": "Shifts expectations and sentiment targets; regularizes rating mapping.",
+        "bounds": "[1.0, 5.0]"
+      },
+      {
+        "name": "user_leniency_prior",
+        "construction_from_data": "User average stars vs global mean; or prior from profile average_stars if available.",
+        "observability": "PersonaProfiler, StarRater.",
+        "effect_on_agents": "Bias term in rating mapping and tone target.",
+        "bounds": "[1.0, 5.0]"
+      },
+      {
+        "name": "domain_tags",
+        "construction_from_data": "Extracted from item review text or metadata (keywords).",
+        "observability": "PlanComposer, ReviewAuthor.",
+        "effect_on_agents": "Aspect selection frequencies and domain-specific phrasing.",
+        "bounds": "[categorical]"
+      }
+    ],
+    "action_decision_policy": {
+      "by_role": [
+        {
+          "role": "PersonaProfiler",
+          "inputs": [
+            "user history stars and texts",
+            "user profile features (if available)",
+            "neighbor persona summaries (optional)"
+          ],
+          "policy_form": "Heuristic + tool-derived features; update aspect weights by EMA; optional LLM to summarize tone if history is long.",
+          "parameters": [
+            "leniency_drift_rate",
+            "verbosity_scale",
+            "neighbor_weight",
+            "aspect_weight_decay"
+          ]
+        },
+        {
+          "role": "ItemProfiler",
+          "inputs": [
+            "item history stars and texts"
+          ],
+          "policy_form": "Tool-first aspect extraction and sentiment aggregation; heuristic smoothing for priors.",
+          "parameters": [
+            "aspect_smoothing_alpha",
+            "reputation_inertia",
+            "min_reviews_for_confidence"
+          ]
+        },
+        {
+          "role": "PlanComposer",
+          "inputs": [
+            "persona aspect weights and tone",
+            "item aspect summary",
+            "platform policy"
+          ],
+          "policy_form": "Rule-based aspect selection with temperature for diversity; optional LLM to refine outline.",
+          "parameters": [
+            "aspect_topk",
+            "length_target_mean",
+            "ctx_merge_weight",
+            "plan_diversity_temp"
+          ]
+        },
+        {
+          "role": "ReviewAuthor",
+          "inputs": [
+            "plan (aspects, tone, length)",
+            "persona style summary",
+            "item facts and priors"
+          ],
+          "policy_form": "LLM-call conditioned on structured plan and constraints; optional post-processing rules.",
+          "parameters": [
+            "llm_temperature",
+            "style_alignment_weight",
+            "max_revision_loops"
+          ]
+        },
+        {
+          "role": "StarRater",
+          "inputs": [
+            "generated text sentiment vector",
+            "user and item biases",
+            "item reputation prior"
+          ],
+          "policy_form": "Ordinal regression or logistic link mapping sentiment to stars with user/item random effects; optional LLM fallback if text is short.",
+          "parameters": [
+            "mapping_slope",
+            "mapping_intercept",
+            "user_bias_weight",
+            "item_bias_weight",
+            "uncertainty_scale"
+          ]
+        },
+        {
+          "role": "QAConsistency",
+          "inputs": [
+            "generated text",
+            "proposed stars",
+            "plan and platform policy"
+          ],
+          "policy_form": "Tool-based sentiment polarity vs rating check; LLM contradiction detection; if inconsistent and budget remains, trigger revision.",
+          "parameters": [
+            "consistency_threshold",
+            "max_auto_fix_attempts",
+            "penalty_weight_style_violations"
+          ]
+        },
+        {
+          "role": "ParameterTuner",
+          "inputs": [
+            "training split records",
+            "evaluation feedback per trial"
+          ],
+          "policy_form": "Bayesian optimization or random search with early stopping; objective = weighted sum of errors.",
+          "parameters": [
+            "num_trials",
+            "early_stop_patience",
+            "objective_weights"
+          ]
+        },
+        {
+          "role": "Evaluator",
+          "inputs": [
+            "validation split records",
+            "simulated outputs"
+          ],
+          "policy_form": "Deterministic metric computation and segment analysis.",
+          "parameters": [
+            "text_metric_selection",
+            "segment_definitions"
+          ]
+        }
+      ]
+    },
+    "holdout_plan": {
+      "method": "random_split",
+      "train_range": "Use records labeled datatype='train' for calibration; if no labels, sample 80% of interactions at random with fixed seed.",
+      "validation_range": "Use records labeled datatype='test' for final evaluation; if no labels, remaining 20% (held out).",
+      "notes": "If timestamps exist, prefer temporal holdout: first 80% by date for training and last 20% for validation."
+    },
+    "simulation_evaluation": {
+      "metrics": [
+        {
+          "name": "RMSE_stars",
+          "definition": "Root mean squared error between simulated and ground-truth star ratings on validation set."
+        },
+        {
+          "name": "MAE_stars",
+          "definition": "Mean absolute error of star ratings."
+        },
+        {
+          "name": "Text_Similarity",
+          "definition": "Semantic similarity between generated and reference reviews (e.g., BERTScore F1 or cosine over sentence embeddings)."
+        },
+        {
+          "name": "Sentiment_Agreement",
+          "definition": "Binary/soft agreement between generated text polarity and simulated stars (1 if polarity-sign matches rating bucket; else 0)."
+        },
+        {
+          "name": "Aspect_Coverage",
+          "definition": "Proportion of planned aspects mentioned in generated text (via aspect matcher)."
+        },
+        {
+          "name": "Consistency_Score",
+          "definition": "Average QAConsistency score across validation records."
+        },
+        {
+          "name": "Length_Deviation",
+          "definition": "Absolute deviation of sentence count from target length."
+        }
+      ],
+      "comparison_method": "Compute metrics per record and aggregate means/std; report overall and by segments (user/item frequency tertiles). Produce evaluation_metrics.json and optional plots (if supported)."
+    },
+    "calibratable_parameters": [
+      {
+        "name": "neighbor_weight",
+        "range_bounds": "[0.0, 0.5]",
+        "source": "Persona peer influence strength",
+        "notes": "Set to 0 if no social graph."
+      },
+      {
+        "name": "ctx_merge_weight",
+        "range_bounds": "[0.2, 0.8]",
+        "source": "PlanComposer blending persona vs item aspects",
+        "notes": "Higher \u2192 more persona-driven aspect selection."
+      },
+      {
+        "name": "aspect_topk",
+        "range_bounds": "[3, 6]",
+        "source": "Number of aspects to cover",
+        "notes": "Integer."
+      },
+      {
+        "name": "length_target_mean",
+        "range_bounds": "[2, 6]",
+        "source": "Target sentence count",
+        "notes": "Rounded to nearest integer."
+      },
+      {
+        "name": "plan_diversity_temp",
+        "range_bounds": "[0.3, 1.2]",
+        "source": "Diversity in aspect selection",
+        "notes": "Softmax temperature."
+      },
+      {
+        "name": "llm_temperature",
+        "range_bounds": "[0.2, 0.9]",
+        "source": "ReviewAuthor sampling",
+        "notes": "Stability vs creativity."
+      },
+      {
+        "name": "style_alignment_weight",
+        "range_bounds": "[0.3, 1.0]",
+        "source": "Strength of persona/style conditioning",
+        "notes": "Higher adheres more to persona."
+      },
+      {
+        "name": "mapping_slope",
+        "range_bounds": "[2.0, 8.0]",
+        "source": "StarRater sentiment-to-stars mapping",
+        "notes": "Steepness of logistic/ordinal link."
+      },
+      {
+        "name": "mapping_intercept",
+        "range_bounds": "[-2.0, 2.0]",
+        "source": "StarRater baseline offset",
+        "notes": "Shifts neutral sentiment to 3-star."
+      },
+      {
+        "name": "user_bias_weight",
+        "range_bounds": "[0.0, 1.0]",
+        "source": "Contribution of user leniency into rating",
+        "notes": "Regularization toward user prior."
+      },
+      {
+        "name": "item_bias_weight",
+        "range_bounds": "[0.0, 1.0]",
+        "source": "Contribution of item reputation into rating",
+        "notes": "Regularization toward item prior."
+      },
+      {
+        "name": "uncertainty_scale",
+        "range_bounds": "[0.1, 1.0]",
+        "source": "Noise in rating mapping",
+        "notes": "Controls rounding dispersion."
+      },
+      {
+        "name": "consistency_threshold",
+        "range_bounds": "[0.6, 0.9]",
+        "source": "QAConsistency decision threshold",
+        "notes": "Below threshold triggers revision."
+      },
+      {
+        "name": "max_auto_fix_attempts",
+        "range_bounds": "[0, 2]",
+        "source": "Revision budget",
+        "notes": "Integer; 0 disables edits."
+      },
+      {
+        "name": "objective_weights",
+        "range_bounds": "{'stars': [0.4, 0.8], 'text': [0.2, 0.6], 'consistency': [0.0, 0.3]}",
+        "source": "Tuner loss weighting",
+        "notes": "Weights sum normalized to 1."
+      }
+    ]
+  },
+  "file_summaries": [
+    {
+      "file_name": "amazon_train_sample.json",
+      "file_type": "json",
+      "semantic_summary": "- Overall data structure and type\n  - Top-level JSON object (dictionary) keyed by string IDs (e.g., \"322\").\n  - Each value is a flat record representing one user\u2013item interaction with fields:\n    - type: \"user_behavior_simulation\"\n    - user_id: anonymized user identifier\n    - item_id: Amazon ASIN\n    - stars: float rating on a 1\u20135 scale\n    - review: free-text review\n    - datatype: split label (e.g., \"train\")\n\n- Relationships or nested elements\n  - No nesting; schema is flat per record.\n  - Implicit many-to-many relational structure:\n    - Users (user_id) can interact with many items (item_id).\n    - Items can have reviews from many users.\n  - The record is the edge between user and item, carrying both quantitative (stars) and qualitative (review) feedback.\n  - Keys at the top level are dataset-internal and not needed for simulation logic; user_id + item_id uniquely identify an interaction.\n  - Item categories are not explicitly provided; any category/context must be inferred from review text or external metadata.\n\n- How this data should inform simulation entities or interactions\n  - Entities\n    - User agents: parameterize by user_id; derive preference profiles from prior stars/reviews (e.g., sensitivity to build quality, value, reliability, performance). Maintain tone/leniency and domain familiarity inferred from text.\n    - Item entities: parameterize by item_id; aggregate attributes from observed reviews (pros/cons, durability, fit/finish, performance, value) to provide context for new interactions.\n  - Interactions\n    - For a (user_id, item_id) pair, simulate:\n      - A star rating aligned with sentiment and prior user tendencies (1\u20135).\n      - A concise review (2\u20136 sentences) that references item attributes, balances pros/cons, and matches the given rating intensity.\n    - Enforce rating\u2013text consistency (e.g., 5 stars \u2192 strongly positive language; 2\u20133 stars \u2192 mixed/critical with specific issues).\n    - Style should mirror corpus cues: mention quality, reliability, value/price, fit/finish, and use-case suitability.\n  - Dataset usage\n    - Use datatype to split training vs. evaluation.\n    - Use type to filter relevant records.\n    - Leverage repeated users/items (if present) for preference learning and item trait summarization.\n    - Since only ASINs are present, integrate external product metadata if richer item context is needed; otherwise infer from text."
+    },
+    {
+      "file_name": "amazon_test_sample.json",
+      "file_type": "json",
+      "semantic_summary": "- Overall data structure and type:\n  - A single JSON object (dictionary) keyed by string IDs (\u201c92\u201d, \u201c318\u201d, \u2026).\n  - Each key maps to one flat record describing a user\u2013item interaction (a simulated Amazon review event).\n  - Data types per field: type (string), user_id (string), item_id/ASIN (string), stars (float 1\u20135), review (string, free text), datatype (string; here \u201ctest\u201d).\n\n- Relationships or nested elements:\n  - No nested objects beyond each record; schema is flat.\n  - Many-to-many relational intent: user_id \u2194 item_id via interaction records (each record = one edge).\n  - type = \"user_behavior_simulation\" denotes the scenario/class; datatype = \"test\" denotes split/usage.\n  - user_id and item_id are foreign-key-like identifiers; reviews and stars are attributes of the user\u2013item edge.\n\n- How this data should inform simulation entities or interactions:\n  - Entities:\n    - UserAgent per unique user_id: infer/reinforce persona traits (tone, verbosity, criteria) from the review text and rating tendencies from stars.\n    - ItemProfile per unique item_id (ASIN): infer product domain/features from review text (e.g., gaming accessory, instrument strings, tools) to condition language and expectations.\n  - Interactions:\n    - Each record represents a ground-truth user\u2192item rating + review event for evaluation/conditioning.\n    - Use stars to supervise sentiment intensity and rating calibration; use review text to supervise content realism (pros/cons, usability, value).\n    - Since timestamps and item metadata are absent, simulations should synthesize minimal context from text or attach external catalog data by ASIN if available.\n    - datatype=\"test\" implies these examples should not be used for training persona/item models but for held-out evaluation of generated ratings/reviews.\n  - System design implications:\n    - Maintain a user\u2013item interaction graph; generate new edges (reviews) consistent with learned user/item priors.\n    - Support domain-aware phrasing (e.g., gaming, music gear, DIY tools) derived from existing review content.\n    - Expect sparse coverage (often one interaction per user/item); avoid relying on history being present."
+    },
+    {
+      "file_name": "user_sample.json",
+      "file_type": "json",
+      "semantic_summary": "- Data type and structure: A flat JSON array where each element is a user profile object. Fields are primarily primitive types (strings, integers, timestamps). No nested JSON objects or arrays; some fields encode lists as comma-separated strings.\n- Key fields: user_id (unique ID), name, review_count, yelping_since (timestamp), useful/funny/cool (engagement signals), elite (comma-separated years), friends (comma-separated user IDs), fans, average_stars, multiple compliment_* counters, source (\"yelp\").\n- Relationships: \n  - Implicit social graph via friends (IDs referencing other users, not guaranteed to be present in this sample).\n  - Temporal dimension via yelping_since and elite years.\n  - Engagement/credibility via fans, useful/cool/funny, compliments.\n- Encoded lists: \n  - friends and elite are comma-separated strings that should be parsed into arrays for graph and tenure features.\n- No item data: This file provides reviewer/user metadata only; items (Amazon products) must come from elsewhere.\n- How to use for multi-agent simulation:\n  - Instantiate user agents with personas derived from profile features.\n  - Rating tendency: center each agent\u2019s rating distribution around average_stars; variance inversely related to review_count (experienced users = steadier ratings).\n  - Activity/verbosity: scale review frequency and review length by review_count and fans; long-tenure (yelping_since) users may produce more detailed reviews.\n  - Style and tone: \n    - funny \u2192 likelihood of humor/sarcasm; cool/useful \u2192 informative tone; compliment_writer \u2192 articulate prose.\n  - Influence/weighting: fans and useful votes map to higher credibility; elite years indicate expert/reputable reviewers; use to weight their impact on aggregate ratings.\n  - Social effects: build a friend graph from friends arrays to simulate homophily or influence (e.g., correlated ratings or co-adoption of opinions).\n  - Cross-platform mapping to Amazon:\n    - useful \u2248 \u201cHelpful\u201d votes; fans/elite \u2248 reviewer rank/badges; maintain source tag to allow domain adaptation while reviewing Amazon items.\n- Data hygiene considerations:\n  - Parse comma-separated fields to arrays; trim spaces.\n  - Some friend IDs may not exist in this subset; handle missing nodes gracefully.\n  - Timestamps should be normalized to datetime types for tenure features.\n- Simulation outputs:\n  - Star ratings (1\u20135) informed by per-user priors.\n  - Text reviews reflecting tone/length/style features from engagement and compliment metrics.\n  - Optional helpfulness predictions based on agent credibility.\n- Summary: This file is user-centric metadata enabling creation of diverse, socially connected reviewer agents with calibrated rating biases, stylistic behaviors, and influence levels to review Amazon items within a multi-agent framework."
+    },
+    {
+      "file_name": "item_sample.json",
+      "file_type": "json",
+      "semantic_summary": "- Overall structure and type\n  - JSON array of business items. Each element is a single venue/service record with a stable primary key (item_id).\n  - Core fields: identity (item_id, name), location (address, city, state, postal_code, latitude, longitude), platform metadata (source, type), popularity signals (stars, review_count), operational status (is_open), categorical tags (categories), attributes (amenities/qualities), and hours.\n\n- Relationships and nested elements\n  - attributes: object of venue features (price, alcohol, delivery/takeout, ambience, parking, WiFi, noise, suitability for kids/groups, etc.). Several values are stringified booleans or Python-like dicts/strings (e.g., \"{'garage': True,...}\", \"u'casual'\"), requiring parsing/normalization.\n  - hours: dictionary mapping weekday names to \"start:end\" strings (24h-like times); some days can be \"0:0-0:0\" (closed) or missing.\n  - categories: comma-separated string of multiple categories; should be split into a list.\n  - Type is consistently \"business\"; source here is Yelp (note: task mentions Amazon, but sample data source is yelp).\n\n- How this data should inform simulation entities or interactions\n  - Item agents\n    - Use item_id as key; include location for distance modeling; categories to define domain (restaurants, cafes, tattoo, salons).\n    - Attributes drive experiential facets to mention in reviews (e.g., WiFi, OutdoorSeating, Alcohol, NoiseLevel, GoodForKids, Delivery/TakeOut, Reservations, PriceRange2).\n    - hours and is_open gate availability; GoodForMeal guides scenario selection (breakfast/lunch/dinner/takeout).\n    - stars and review_count provide prior reputation/popularity to shape user expectations and rating variance.\n  - User agents (personas)\n    - Preferences map to attributes: budget (PriceRange2), family-friendly (GoodForKids), remote worker (WiFi), nightlife/bar (Alcohol/HappyHour/HasTV), group size (GoodForGroups), ambience preferences, parking needs, outdoor seating, delivery vs dine-in.\n    - Context variables: time-of-day/day-of-week, party size, purpose (quick lunch vs special dinner), distance tolerance (lat/long).\n    - Expectations calibrated by existing stars; biases influence final rating relative to experience fit.\n  - Interaction flow\n    - Match user persona to candidate items via categories/attributes and current open hours.\n    - Generate visit scenario (e.g., Saturday brunch at Vineyards Cafe; delivery from Cuenelli\u2019s).\n    - Create experience outcomes tied to attributes (praise/complaints about noise, parking, speed, TV, reservations, price, WiFi).\n    - Produce a 1\u20135 star rating and review text grounded in item features and scenario; incorporate popularity priors to modulate rating distribution.\n  - Data handling notes\n    - Normalize attribute types (booleans, dicts, enums), split categories, parse hours, handle null/missing keys and closed businesses (is_open=0).\n    - Preserve source field for cross-platform analyses; here all are Yelp."
+    },
+    {
+      "file_name": "review_sample.json",
+      "file_type": "json",
+      "semantic_summary": "- Overall data structure and type\n  - A flat JSON array of review objects.\n  - Each review is a single, self-contained record with scalar fields: review_id, user_id, item_id (strings), stars (float 1\u20135), useful/funny/cool (ints), text (string), date (timestamp string), source (platform), type (domain such as business/product).\n  - No nested objects; the only collection is the top-level list.\n\n- Relationships or nested elements\n  - Review is the junction linking a user (user_id) to an item (item_id): many reviews per user and per item.\n  - useful/funny/cool are post-review interaction counts from other users (implicit second-order user\u2192review relationships).\n  - date provides temporal ordering for longitudinal behaviors.\n  - source distinguishes platform (e.g., yelp vs amazon); type distinguishes entity class (e.g., business vs product).\n\n- How this data should inform simulation entities or interactions\n  - Entities\n    - UserAgent: has preferences (taste, leniency/harshness, verbosity), generates stars and text; may also cast interaction votes on others\u2019 reviews.\n    - Item: carries attributes that condition sentiment/aspects mentioned (for Amazon, product specs/quality; for Yelp, service/ambience/food).\n    - Platform/Source policy: determines available interaction types (Amazon: helpful only; Yelp: useful/funny/cool) and any style constraints.\n    - Review object: output artifact with star rating, text, timestamp, and interaction counts.\n  - Interactions\n    - Primary: user\u2192item review creation (stars + text), respecting 1\u20135 scale and platform/type tone.\n    - Secondary: other users\u2019 interaction votes updating useful/funny/cool (or helpful), possibly time-lagged and popularity-biased.\n    - Temporal: use date to simulate review sequences, preference drift, and interaction accumulation over time.\n    - Cross-platform mapping: for Amazon runs, set source=\"amazon\", type=\"product\"; map useful\u2192helpful, drop funny/cool; preserve id uniqueness and timestamp format.\n  - Data constraints to mirror\n    - Unique IDs for review/user/item; non-negative integer interaction counts; float stars in 0.5 steps typical; concise-to-detailed text variability; platform-appropriate content focus guided by type."
+    }
+  ],
+  "schemas": {
+    "amazon_train_sample.json": {
+      "file_type": "json",
+      "data_type": "object",
+      "length": 100,
+      "sample_data": {
+        "322": {
+          "type": "user_behavior_simulation",
+          "user_id": "AGA5Y37ZEUIGWN3LNRE4NWITUCHQ",
+          "item_id": "B019BH6O2K",
+          "stars": 5.0,
+          "review": "The Fastronix 3 Pack Heavy Duty Push Button Momentary Start Switch is an excellent addition to any industrial or automotive setup. The build quality is top-notch, and the switches are incredibly durable, which is crucial for heavy-duty applications. The black neoprene cap provides great protection against dust and moisture, and the installation process is straightforward. The switches are rated for 60 amps at 12 volts, making them suitable for a wide range of uses, from tractors to generators. While some users have noted issues with the weatherproofing, the overall performance and value for the price make this product a standout choice. Highly recommend!",
+          "datatype": "train"
+        },
+        "192": {
+          "type": "user_behavior_simulation",
+          "user_id": "AHTGRARW75TSYBVEKO4NWL56AXPQ",
+          "item_id": "B094FBTCCX",
+          "stars": 3.0,
+          "review": "\"King's Bounty II is a mixed bag. The strategic depth and engaging gameplay are definitely highlights, and the turn-based battles offer a lot of fun. However, the game is marred by technical issues like frame rate drops and blurry textures, which can be frustrating. The morality system also feels limiting, and the poor voice acting detracts from the experience. While it has its merits, it falls short in areas that are important to me, such as build quality and reliability. It's worth a try if you can get it at a discount, but be prepared for some rough edges.\"",
+          "datatype": "train"
+        },
+        "18": {
+          "type": "user_behavior_simulation",
+          "user_id": "AFPCTW2KY4XII4YMKS7DNUWJGEJQ",
+          "item_id": "B09CM362L9",
+          "stars": 2.0,
+          "review": "The DAddario Woodwinds Neck Saver for Alto Saxophone is a mixed bag. While it's designed to fit the contour of the neck and is made from soft, absorbent material, it falls short in several areas. The absorption is poor, and it tends to spread moisture rather than soak it up effectively. The construction feels flimsy, and the tip is prone to coming off, which is a significant concern for a product that should be durable and reliable. Given the issues with absorption and build quality, it's hard to justify the price, especially when there are better alternatives available.",
+          "datatype": "train"
+        },
+        "93": {
+          "type": "user_behavior_simulation",
+          "user_id": "AGFQOWAQQVSDGW4SX2ORRLUCX4UQ",
+          "item_id": "B08YY6GPRM",
+          "stars": 4.0,
+          "review": "I found this microphone to be a solid choice for its price point. The sound quality is quite good, and the plug-and-play setup is very convenient, making it easy to use right out of the box. The included accessories, such as the pop filter and windscreen, are useful and add value. However, the boom arm is a bit flimsy and doesn't hold the microphone as securely as I would like. Despite this, it's still a great option for gaming, podcasting, and streaming, and the overall performance justifies the price.",
+          "datatype": "train"
+        },
+        "71": {
+          "type": "user_behavior_simulation",
+          "user_id": "AG546CSI65I2I5CQEDA4MTE64JGA",
+          "item_id": "B0B9RG7HZM",
+          "stars": 5.0,
+          "review": "I'm quite impressed with the Dimora Fenestrated Foam Dressing. The high absorbency and ability to maintain skin integrity are crucial for emergency and wound care situations, which align well with my preference for practical and reliable products. The non-stick feature is a significant plus, as it reduces pain and trauma during dressing changes. Although the lack of adhesive can be a minor inconvenience, the overall quality and performance make this a must-have for any first aid kit. The price is a bit steep, but the value and effectiveness justify the cost.",
+          "datatype": "train"
+        },
+        "197": {
+          "type": "user_behavior_simulation",
+          "user_id": "AEZ64MNN2ZZUQEZ6MYVBDMNWGKQA",
+          "item_id": "B007RNWUC4",
+          "stars": 5.0,
+          "review": "Xenoblade Chronicles is an exceptional game that aligns perfectly with my preferences for high-quality, engaging, and well-crafted products. The vast, immersive world and compelling storyline are truly outstanding, keeping me hooked for hours. The battle system is both challenging and rewarding, and the character development is top-notch. Despite the high price and some minor camera control issues, the overall experience is fantastic, making it a must-have for any RPG enthusiast.",
+          "datatype": "train"
+        },
+        "61": {
+          "type": "user_behavior_simulation",
+          "user_id": "AGFBJZDZDHA6J6DUS7L4RLL4L4HA",
+          "item_id": "B07QNCC6LR",
+          "stars": 4.0,
+          "review": "These Vintage Forge Gold Top Hat Bell Knobs are a solid choice for anyone looking to upgrade their Gibson Les Paul. The fit and finish are excellent, and they look and feel just like the original knobs. The embossed numbers add a nice touch, and the packaging is well done. However, I did notice a slight gap between the bottom of the knob and the guitar body, which could be a minor issue for some. Overall, they are a great value and a worthwhile upgrade.",
+          "datatype": "train"
+        },
+        "349": {
+          "type": "user_behavior_simulation",
+          "user_id": "AEIORS6YPYMQBLYQVTB6OLRC45UA",
+          "item_id": "B01KHPPHYQ",
+          "stars": 4.0,
+          "review": "The HYCLAT 5pcs Titanium Step Drill Bit set is a solid choice for anyone looking for a versatile and affordable option. The bits are well-made, with a titanium coating that provides durability and smooth cutting. The double cutting blades and X-type openings ensure fast and efficient drilling, which is a plus. The included aluminum case is a nice touch, making storage and transport easy. However, the bits do show some wear after heavy use, especially on harder materials, which is a minor drawback. Overall, it's a great value for the price, and I'd recommend it for DIY projects and general use.",
+          "datatype": "train"
+        },
+        "348": {
+          "type": "user_behavior_simulation",
+          "user_id": "AGM4OUPZFXEYYJCMMYAK4S3HFGGQ",
+          "item_id": "B072BV33M5",
+          "stars": 5.0,
+          "review": "I'm very impressed with the Mcbazel LOT 10 Clear Case Sleeve Protector for Nintendo N64 Games Cartridge. The cases fit my N64 games perfectly, providing excellent protection from dust, scratches, and accidental drops. The clear plastic allows me to display the original box art proudly. They are easy to assemble and don't take up much shelf space. The quality is top-notch, and at this price, it's a fantastic value for money. Highly recommend for any N64 collector.",
+          "datatype": "train"
+        },
+        "256": {
+          "type": "user_behavior_simulation",
+          "user_id": "AHS37JFM7HYFVOYHSO2QVSOXAG7A",
+          "item_id": "B013T7LT8M",
+          "stars": 4.0,
+          "review": "I was quite impressed with the Crystal Black Revo K101 Plus Emulator Game Handheld. The build quality is solid, and the screen is clear and bright, which is a big plus. The device supports a wide range of retro games, and the TV-out feature is a nice touch. However, I did notice some issues with the screen resolution and aspect ratio, which caused some games to look a bit blurry. Additionally, the buttons could be more responsive. Despite these minor drawbacks, it's a good value for the price and a fun device for retro gaming enthusiasts.",
+          "datatype": "train"
+        }
+      },
+      "value_structure": {
+        "type": "dict",
+        "sample_value": {
+          "type": "user_behavior_simulation",
+          "user_id": "AGA5Y37ZEUIGWN3LNRE4NWITUCHQ",
+          "item_id": "B019BH6O2K",
+          "stars": 5.0,
+          "review": "The Fastronix 3 Pack Heavy Duty Push Button Momentary Start Switch is an excellent addition to any industrial or automotive setup. The build quality is top-notch, and the switches are incredibly durable, which is crucial for heavy-duty applications. The black neoprene cap provides great protection against dust and moisture, and the installation process is straightforward. The switches are rated for 60 amps at 12 volts, making them suitable for a wide range of uses, from tractors to generators. While some users have noted issues with the weatherproofing, the overall performance and value for the price make this product a standout choice. Highly recommend!",
+          "datatype": "train"
+        }
+      },
+      "file_semantic_summary": "- Overall data structure and type\n  - Top-level JSON object (dictionary) keyed by string IDs (e.g., \"322\").\n  - Each value is a flat record representing one user\u2013item interaction with fields:\n    - type: \"user_behavior_simulation\"\n    - user_id: anonymized user identifier\n    - item_id: Amazon ASIN\n    - stars: float rating on a 1\u20135 scale\n    - review: free-text review\n    - datatype: split label (e.g., \"train\")\n\n- Relationships or nested elements\n  - No nesting; schema is flat per record.\n  - Implicit many-to-many relational structure:\n    - Users (user_id) can interact with many items (item_id).\n    - Items can have reviews from many users.\n  - The record is the edge between user and item, carrying both quantitative (stars) and qualitative (review) feedback.\n  - Keys at the top level are dataset-internal and not needed for simulation logic; user_id + item_id uniquely identify an interaction.\n  - Item categories are not explicitly provided; any category/context must be inferred from review text or external metadata.\n\n- How this data should inform simulation entities or interactions\n  - Entities\n    - User agents: parameterize by user_id; derive preference profiles from prior stars/reviews (e.g., sensitivity to build quality, value, reliability, performance). Maintain tone/leniency and domain familiarity inferred from text.\n    - Item entities: parameterize by item_id; aggregate attributes from observed reviews (pros/cons, durability, fit/finish, performance, value) to provide context for new interactions.\n  - Interactions\n    - For a (user_id, item_id) pair, simulate:\n      - A star rating aligned with sentiment and prior user tendencies (1\u20135).\n      - A concise review (2\u20136 sentences) that references item attributes, balances pros/cons, and matches the given rating intensity.\n    - Enforce rating\u2013text consistency (e.g., 5 stars \u2192 strongly positive language; 2\u20133 stars \u2192 mixed/critical with specific issues).\n    - Style should mirror corpus cues: mention quality, reliability, value/price, fit/finish, and use-case suitability.\n  - Dataset usage\n    - Use datatype to split training vs. evaluation.\n    - Use type to filter relevant records.\n    - Leverage repeated users/items (if present) for preference learning and item trait summarization.\n    - Since only ASINs are present, integrate external product metadata if richer item context is needed; otherwise infer from text."
+    },
+    "amazon_test_sample.json": {
+      "file_type": "json",
+      "data_type": "object",
+      "length": 50,
+      "sample_data": {
+        "92": {
+          "type": "user_behavior_simulation",
+          "user_id": "AH544NICZBHWPHVOLJZNMEQKS6IQ",
+          "item_id": "B07DFZ6VHG",
+          "stars": 5.0,
+          "review": "I am very impressed with the BRHE Xbox-One Controller Skin. The design is sleek and the blue color adds a nice touch to my controller. The skin fits perfectly and does not interfere with the controller's functionality. The enhanced grip and non-slip surface are excellent, making it more comfortable during long gaming sessions. The product is also easy to install and remove, and the price is very reasonable for the quality and protection it provides. This is a great accessory for any Xbox One user.",
+          "datatype": "test"
+        },
+        "318": {
+          "type": "user_behavior_simulation",
+          "user_id": "AFOC3DRLKLZ2EEGJ6GQEH4CZYIIQ",
+          "item_id": "B089GTWF4G",
+          "stars": 4.0,
+          "review": "The GeekShare Fruit Theme Thumb Grip Caps are a fun and practical addition to my Nintendo Switch Lite. The silicone material is soft and comfortable, providing a better grip during extended gaming sessions. The designs are cute and add a personal touch to the controller. Installation was a bit tricky but once in place, they stayed securely without any issues. While not as essential as some of my other tech accessories, these grips are a nice upgrade for anyone looking to enhance their gaming experience.",
+          "datatype": "test"
+        },
+        "376": {
+          "type": "user_behavior_simulation",
+          "user_id": "AEYBARGSYYSLGOQPZWKL3NLRULKQ",
+          "item_id": "B00002STFP",
+          "stars": 2.0,
+          "review": "I was excited to revisit Mortal Kombat Trilogy, but the N64 version left a lot to be desired. The game is content-rich and nostalgic, but the technical limitations are a major letdown. Missing characters and stages, poor sound quality, and choppy graphics make it a subpar experience compared to the PlayStation version. The gameplay is smooth, but the technical issues and missing content significantly detract from the overall enjoyment. It's a shame, as I had high hopes for a more polished package.",
+          "datatype": "test"
+        },
+        "383": {
+          "type": "user_behavior_simulation",
+          "user_id": "AHURAGAX62URZ6LFI2TEC7EPPZBQ",
+          "item_id": "B0009FC964",
+          "stars": 4.0,
+          "review": "The Cleartone Electric .009-.042 Super Light Strings are a solid choice for guitarists looking for high-quality, durable strings. The patented treatment significantly extends the lifespan and maintains a clear, resonant tone, which aligns well with my preference for products that offer long-lasting performance. The vacuum-sealed packaging ensures the strings are fresh, and the colored ball ends make restringing a breeze. While the cost is a bit higher, the enhanced durability and tone justify the price. However, I would prefer if the packaging was more robust to prevent any tangling of the strings. Overall, a great investment for serious players.",
+          "datatype": "test"
+        },
+        "231": {
+          "type": "user_behavior_simulation",
+          "user_id": "AFGZDPRR3Q7VZGNMHL2AKR4JZTOA",
+          "item_id": "B087Z664W5",
+          "stars": 3.0,
+          "review": "While the Large Warning Video Surveillance in Use Sign from Dxyizus signs is generally well-received, I found it to be a bit flimsier than expected. The material is described as aluminum, but it feels more like a thin, lightweight plastic. The UV printing is good and the sign is easy to read, which are positive aspects. However, the thinness of the sign makes it less durable, and it flaps when held by one end. The pre-drilled holes for mounting are a nice touch, but the overall build quality doesn't meet my standards for a security sign. For the price, it's a decent option, but I would have preferred a more robust build.",
+          "datatype": "test"
+        },
+        "96": {
+          "type": "user_behavior_simulation",
+          "user_id": "AHJO67O4V545VJDMYX7TJ2JH6VXQ",
+          "item_id": "B0B5FWD2XG",
+          "stars": 4.0,
+          "review": "I found \"Steelrising\" to be a compelling and visually stunning action-RPG, especially with its unique take on a dystopian Paris. The combat is challenging and rewarding, which I appreciate, and the customization options for Aegis are extensive, allowing for a personalized playstyle. However, the lack of a map and some technical glitches, like voice acting cutouts and PS5 hangs, were a bit frustrating. Despite these issues, the game is well worth the price and offers a lot of engaging content.",
+          "datatype": "test"
+        },
+        "261": {
+          "type": "user_behavior_simulation",
+          "user_id": "AE2RH3KCFPIIZ36QZEEKP4YHMGKA",
+          "item_id": "B078WMSP2L",
+          "stars": 3.0,
+          "review": "The DGOL Stainless Steel SWG Sheet Metal Wire Cable Gauge is a decent tool for measuring sheet metal thickness, but it falls short when it comes to wire gauges. While the build quality is solid, and the markings are clear, the sharp edges and the lack of clear standards (SWG or AWG) for wire measurement are significant drawbacks. For a product that claims to measure both sheet metal and wire, it's disappointing that it doesn't excel in both areas. The carry pouch is a nice touch, but it doesn't make up for the functional limitations. Overall, it's a mediocre tool that might be useful for some, but it doesn't meet the high standards I expect from my tools.",
+          "datatype": "test"
+        },
+        "290": {
+          "type": "user_behavior_simulation",
+          "user_id": "AFY7KLQE27NXQSDP5Y5KXXKLDWHQ",
+          "item_id": "B08HCKD1CQ",
+          "stars": 5.0,
+          "review": "I was initially skeptical about the AIRIC T-Tap Wire Splice Connectors, but they exceeded my expectations. The connectors are easy to use, reliable, and offer great value for the price. The kit includes a good assortment of colors and sizes, which is perfect for various projects. They make quick work of wiring tasks, and the self-stripping feature is a huge time-saver. Despite a few minor durability concerns mentioned by other users, I haven't experienced any issues. Highly recommend for both beginners and experienced DIY enthusiasts.",
+          "datatype": "test"
+        },
+        "107": {
+          "type": "user_behavior_simulation",
+          "user_id": "AHL6GALPTBYRA5JTJPOZUQYGX7AA",
+          "item_id": "B0BQJGN3JS",
+          "stars": 5.0,
+          "review": "The Salvori Exclusive Gradient 'Blue-Plated' Guitar Capo is a fantastic addition to my guitar accessories. The build quality is top-notch, with a sturdy zinc alloy body that ensures durability and a secure grip on the guitar neck. The blue-plated finish is not only beautiful but also adds a unique touch to my instrument. The capo's industrial-strength spring prevents any fret buzz, and the silicone cushion protects my strings from scratches. The 3-in-1 design, including a pick holder and string puller, is incredibly practical. At $19.99, this capo offers excellent value for its price and is a must-have for any guitarist. Highly recommended!",
+          "datatype": "test"
+        },
+        "396": {
+          "type": "user_behavior_simulation",
+          "user_id": "AHGM4Y25GIJZQSE5G2ZVY6L7MZLA",
+          "item_id": "B091913Z7F",
+          "stars": 4.0,
+          "review": "I was pleasantly surprised by the VOTMELL Teflon Tape. The quality is solid, and it performs exactly as expected, preventing leaks in my plumbing projects. The tape is not as thick as some other brands, but it\u2019s durable and easy to use. The price for four rolls is a great value, and the small size makes it convenient to store. However, I did find it a bit tricky to start wrapping around the threads, which is a minor inconvenience. Overall, it\u2019s a reliable product that meets my needs.",
+          "datatype": "test"
+        }
+      },
+      "value_structure": {
+        "type": "dict",
+        "sample_value": {
+          "type": "user_behavior_simulation",
+          "user_id": "AH544NICZBHWPHVOLJZNMEQKS6IQ",
+          "item_id": "B07DFZ6VHG",
+          "stars": 5.0,
+          "review": "I am very impressed with the BRHE Xbox-One Controller Skin. The design is sleek and the blue color adds a nice touch to my controller. The skin fits perfectly and does not interfere with the controller's functionality. The enhanced grip and non-slip surface are excellent, making it more comfortable during long gaming sessions. The product is also easy to install and remove, and the price is very reasonable for the quality and protection it provides. This is a great accessory for any Xbox One user.",
+          "datatype": "test"
+        }
+      },
+      "file_semantic_summary": "- Overall data structure and type:\n  - A single JSON object (dictionary) keyed by string IDs (\u201c92\u201d, \u201c318\u201d, \u2026).\n  - Each key maps to one flat record describing a user\u2013item interaction (a simulated Amazon review event).\n  - Data types per field: type (string), user_id (string), item_id/ASIN (string), stars (float 1\u20135), review (string, free text), datatype (string; here \u201ctest\u201d).\n\n- Relationships or nested elements:\n  - No nested objects beyond each record; schema is flat.\n  - Many-to-many relational intent: user_id \u2194 item_id via interaction records (each record = one edge).\n  - type = \"user_behavior_simulation\" denotes the scenario/class; datatype = \"test\" denotes split/usage.\n  - user_id and item_id are foreign-key-like identifiers; reviews and stars are attributes of the user\u2013item edge.\n\n- How this data should inform simulation entities or interactions:\n  - Entities:\n    - UserAgent per unique user_id: infer/reinforce persona traits (tone, verbosity, criteria) from the review text and rating tendencies from stars.\n    - ItemProfile per unique item_id (ASIN): infer product domain/features from review text (e.g., gaming accessory, instrument strings, tools) to condition language and expectations.\n  - Interactions:\n    - Each record represents a ground-truth user\u2192item rating + review event for evaluation/conditioning.\n    - Use stars to supervise sentiment intensity and rating calibration; use review text to supervise content realism (pros/cons, usability, value).\n    - Since timestamps and item metadata are absent, simulations should synthesize minimal context from text or attach external catalog data by ASIN if available.\n    - datatype=\"test\" implies these examples should not be used for training persona/item models but for held-out evaluation of generated ratings/reviews.\n  - System design implications:\n    - Maintain a user\u2013item interaction graph; generate new edges (reviews) consistent with learned user/item priors.\n    - Support domain-aware phrasing (e.g., gaming, music gear, DIY tools) derived from existing review content.\n    - Expect sparse coverage (often one interaction per user/item); avoid relying on history being present."
+    },
+    "user_sample.json": {
+      "file_type": "json",
+      "data_type": "array",
+      "length": 450,
+      "sample_data": [
+        {
+          "user_id": "IPzVg0wE9EW2_VfJI0Uzgg",
+          "name": "Pat",
+          "review_count": 449,
+          "yelping_since": "2006-01-04 22:31:35",
+          "useful": 510,
+          "funny": 136,
+          "cool": 204,
+          "elite": "2006,2007",
+          "friends": "hFuYtKcJKVLXLURJLx6DoQ, LNHtt3ydkZ14D2ZXXs6Gxg, ghFWPsSQIlrLKZ9k35-gWw, hxDeqPbPwkKEFXOfK7av9A, fvyusnlLkHr2Z2nezFyolQ, ECh7YPG7Pc6T1hUVQD7H0w, YLHE1tI0xTQq2WB__mcAyA, hx8Xsk244koFUvOnvVb6fQ, X0q4bFpolUwr_MOKEURbHg, rmZ7NqmSdEj6zO86ynxFlg, m2XKqIaqB2P5GGm7cqZr2A, vt8ABbqKm_L9pavhJiGeUA, g-mL-8J1_9iuDLUhyTzvmg, mR28gOekBWx8X7V-YIKBmw, migOJEiV439gBlA3oJmPqw, lsNGakHx1m6_gpvrkU6Hsg, QcIuKz0ZceINb-t8g2oQyQ, ckQyi6cnOyLE1LWrfn-qww, T8Hg9GIF0mQa5tvNKmZL7Q, hvOlTjSeucPuK_LJC7fU8w, 5BFfbUQgFDSxM6-i3Y5Ofg, h4DTP-KOwt6wJGhtWu_Pqg, d-ke0agyoR96COPrt0f3TA, FGc4XibWjomB0rDiFMdDFw, 7ORL1LW7KDq6-Si2RGk0zQ, NOUfyJW-BAo_-Cbfo8edww, EMMa6-f0L0ydcfCvYtL5DQ, lAmgv2N47oO6oLJzylddew, ld9QRdVO6LogB83pjeEQaQ, umIYHRbXtyb_Yy5uThSD_A",
+          "fans": 10,
+          "average_stars": 3.82,
+          "compliment_hot": 4,
+          "compliment_more": 4,
+          "compliment_profile": 1,
+          "compliment_cute": 1,
+          "compliment_list": 0,
+          "compliment_note": 7,
+          "compliment_plain": 17,
+          "compliment_cool": 6,
+          "compliment_funny": 6,
+          "compliment_writer": 5,
+          "compliment_photos": 1,
+          "source": "yelp"
+        },
+        {
+          "user_id": "bLtvACFk7yj-8Uo1N0BI2w",
+          "name": "K",
+          "review_count": 125,
+          "yelping_since": "2009-04-11 23:44:25",
+          "useful": 237,
+          "funny": 81,
+          "cool": 93,
+          "elite": "",
+          "friends": "hPMZxhIu79OCF8V1KWTJAg, RBy-jK31qdpJ1H7hfRCpVg, qI3uzegMdq3q3WxAajECGw, vqyZbgxNI-yjHYvnftnygw, eKZ_tnsOCNWty4Wy0mSftg, d9uRfZzTrn11nMH45m1cdw, XYSDrIef7g4Gmp3lNFVO6A, H8pdRcJqLQ4NM0wrwAcXXA, RmXIjppHNtVveguN10iO1g, fdd2pI7flsmzcpdlvc-6CA, Rd7vXJnNNcy-GlEoWuySMw, lwvh3Q9mt8vefdSymdmaSA, uJtSBGpco_rS3oT-9JPgtA, AQADGj5FEHggCzgTLDPcNw, z9Dcnz4Xed4a6K_Z_CyLWg, lK3O6QhDw5w_xvU9wqKFIQ",
+          "fans": 7,
+          "average_stars": 3.45,
+          "compliment_hot": 3,
+          "compliment_more": 2,
+          "compliment_profile": 0,
+          "compliment_cute": 0,
+          "compliment_list": 0,
+          "compliment_note": 1,
+          "compliment_plain": 4,
+          "compliment_cool": 4,
+          "compliment_funny": 4,
+          "compliment_writer": 0,
+          "compliment_photos": 1,
+          "source": "yelp"
+        },
+        {
+          "user_id": "g_jkw6N6aycqGxDtjPXhyg",
+          "name": "Mike",
+          "review_count": 48,
+          "yelping_since": "2011-09-23 02:27:32",
+          "useful": 19,
+          "funny": 5,
+          "cool": 2,
+          "elite": "",
+          "friends": "uIKD7cJF4ZWkicin2ulWPg",
+          "fans": 2,
+          "average_stars": 3.9,
+          "compliment_hot": 0,
+          "compliment_more": 0,
+          "compliment_profile": 0,
+          "compliment_cute": 0,
+          "compliment_list": 0,
+          "compliment_note": 0,
+          "compliment_plain": 1,
+          "compliment_cool": 0,
+          "compliment_funny": 0,
+          "compliment_writer": 0,
+          "compliment_photos": 0,
+          "source": "yelp"
+        },
+        {
+          "user_id": "rJ4PzLDcjuiaqWbpS4iuYw",
+          "name": "David",
+          "review_count": 29,
+          "yelping_since": "2010-08-01 23:58:30",
+          "useful": 26,
+          "funny": 3,
+          "cool": 9,
+          "elite": "",
+          "friends": "YO6Cc464W3vK1TqiJFavPw, gu_ZuScoEejoDgjdnzhVoA",
+          "fans": 1,
+          "average_stars": 3.94,
+          "compliment_hot": 0,
+          "compliment_more": 1,
+          "compliment_profile": 0,
+          "compliment_cute": 0,
+          "compliment_list": 0,
+          "compliment_note": 1,
+          "compliment_plain": 1,
+          "compliment_cool": 0,
+          "compliment_funny": 0,
+          "compliment_writer": 0,
+          "compliment_photos": 0,
+          "source": "yelp"
+        },
+        {
+          "user_id": "MkmEaEOGisMwtQebdGSEng",
+          "name": "Denise",
+          "review_count": 20,
+          "yelping_since": "2011-11-04 18:48:25",
+          "useful": 28,
+          "funny": 4,
+          "cool": 4,
+          "elite": "",
+          "friends": "ccui4D9-qJxuB4WgAUJ0Gw, aPPvazSdfzKpt9jy3VilLg, d0xjrf1CL0ollZNK5xewWg, i4boWo8uxwLVz2OPj4sNFA, wdBxDg2ssmUp9CWOzJyGgQ, cof5MWcWqsYA-OXMUVwcqQ, Acu77QcJLF7EIhRnl2gw5g, d_le2ywL1I3Cjb_OBoJUDQ, QTT2WP_EqU3e3-O55XETJw, Lw7H_OUFD5JWyJzEJe70YA, Kh-7LeiepsBbSlgER9bz4g, 2VrkBHdz_KWLK8wG9Hee6A, ouMzj2PFWPCyuY4BuZ0I6A, QYMgqTjDdL8BdLqKqR8kiw, 1msLxwAKXm3Iqg5d4uhmlg",
+          "fans": 0,
+          "average_stars": 3.75,
+          "compliment_hot": 0,
+          "compliment_more": 1,
+          "compliment_profile": 0,
+          "compliment_cute": 0,
+          "compliment_list": 0,
+          "compliment_note": 0,
+          "compliment_plain": 0,
+          "compliment_cool": 0,
+          "compliment_funny": 0,
+          "compliment_writer": 0,
+          "compliment_photos": 0,
+          "source": "yelp"
+        },
+        {
+          "user_id": "8vW74_W4zg9rbkmtLnPcNg",
+          "name": "Patricia",
+          "review_count": 3,
+          "yelping_since": "2017-02-12 15:31:36",
+          "useful": 0,
+          "funny": 0,
+          "cool": 0,
+          "elite": "",
+          "friends": "Ay7OCqphqJXf2mY9KXHNUw, KfdE96Eub3bmECXhgsdRIQ, NDTA2YKqsvhy9S67_AMarQ, qyTiQqkl6SF0y2UNqxSGjQ, f8frRhe1P4TBL0nGhbGrng, ciFHNLjlnSflsar9l6ODog, nDYWIItk6QauNXXXJmwulg, ebZ_bec-bVPsZ1GLMikKNg, H06q0727WvYBcwstWwAqkA, smUtGi8_mwgUVtxVE4tbWA, HbW7tWLlmrsXTNe7QLqNJA, AI0vwcS8l-A42WCE953zsw, KKCCU0W3y_KljD4q765ZSg, 7csY7Bxx4FWs4MB65WHlug, iPCsusTJ9-5fRNk0DFaQJw, 1gapZfPujYe_M_4ZO-CJUA, 4wxqixeDOgMIFVU-1VAUCQ, IC-irTfXLBo6vYFcDEshww, khAXzIRIEnbi5V2TWDhyTQ, R0eev-jusXVwpzQO_FPWMw, UaMU1uBbg4WOSJWHFPSUVw, vzvBaQ4JDFr7oTARrFaLmw, rfzQUMAFv07fh4VsXcohdA, l21OVhFxJdbeBj3RyurH5Q, 0tnJKJkf5XDWok4FvxcdVQ, HXaLacts9FBKwsGU-SP28g, Kxgi3pP_FdYIFt9dBXcE3w, Y75uK1yYH9I3IqHALFSjPA, tg9nFEK2Hv8auDobFBUkcA, vBKJ9NGnlJLOjPJlIqwLfQ, UWziDXecXakn-knuN6s3RQ, jCCgbHf-SFwr1SnSl1AOMg, EdvU4G-R5XlpvwpMJ7XVwg, ixRPb9OIWmqFMHaGRVyAnw, tsMF0FcFcHZ8i28WzWtQXw, qJgo0fhKRl_djDQsd0_7oA, GyVxg4AwFcmBV1accIGsew, x8SvmEJSgyqS9aUkGvrrEw, 15wYI4jfj_-cydBmhTb9vw, dctXRu-xg0-4GbKkEJKJWg, f_rgKKhD_GaNNb4fES8Wkw, o6cm28-GfMjbza1msIiquw, JEmSpK74TdKM2H4M8wNqiA, edwIRyRGwSu0-4GYvn7tdg, TJJ-FbIWetXv9oqFzcFs7A, zJWg91jvvOZeW5V4BX4sXA, -eax-NY4nlX-Dn487isSlQ, 5R0vmSjmqIbpRfD6Je-3Vw, 5iVZHdzZJhCRe82PjaXUxg, vlC7hMqpwJezBBbl2GhseA, g8FSAVacPN5ZIf5p7lY2NA, PrPES06CH2ci2if_yBbByw, xAhiUw9gdtC-4UKMl_gTaQ, evv1_6da1Xi1kxp1wYcwHw, QRSyYO34Z_mFYq2djpw40g, KPqyc3Kjxl0zl0uu_2220Q, wVGfp6Gk__lnBUn_IOJGBA, wOf5QqV7X23AAfwIKvWrNw, ZYEkMIpUreVYR9QsbtXyoQ, jE8D7cT10Xt8nVlr1DWQcg, y_FWZfYWMWgH3fgy_yGNHQ, 2_8CpccWCbIMomzdAsbAIA, rfuxQiy9ZWBat6W1GIo3WQ, 8cmLkHNAge1XY3TscKOTEg, 8SJOghJajH1t_jWNgecZEg, qrUdEpAlzZghA8x1OBLidw, YOsdSLHQ_aqIIxPZWtZxJA, karmPhLEUJw65yc4t8c0mA, aKWwFHaIOCzRPGLmSsAyiA, xk1MNGs_9Na8hA90c9FdEw, 6zzuBCA6eSwfVcNAOpG1tQ, DdwowMLsezM4qyo42e5sgQ, auwaxDxmVuBFmWn6i419tQ, -qxZTBWxfk8xVjTO_37UKA, oVbBSkQbsEhT-a-zvL6-Xg, dAp0yGm3JpEwBe0U8MdTbA, Q3giuxd6huAgnhMWrl_cXw, a0b3qqdSTylQ14maZeqwDA, A4qE8jvYoTWX60LBWfcMcw, -Euc5Ed-g2uIXm4OSFaRXQ, X7NzqjsHywTzIrbzuDEMnQ, wd8iUyMVFw0vGsEOJX6mvA, 9zVpk2ldfS_0IqZ6LmaLWg, KxIPG1j0xe7dLvWYy1nAFw, H2X-CaW0NafmlaXzuwjaww, ug7rQ9HaSK4DqmyxUXMhDA, HgqW3cRkdC3JU55CnIW3lg, hC7OKFcMsAkeupEqoHSZrQ, 57z6A5rbfJzYzJN083ERvw, gQp76_6iecfgmCqrNhLDNg, OCy1LKYPpC6uoXb_JcaTCQ, DzIGLxeZCg1VEDovYuL3Nw, wPtb7z5FHcZ1ysCqhHolSA, mh0U5mYvkJ0cbRjrp2Fdvw, 9OsWQkcrDsCF1QBmzREepg, Y_OGk8nNprdld5WTFwluRQ, WRoGRFM2zKsndQyHF7F7IQ, AszMDHf0R4mGhBttZRj_yg, Ph5oJDaYjbGQVRXBf4YJ2Q, fAHQW_joEVRFhNB8-bkq2Q, lBzPGSHP8wW9McKpdRoSQw, _y2VHw38caLW1ixg2SUUkw, nQ6XPV3W7B32XMriGQlNHA, rgC-pxVKv55bcelmCB1-8g, BP-kHkmFl3VR92WgZaAVEg, 0AyUSgcuH90ocsspspATwA, Q6fdF8ICWOneAPHYwoqXZg, SeD4ECDDh2bgoCRn5zxAbQ, 5YPj_ua1XyjBL_e1jOu44g, bVX8vAVKOF8g9eVX9Dk1ng, RI-ZevNhWiH-lxDHNt8vMQ, jUxKzkJAaVB5pKW_AxbD4g, vh_dQm3T6VT0TfgI8hfBfQ, utaMmOlWk1giKMwE4o9pqw, efEVxwo7-YQaWB4xFLLZhg, QEDIi2gyl_5ovJhFa1Cxyg, MdNqCtriNB8krq5mCHQWiA, 5QAbgwjBwbr3Se72mCxvXA, GFVFChw5-0YdJ7A-DdHM3w, TH6JMI7Sd0M3h7XwfTCkgg, mlU76j7RrutNBsw_EC5AEw, REPq2JzkNWzE40wrZAmmLA, gmbnYS05P2NFBUMLZS5VLg, -5UH3e-IOXcr4i-hoGfHxg, K4C6rmhLtJEHBIMarC-icQ, LHXBUYBuiQ-18mGi-jOoRg, M9dwETBN92aWqTR5VIqvPA, DZfdbZMGLZeyx8Ix2YYYwA, -MajCuh6KAG1tLszBUMO-g, 9OfIxo8o1TyoDQ9fhVAuKQ, VJEpDm5j9Kzqz3aaBug61A, TMS22tBkoqcf8bgF5d-rpw, qzyRMPjJyHBXJOc7uCCT-A, abFvA_ruWFKJSGHo06Z2tg, LLf7UJ1iv0EPTnpYkgmJAg, D8FS9s0BiXkGdsmhWbbyPQ, X7TJftcDx7G-69KVdpl74g, 8JXM5JKQ05_yfGSetISQ1w, K21v7jbaaMbCSYos8u4HpA, x07TZBwGb3wO0hRU4EndHA, ixJH780-jHUHwoH1icOIxg, Gjpdiq6d8H3krTLCAh0Org, ecnYQjPGxak_Y30fMCBSOg, 0g81fu1etEQxRJX2iGbk_w, qaqM9t_a78KtJWiEaTVQ4Q, d3dtvXgB_gj73gwL0rGVHg, 9DOg-OMxx53AMBVpa0xYHA, gpV8nICjZetN332hZI6mTw, 6kEf-myGTjz-NbiJ1nGJbw, vAhraatsnX_x2TC9Cfp53Q, 8ZivVx_Vd3tMcTYfLrj28A, rx8FBAAAAHpADQQZS-0Q5g, pDAGv7ZoNQLy7FWmhdFAPA, gAh3gdEV-4Uu3BHdz1cMTQ, 3XMhgDUk2yLq80N9HiuD2Q",
+          "fans": 0,
+          "average_stars": 5.0,
+          "compliment_hot": 0,
+          "compliment_more": 0,
+          "compliment_profile": 0,
+          "compliment_cute": 0,
+          "compliment_list": 0,
+          "compliment_note": 0,
+          "compliment_plain": 0,
+          "compliment_cool": 0,
+          "compliment_funny": 0,
+          "compliment_writer": 0,
+          "compliment_photos": 0,
+          "source": "yelp"
+        },
+        {
+          "user_id": "06TnXiZ8I1SrfLOvkuXyrg",
+          "name": "Sam",
+          "review_count": 10,
+          "yelping_since": "2012-03-27 15:48:14",
+          "useful": 6,
+          "funny": 3,
+          "cool": 0,
+          "elite": "",
+          "friends": "GmI3VA3pTxZW7IEJR7HgFw, uRHyjoq2s97CqiURI9usZA, _1MdB8NgqGSpijbB7xqpAA, tDPJBNa3T7IbvssvLJfmEA, X0Y6r0RGp4IGXVD6q04I7g, 7-NGoTDVqL5zmLv35PIKmg, BilZ6_V1bGkiNMSiOB0i8A, K19C-jXA9frzW4BptOtwwA, z7-_usrGyq1IEsmMtm3NRw, qQKKJOSgj2ZymI1MI74WAw, 17GDoybK5OfKSFg9kWTn0Q, JCVPi4I8y804ghwLYi6a-w, 7pYGSUwR9HCvuYeDiQDeHg, tnRk6aJ1tvvcwgRmYfUOjw, pUQberZLoEVTZkB3LMQ2rw, kR24u3e33klAcVpad9Nd5g, 8xeor44LcKWyk78uJaG5fw, GYa_VCY8OxKa4MIRM_gJmQ, qQPJEK021bdQPD8RYLRGQQ, RbfV6VkeKqAFaYZxPwqS-A, gJ1uzvEV9D16940s5MQSRg, MhjpvWbsjycxA9IG748XnQ, -QhxW-dZN1WEp_hHfA5FRg, 8nrXcXOu7SCmlGTyoYsAgw, zDnPEUYxadurJT2cXbG2XQ, rcZZjZttz4I4vjL0cB4-1Q, 9p4vjHTuYRmR-w6mjzJeww, O5WMUce1T5iSCjs1hBQ_SA, iGUDo_oNg4mthwP5ho6gfQ, -W8SKGn-6ZMgSGvswz6Y7A, 4W5drk1NrwncxB6HWH5-FA, ck3C1i4D_V9pnmRuElh2KQ, I0yDPERyjgThuGtLKgUrnA, ZAF1KngnG3uqw8OYkf1MEw, B857olJKVaTss9lI_ZyIBg, OcYjjYLsgxGpDJUX78Q9Mw, XYYRn-6DxsoxeItCjc45fQ, 8tz-x1hOgnreQN0-6isrmA, Kn7LTRN3niRN8s7Zn8X4EA, EqKcPVS7vphONvW-M6ZZkQ, 8JIUPDdHISkrJ3VOFr2MOA, pUwHN9BS-5O3KFQirikvQg, jnu8XbRNHM1455aklipEFQ, b_p7EuaS1RuQtzR5WD_ARg, fgMTRcw19pXyrZI7mDp4Jg, qb14hZ0BnS87BFQ_KcZKwA, 01PfZGF8VFg1LzZBHNh1wA, 7F9fe6OokHUbog4jBLvdpA, 9ReQ7hN9iSHZZ1aM-TT2_Q, r3fYJElAzLzGv78CqrNTOA, _iDZOdvYb5wqznv3ZVNiDA, s-zUXWIlEpFDB9Q8ZNxzbQ, L35Env7OhN9AHyka4eb3zg, x5430tzEoGv_kO-LL1ugMA, PlT-awYJk8McsRCQhWGi5w, 3TEKIkM4RYmf2I7BrAKsAw, mjekqmkME6U1jK_Uv5QfhA, UlfcakjS1NjfglEN74IUAg, JQBNjNBeR9HC3V-iKNA6tw, B90s5CKC63B7eIuGe3kdOw, 4zKXQ9tUJJUABHhOVDPf-A, xQ5nn1fYGQNz5nAHJn5buw, 66IfrdLWycK8mz8YQ1nbGg, yHU4RgcmsXux07FJOpjgyw, 57jXHL4xxHDjAjxkipsPCQ, pXXZPqKNLBiAXXXgpS9Y_g, m-0wJSGmO7IFfu7C6YxiFQ, vULZ_YkYbLu1arJRI06YGA, Pu5N5iycf7fXuZk3tddSqg, q321jO4TBnbF9Z4PAAATew, LBjxEhr5Ip127-IhfFmu7A, 3gaNVM9YkHP3NOQSCmLSUg, 8vW0RK6fy-R9EAB5X9HEkA, WxYKqVMXfVb2Z9dZ8ZlsxQ, -A7qO30UCieD9g0PI-F-Iw, AFnslNKhEuwLbnbrmaAaOA, iStmy5yotTdPDoX8wAni1Q, 40nhkMEQytNEGYfseKg6Fw, L9fPMQz1PqXFQO_ZgtAL-w, hRv_DqB5VbiC6_kmxnpquA, 5__N015DXomqST6enHvAPA, AmjwAX7IePgiJguNlbtmiQ, 7bRNyHL1xZqNLkhh6bfwvQ, ue3Gsg3vqjiHZh3yvMfYYg, JqwUdPIeuZmt69GFrk29Sg, 8wl2Ru-at33zYUXpVmQ40Q, oRGD1zpGXoIKO1aicR1uRg, v43E827WvW3pdLy1XQUsaA, QaR9jeFCm6dk4TxGLb_EYQ, vP99RzRe1lpWSBRUzamVUA, xVn05L_vF_PPGXgV0LM8iw, 7YJ0vC6VS6KdbhAfiyRwWA, 2n8vQFI4eWAJzUEZFQA5iA, hFc2GlLIQ-6NvGJZCl8Stg, 49eYjJdU5ObWSUl--BGzsQ, S1sT2onIfbPczS2o_IBubg, 3YBextAeCjyJm9Z7FnGdaQ, _1TuNnXvS8UtJ3A0GsFEVw, J7vuob0cZSTDcn6BVDXQbQ, IIxsRhzBiu1UzGgMkYjlpA, _g2dghiVP-edN5FJB5GfyQ, qZbiAzI0TNZ6SqWEK1XkkA, _g4a3KGtLIFjJHBtdR9KPw, HZhHFCSCgqCMReOdqjGK0g, zvnYdrz-9U7s8_7P7Ffklg, 1QDi5NdRENrBcfrnroY0tg, 0Q7bm0YXqBo6TMEPb7btTw, dmzkomzDkCWIHKje2EE44A, aCqPRD2KVU8It5KTWAE6CA, KT5S-Z9_5urPDjT8IhVSag, sAojOT4vQ4u5SXnyg8GTcQ, A4tnzn0n3pbNVQZj7jb2_w, I9SAwsseZj8wTTKYI59BrQ, l4BPdDq5QL0Ft8f1-QpgKg, G-t1BAyIns6RRdM6G6EaIA, yYrf_QyNdfnqFkSoD1tmGw, HE6BcK5sz4MmfAwIoAwHbg, Y--QoiHnm3PIkhe4rP8o-A, UtEBUJ1ZgTRyNPurtfKIZw, v-PtMWwETkRX4m1V_iQOkg, FacfbxICDY6gyONKYEh9GA, xa7TQTgMfiYFtgG0uY9Ijg, OWCi14n31kM_TBsLiej8EA, OzFJPfE_BbUj3Zt_gmNf2Q, gVFlSvSUnEZ530i8eeckEA, rL7OUzDEP7Xfh-ckSYXk7A, gg8CetbFyhyiiofKoxk0Yg, jC-ARJgRYM5w5OjNs0ATBQ, wO-aXnR9RilQd7TMtEgMoA, 77bmZkGJSqjma20HWEyb_Q, W65JBr3fizOptAoBHu47nw, YKNNM196zaHT6krtfSJw3w, RCVgMURo10z7rVEuVbOkvg, EoFieilOGk-qMG9TZimK0w, z4_udNxcNcsNL4eekyuztg, 9T1q9GOTUd0eCfEBC46FtA, 8Hadh0EAmEm5JtRDSvT5SQ, HS9_DTJeqCRI80M7-yWGbw, 5AKwB2qHKaWwlqk50UPD-A, E8rYuzBTzefH0JYlo9pz4w, f750bdFl9Wm6UFimC4TUIQ, 3Gv5f1Rc2RyGNJgCyZJj3g, dnO_L9VNG9_XU1WKhCKrvQ, T9eIwBmMnIa5-shSc4axgQ, oGtinkfwRaufGn5VPi7Hnw, P3-t3mRrJuZLgWDmHys5ew, 6IITfF8tZl233z5009ziSg, J-ukkP3NxNBF4MUxZHSWjg, 1omsoTXvqbQ4otUKUU7aPQ, hDmnVBCeZFj-FtqPUuysfA, DOOYM5Aw1gz34I9FA-GqtQ, qL-nhts20uFV81pS4V4afw, IYyWJr3lxpfk1Pbt3I2gSw, hvxZKKjoAS89_LM96sZ-IQ, T5Y9ed4LdiU5WdpnX9JAkA, VKHWuEJjCZq57vFDQoMbzw, ZD_FwSM_d21wpbpVeIqrhQ, N9xzP1u_i_BpzsgoDJSicQ, ZKp3uIYqbWkCAANZvtthgg, twUP8N0uCvYZXNlYgnUeZg, pWqs5KIyM2prPectsJ-60w, rrPyICHZUgxAJwHeG5w1LA, 3_9xrknsfv2_2evegBGwQg, n1cI3D8pW0rAYBOHjf_yVw, Qt_cnWs2g0e7sIu2ueUfZw, JATm6ulRuLpD34XbQuVIqQ, 5l5ef_6Sk-u3MFxkc6ZRDQ, 5DqZK6SPZHMjaG0YkvZX_Q, p8tOgDl0h4Bse2RCV7_B3w, nLSq8HAI_bINrhlwjgf9jg, Y1-YGs_XprnnmSA6HQjevQ, Erft6TEfCv6ACIRu2xlDMg, JU_S5Z2M8MAXoDUziIFOjg, lNpUbGPLO_xDFdKqNCmKgg, 0VlbbzAnzw0Sa90QllzcpQ, zZqiJ8XUzODnTfVeCSDCCQ, zV2bvfTc2VLjMv5KzMoC4g, FvoHBTM50TKkPXDH11SSwA, VZHGYDRusA7HYlItZ16U5A, mD1uk95p6BWAYtKJWwOPhA, 0aCK93Hvwa7Ut9HI0D3uzA, Qv6L0Xx96eA4ZfWZPtwUsw, d-8NvBCnBvx-WV8K-ZfOzQ, X5TpztqciDk4dsAveCX-eQ, uGx0dRqdk_aByEJgQdnUkw, FFxePa_SYD2aoud670lfZA, kuBxPbGjngYAJPg07af2Kw, 4JjtKyt7zsjw0iNwxtqAQw, LTMmw-nv2lOQ8F25RgpKoA, NuAhuuh4cSfZAdPG0xoxWQ, Qmw-HuIe3Hllax25eXZN1Q, GzY5ayvfWh79qx1RgwzL3A, U2YquFLADbKQAKvCV3lsew, IoVSzWerP2czB2MPdXziYg, 1TRYB-y1ziPqnmZ2VAqkBg, iNhunVX-pRFmqne81Nh2Vg, zSL4Ka6fLcCMKvAa_azIUQ, ejo6QK7kblSGsfwucht8ZQ, -YRHTolsHDGYloSysWinNQ, y2-Ep8c6UywV-KWkTEwFKA, EEIhco4l541XKsUdr1XBDg, TmwYL-4O1k37Spre5b6wag, VxbT_T1rNpRk07tCM8JYMw, KWX19UlYqzzx-azEWcd97w, 836PIQEp1dhOPv-cMTBXBg, 5FMIGWcgYoicWyoGYIIWJQ, 7j44CnnpijKRIGKRPLdFeg, D6kGfB_uTvAfw7M1GWyV4w, U-ekRyRD5zhpJ7uf1seqzg, YXjsBPON-7IRNHgfllTIZg, PiUUwR3K7kH7VoM5-g8CdA, c_3uubOkrPhUoa_hEpS0ow, nDNygKmUpimxTPRd6qEkXw, Zv8-WJz7oYSviaxNleSX-w, MUSdP-wp4wTBwm4o1-fvkQ, f2JvzD8O7e9JuXSK2w_S6w, VXPP9S4kTI0rdxAgCj4HhQ, _esAXiXHwMYfg5IYW6Nkiw, HnSIQH3rZEuxJxh2ivejkw, FA9L_y9z2yfV7r86XUjYTQ, 7xPDSbkVARc1jycehee3pw, vEL2sQk2zcloxlMFlE_ivQ, x82QmfAj3rB8-7lr0fIr5w, R2nHw14y_3Y7EVZgQ0WvnQ, o2qjUOfPkR3UjDkoyHygvQ",
+          "fans": 0,
+          "average_stars": 3.82,
+          "compliment_hot": 0,
+          "compliment_more": 0,
+          "compliment_profile": 0,
+          "compliment_cute": 0,
+          "compliment_list": 0,
+          "compliment_note": 0,
+          "compliment_plain": 1,
+          "compliment_cool": 0,
+          "compliment_funny": 0,
+          "compliment_writer": 0,
+          "compliment_photos": 0,
+          "source": "yelp"
+        },
+        {
+          "user_id": "nIBVnUQ-lpVW48kq4x3ljQ",
+          "name": "Saleem",
+          "review_count": 168,
+          "yelping_since": "2007-10-03 15:27:10",
+          "useful": 128,
+          "funny": 9,
+          "cool": 53,
+          "elite": "",
+          "friends": "43pFV0eiH_OrynTdGWWkgg, AkVDZ_8l-nVNnqh6DULhIA, 2IWCo1ZJaujTrUGN2Ixupw, EbOQP_6Ab4b3d2j0mMapGA, NmeITA5UZaExqzPKH-bLag, JSDQYqIClyecDtX1zXlSJQ, blvYp-QCN40lHoIc1FBqhg, 6jjHo9Lilv3kTy87pm2ycw, ive11XbpOsRdcmjg-7gW4Q, WQ72F1G4B9LwaFMXpY7j0w, ckxopNOIs8vfKk6C96IxFQ, CeVOvEM4eMtMPlNoG2YOSQ",
+          "fans": 3,
+          "average_stars": 4.4,
+          "compliment_hot": 0,
+          "compliment_more": 2,
+          "compliment_profile": 0,
+          "compliment_cute": 0,
+          "compliment_list": 0,
+          "compliment_note": 2,
+          "compliment_plain": 4,
+          "compliment_cool": 3,
+          "compliment_funny": 3,
+          "compliment_writer": 1,
+          "compliment_photos": 1,
+          "source": "yelp"
+        },
+        {
+          "user_id": "tZhzLE92usoAGpNcFtzlQw",
+          "name": "Casey",
+          "review_count": 141,
+          "yelping_since": "2011-06-03 01:34:57",
+          "useful": 309,
+          "funny": 141,
+          "cool": 102,
+          "elite": "2015,2016,2018",
+          "friends": "hYIWSQrDuvp1dMFlpTCpyg, n6UskNkDxwydTOHTOkwskg, bX_uV_Hnml92Zhxzugg5WA, 9EiGbIyjxO0TKRsiBygy_g, FXF6JgkSyOdTphk0YVUpuw, 3t_Jf5R5uRllg9ERHnsgRQ, Pr-XlFMQYiladbB_YQxUYA, ET8n-r7glWYqZhuR6GcdNw, RKULSOrIvvYpDmtuYXEXzA, Le9KD2nTc1VR8vGykR6qLg, 8BARDuw9utiKUj6Cfvfa0Q, JhvJHEq8bUzscbcpAacHdA, uqDGgPd8gRpFD0CmHvoeRw, 0LyHQfXVJ5WT334K-odKoQ, I6ubnxeZNVKe9prIPf12hA, SYgVIFxAe0XWlcY1PPq_Gw, jO2sTHyVjGXk6Tbo7ltrxA, pSm8h-Uewd3mRWwHctrshQ, K6b_4ZVI6lgT2eL_ROg2Tg, kxSkybkcUvSRctQ3qgEmVg, rL4QUwRi2FvHG6JWkhsZiQ, vN9rAl1ixlni4YbB8E-Rrw, Xaa12Zr3gzCvT9-8UAljZQ, liymdX-2oYY7jy4py09Vog, LmMeCIZlHNRpyTduiFii4A, NgCmkQawZhzyiwhm7k9Fiw, tV1p7CDj6WfpwPM58gHjRw, tBUAoNAxn-6ur367hitj8A, lFZe42H_kNFwO1LNOlsiag, OyttnyEOrtLZCooz5kqv6Q, 4GnSisYpsWQCSXEM0y5Q0A, 7P0MPsbBlWTWgkZ7csaQpw, pF0PxJPJCzwqNWH7rWTiaw, jTrNozKgNQMyn2gsEtLNbQ, U5tJIHZvDjQhbCx98yqfkA, QrlMJ8On0DI6WRbxww6VaQ, dL-ujtfCE8tox83eQhmfMQ, cndpW4OQV2tXy9Ek61u7hQ, l7zmF8szWBC-A07oIDRdKw, TNwbpJSkflp3HPCal_m2mA, a6RhTQRs-qP7FDAXerDbTw, FLMuHEuKYd3KyvTC_5MiVQ, 0HJ6sU0h_O3k8kRbYO3VXA, ZkLcEbQbqXpuTjIsRFx-3Q, upA7KHwfmcN9XpGIxw8K6w, q10s3mM6fI4AP9pbf7PXGw, XeeTMgXA44vdfuV-VGm95Q, F1SyQ-c94wJvYS82F_HlOg, -QmEKJ_CzZnT9biZHddfZQ, E5Qqnw70zHOPRQqaINNYQw, fAJ4v8WKt7DYkC2dskayvQ, d6cEU9PUjY-GgpHmqUUWHw, mV4lknblF-zOKSF8nlGqDA, Fxh4_3Cvpy_HqQmjZP9jEQ, ISBymj-pzq3AypWAo49LKQ, isKK5Lr3xXUqb-8cZ-A7AQ, OLIaLNpsQdyETXT6VcHK3A, oqcEtAUU8nN2_GNcC_-rjg, N3zqraAQwn7yR3u6qni4lA, 5Ax9vAx6NHiPXjUAjkRy_Q, F8kRFv58lFM9_HJPF8FOBg, CrM4OKc-tbVXldv1dU9lBw, aHbFfSvYu9LyyfmcEnUSuA, WSptrgW8NLFBNvw1FOpifw, DSu-nDnhugQycmTpGSKnzQ, -op9zxgn_c8xLskiJZwxlA, aI2QKgNN6LmP4Gdt39QBfQ, 54qMDPYZtAmGkyKkOgd6AA, 3xrEz4XSTFJXIkOMfgeTtg, yotLu26x-5S1IbSp2DIROA, Ycyfx30Nce0WidRGkzmV-A, hknE19CCWHbz_wvMRF5AxA, xLPTijTjjPNeyocFWP8E1Q, fvq56hMZvcePjf23LGdMMQ, _3vUQxQ6hPyhx0GFEr-nHQ, KBnWSNHd8HMDCmpkhFO2hA, 1oye79vxm5GqoILzzFHKPQ, uolQACaXIrQVrvag3PnAKw, zttHb-80gROKjJaW3JIVtg, Oi1qbcz2m2SnwUeztGYcnQ, N0un75Nz_OGmhcROiuj8VA, skAWAZAOV5cCQRS3QaOa5A, j6KgUdCQCdxLytN7Fvrxsw, upnFPkNcmKnzOEz3ZHlpwg",
+          "fans": 6,
+          "average_stars": 4.01,
+          "compliment_hot": 3,
+          "compliment_more": 1,
+          "compliment_profile": 0,
+          "compliment_cute": 0,
+          "compliment_list": 0,
+          "compliment_note": 1,
+          "compliment_plain": 5,
+          "compliment_cool": 11,
+          "compliment_funny": 11,
+          "compliment_writer": 8,
+          "compliment_photos": 0,
+          "source": "yelp"
+        },
+        {
+          "user_id": "R8_ll1FuWVhGgpRLHlvxqA",
+          "name": "Katrina",
+          "review_count": 18,
+          "yelping_since": "2014-12-31 00:08:40",
+          "useful": 9,
+          "funny": 7,
+          "cool": 3,
+          "elite": "",
+          "friends": "nKcCR0sp_mcGvwCGjiNWDw, vKLJn6KD7d2oPJwT5qHnIw, 5UeIGY0wj-8peJyBwA01LQ, yxe7FsXtclBwVIeT5U00qA, 3KC3v7VVSKW-cF1o8h-uJQ, 0EtkiJIvSQcFfF6UyxRCBA, 4Rj5UwXgjDhxZcj5XgvHOA, UiplLFHMZXL7XEf5FA-cQQ, P8_DDl2M3hygllHltt8U0g, 1jPgw-rEGAv1g0UqvqmbsA, stRCGd_liOR3XsKOgeuuAg, p6_0kiqk85o8XEqn40bwGg, Z-8iyC9n6-S0mb0zVWytAw, iPG0V3FqJ6mcZYOYk71fIg",
+          "fans": 0,
+          "average_stars": 4.5,
+          "compliment_hot": 0,
+          "compliment_more": 0,
+          "compliment_profile": 0,
+          "compliment_cute": 0,
+          "compliment_list": 0,
+          "compliment_note": 0,
+          "compliment_plain": 0,
+          "compliment_cool": 0,
+          "compliment_funny": 0,
+          "compliment_writer": 0,
+          "compliment_photos": 0,
+          "source": "yelp"
+        }
+      ],
+      "item_structure": {
+        "type": "dict",
+        "sample_item": {
+          "user_id": "IPzVg0wE9EW2_VfJI0Uzgg",
+          "name": "Pat",
+          "review_count": 449,
+          "yelping_since": "2006-01-04 22:31:35",
+          "useful": 510,
+          "funny": 136,
+          "cool": 204,
+          "elite": "2006,2007",
+          "friends": "hFuYtKcJKVLXLURJLx6DoQ, LNHtt3ydkZ14D2ZXXs6Gxg, ghFWPsSQIlrLKZ9k35-gWw, hxDeqPbPwkKEFXOfK7av9A, fvyusnlLkHr2Z2nezFyolQ, ECh7YPG7Pc6T1hUVQD7H0w, YLHE1tI0xTQq2WB__mcAyA, hx8Xsk244koFUvOnvVb6fQ, X0q4bFpolUwr_MOKEURbHg, rmZ7NqmSdEj6zO86ynxFlg, m2XKqIaqB2P5GGm7cqZr2A, vt8ABbqKm_L9pavhJiGeUA, g-mL-8J1_9iuDLUhyTzvmg, mR28gOekBWx8X7V-YIKBmw, migOJEiV439gBlA3oJmPqw, lsNGakHx1m6_gpvrkU6Hsg, QcIuKz0ZceINb-t8g2oQyQ, ckQyi6cnOyLE1LWrfn-qww, T8Hg9GIF0mQa5tvNKmZL7Q, hvOlTjSeucPuK_LJC7fU8w, 5BFfbUQgFDSxM6-i3Y5Ofg, h4DTP-KOwt6wJGhtWu_Pqg, d-ke0agyoR96COPrt0f3TA, FGc4XibWjomB0rDiFMdDFw, 7ORL1LW7KDq6-Si2RGk0zQ, NOUfyJW-BAo_-Cbfo8edww, EMMa6-f0L0ydcfCvYtL5DQ, lAmgv2N47oO6oLJzylddew, ld9QRdVO6LogB83pjeEQaQ, umIYHRbXtyb_Yy5uThSD_A",
+          "fans": 10,
+          "average_stars": 3.82,
+          "compliment_hot": 4,
+          "compliment_more": 4,
+          "compliment_profile": 1,
+          "compliment_cute": 1,
+          "compliment_list": 0,
+          "compliment_note": 7,
+          "compliment_plain": 17,
+          "compliment_cool": 6,
+          "compliment_funny": 6,
+          "compliment_writer": 5,
+          "compliment_photos": 1,
+          "source": "yelp"
+        }
+      },
+      "file_semantic_summary": "- Data type and structure: A flat JSON array where each element is a user profile object. Fields are primarily primitive types (strings, integers, timestamps). No nested JSON objects or arrays; some fields encode lists as comma-separated strings.\n- Key fields: user_id (unique ID), name, review_count, yelping_since (timestamp), useful/funny/cool (engagement signals), elite (comma-separated years), friends (comma-separated user IDs), fans, average_stars, multiple compliment_* counters, source (\"yelp\").\n- Relationships: \n  - Implicit social graph via friends (IDs referencing other users, not guaranteed to be present in this sample).\n  - Temporal dimension via yelping_since and elite years.\n  - Engagement/credibility via fans, useful/cool/funny, compliments.\n- Encoded lists: \n  - friends and elite are comma-separated strings that should be parsed into arrays for graph and tenure features.\n- No item data: This file provides reviewer/user metadata only; items (Amazon products) must come from elsewhere.\n- How to use for multi-agent simulation:\n  - Instantiate user agents with personas derived from profile features.\n  - Rating tendency: center each agent\u2019s rating distribution around average_stars; variance inversely related to review_count (experienced users = steadier ratings).\n  - Activity/verbosity: scale review frequency and review length by review_count and fans; long-tenure (yelping_since) users may produce more detailed reviews.\n  - Style and tone: \n    - funny \u2192 likelihood of humor/sarcasm; cool/useful \u2192 informative tone; compliment_writer \u2192 articulate prose.\n  - Influence/weighting: fans and useful votes map to higher credibility; elite years indicate expert/reputable reviewers; use to weight their impact on aggregate ratings.\n  - Social effects: build a friend graph from friends arrays to simulate homophily or influence (e.g., correlated ratings or co-adoption of opinions).\n  - Cross-platform mapping to Amazon:\n    - useful \u2248 \u201cHelpful\u201d votes; fans/elite \u2248 reviewer rank/badges; maintain source tag to allow domain adaptation while reviewing Amazon items.\n- Data hygiene considerations:\n  - Parse comma-separated fields to arrays; trim spaces.\n  - Some friend IDs may not exist in this subset; handle missing nodes gracefully.\n  - Timestamps should be normalized to datetime types for tenure features.\n- Simulation outputs:\n  - Star ratings (1\u20135) informed by per-user priors.\n  - Text reviews reflecting tone/length/style features from engagement and compliment metrics.\n  - Optional helpfulness predictions based on agent credibility.\n- Summary: This file is user-centric metadata enabling creation of diverse, socially connected reviewer agents with calibrated rating biases, stylistic behaviors, and influence levels to review Amazon items within a multi-agent framework."
+    },
+    "item_sample.json": {
+      "file_type": "json",
+      "data_type": "array",
+      "length": 453,
+      "sample_data": [
+        {
+          "item_id": "V6Om7YZhlRQRU7WfuxHq8Q",
+          "name": "Beck's Cajun Cafe",
+          "address": "51 N 12th St",
+          "city": "Philadelphia",
+          "state": "PA",
+          "postal_code": "19107",
+          "latitude": 39.9533224742,
+          "longitude": -75.1590000821,
+          "stars": 4.0,
+          "review_count": 485,
+          "is_open": 1,
+          "attributes": {
+            "OutdoorSeating": "False",
+            "HasTV": "False",
+            "GoodForKids": "True",
+            "RestaurantsReservations": "False",
+            "RestaurantsAttire": "u'casual'",
+            "BikeParking": "True",
+            "Alcohol": "u'none'",
+            "NoiseLevel": "u'average'",
+            "RestaurantsTakeOut": "True",
+            "RestaurantsPriceRange2": "1",
+            "WiFi": "u'free'",
+            "RestaurantsGoodForGroups": "False",
+            "HappyHour": "False",
+            "GoodForMeal": "{'dessert': False, 'latenight': False, 'lunch': True, 'dinner': None, 'brunch': None, 'breakfast': None}",
+            "BusinessParking": "{'garage': True, 'street': True, 'validated': False, 'lot': False, 'valet': False}",
+            "DogsAllowed": "False",
+            "Caters": "True",
+            "RestaurantsDelivery": "True",
+            "BusinessAcceptsCreditCards": "True",
+            "Ambience": "{'touristy': None, 'hipster': False, 'romantic': False, 'divey': False, 'intimate': False, 'trendy': False, 'upscale': False, 'classy': False, 'casual': True}"
+          },
+          "categories": "Restaurants, Cajun/Creole",
+          "hours": {
+            "Monday": "8:0-18:0",
+            "Tuesday": "8:0-18:0",
+            "Wednesday": "8:0-18:0",
+            "Thursday": "8:0-18:0",
+            "Friday": "8:0-18:0",
+            "Saturday": "8:0-18:0",
+            "Sunday": "8:0-18:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "item_id": "FZFPZehgAPVHart6C9U3Og",
+          "name": "legacy tattoo",
+          "address": "4500 N Oracle Rd, Ste 337B",
+          "city": "Tucson",
+          "state": "AZ",
+          "postal_code": "85705",
+          "latitude": 32.2885001,
+          "longitude": -110.9741348,
+          "stars": 4.0,
+          "review_count": 6,
+          "is_open": 1,
+          "attributes": null,
+          "categories": "Tattoo, Beauty & Spas",
+          "hours": {
+            "Monday": "10:0-21:0",
+            "Tuesday": "10:0-21:0",
+            "Wednesday": "10:0-21:0",
+            "Thursday": "10:0-21:0",
+            "Friday": "10:0-21:0",
+            "Saturday": "10:0-21:0",
+            "Sunday": "12:0-18:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "item_id": "ejRuEF2j8_w5qQbwEQ8GfQ",
+          "name": "Villagio Pizza Cafe",
+          "address": "2533 Clearfield St",
+          "city": "Philadelphia",
+          "state": "PA",
+          "postal_code": "19134",
+          "latitude": 39.9851818,
+          "longitude": -75.1067498,
+          "stars": 3.0,
+          "review_count": 47,
+          "is_open": 0,
+          "attributes": {
+            "RestaurantsReservations": "True",
+            "RestaurantsPriceRange2": "1",
+            "Alcohol": "u'none'",
+            "BusinessAcceptsCreditCards": "True",
+            "BikeParking": "True",
+            "RestaurantsAttire": "u'casual'",
+            "RestaurantsGoodForGroups": "True",
+            "OutdoorSeating": "False",
+            "GoodForKids": "True",
+            "GoodForMeal": "{'dessert': False, 'latenight': False, 'lunch': True, 'dinner': True, 'brunch': False, 'breakfast': False}",
+            "NoiseLevel": "u'average'",
+            "RestaurantsTakeOut": "True",
+            "RestaurantsDelivery": "True",
+            "Ambience": "{'touristy': False, 'hipster': False, 'romantic': False, 'divey': False, 'intimate': False, 'trendy': False, 'upscale': False, 'classy': False, 'casual': False}",
+            "WiFi": "'no'",
+            "Caters": "False",
+            "BusinessParking": "{'garage': False, 'street': False, 'validated': False, 'lot': False, 'valet': False}",
+            "HasTV": "True"
+          },
+          "categories": "Pizza, Breakfast & Brunch, Restaurants",
+          "hours": {
+            "Monday": "10:0-23:0",
+            "Tuesday": "10:0-23:0",
+            "Wednesday": "10:0-23:0",
+            "Thursday": "10:0-23:0",
+            "Friday": "10:0-0:0",
+            "Saturday": "9:0-0:0",
+            "Sunday": "9:0-23:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "item_id": "GOSVLhjUT6TnrPhkkmDOpw",
+          "name": "Vineyards Cafe",
+          "address": "847 N 16th St",
+          "city": "Philadelphia",
+          "state": "PA",
+          "postal_code": "19130",
+          "latitude": 39.969939,
+          "longitude": -75.163026,
+          "stars": 4.5,
+          "review_count": 192,
+          "is_open": 1,
+          "attributes": {
+            "RestaurantsReservations": "False",
+            "RestaurantsGoodForGroups": "True",
+            "Alcohol": "u'none'",
+            "HasTV": "False",
+            "GoodForKids": "True",
+            "WheelchairAccessible": "True",
+            "NoiseLevel": "'average'",
+            "OutdoorSeating": "True",
+            "DogsAllowed": "False",
+            "HappyHour": "False",
+            "BusinessParking": "{'garage': False, 'street': True, 'validated': False, 'lot': False, 'valet': False}",
+            "GoodForMeal": "{u'breakfast': True, u'brunch': True, u'lunch': True, u'dinner': False, u'latenight': False, u'dessert': None}",
+            "RestaurantsTakeOut": "False",
+            "RestaurantsPriceRange2": "1",
+            "RestaurantsTableService": "False",
+            "BusinessAcceptsCreditCards": "True",
+            "WiFi": "u'free'",
+            "BusinessAcceptsBitcoin": "False",
+            "ByAppointmentOnly": "False",
+            "RestaurantsAttire": "'casual'",
+            "Ambience": "{u'divey': False, u'hipster': True, u'casual': True, u'touristy': False, u'trendy': None, u'intimate': False, u'romantic': False, u'classy': None, u'upscale': False}",
+            "BikeParking": "False",
+            "Caters": "False",
+            "RestaurantsDelivery": "True"
+          },
+          "categories": "Coffee & Tea, Cafes, Food, Creperies, Internet Cafes, Restaurants, Breakfast & Brunch",
+          "hours": {
+            "Monday": "0:0-0:0",
+            "Tuesday": "7:0-15:0",
+            "Wednesday": "7:0-15:0",
+            "Thursday": "7:0-15:0",
+            "Friday": "7:0-15:0",
+            "Saturday": "8:0-15:0",
+            "Sunday": "8:0-15:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "item_id": "ERl6OCSEIFBOqfjai_jIUg",
+          "name": "La Parrilla Suiza",
+          "address": "2720 N Oracle Rd",
+          "city": "Tucson",
+          "state": "AZ",
+          "postal_code": "85705",
+          "latitude": 32.25642,
+          "longitude": -110.97746,
+          "stars": 3.0,
+          "review_count": 125,
+          "is_open": 1,
+          "attributes": {
+            "WiFi": "u'free'",
+            "RestaurantsReservations": "True",
+            "RestaurantsPriceRange2": "2",
+            "RestaurantsAttire": "u'casual'",
+            "GoodForKids": "True",
+            "RestaurantsTakeOut": "True",
+            "BikeParking": "True",
+            "BusinessParking": "{'garage': False, 'street': False, 'validated': False, 'lot': True, 'valet': False}",
+            "RestaurantsGoodForGroups": "True",
+            "BusinessAcceptsCreditCards": "True",
+            "Caters": "True",
+            "Alcohol": "u'full_bar'",
+            "NoiseLevel": "'average'",
+            "HasTV": "True",
+            "OutdoorSeating": "False",
+            "Ambience": "{'touristy': False, 'hipster': False, 'romantic': None, 'divey': False, 'intimate': False, 'trendy': False, 'upscale': False, 'classy': None, 'casual': True}",
+            "DogsAllowed": "False",
+            "HappyHour": "True",
+            "GoodForMeal": "{'dessert': None, 'latenight': False, 'lunch': True, 'dinner': True, 'brunch': False, 'breakfast': False}",
+            "RestaurantsDelivery": "True"
+          },
+          "categories": "Restaurants, Mexican",
+          "hours": {
+            "Monday": "11:0-22:0",
+            "Tuesday": "11:0-22:0",
+            "Wednesday": "11:0-22:0",
+            "Thursday": "11:0-22:0",
+            "Friday": "11:0-23:0",
+            "Saturday": "11:0-23:0",
+            "Sunday": "11:0-22:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "item_id": "X-IWPL5GY6ejEciBGMVK9A",
+          "name": "Cellini",
+          "address": "5427 Bayshore Blvd",
+          "city": "Tampa",
+          "state": "FL",
+          "postal_code": "33611",
+          "latitude": 27.8850858,
+          "longitude": -82.4857513,
+          "stars": 3.5,
+          "review_count": 8,
+          "is_open": 0,
+          "attributes": {
+            "RestaurantsTakeOut": "True",
+            "BusinessParking": "{'garage': False, 'street': False, 'validated': False, 'lot': False, 'valet': False}",
+            "Alcohol": "u'full_bar'",
+            "Ambience": "{'romantic': False, 'intimate': False, 'touristy': False, 'hipster': False, 'divey': False, 'classy': False, 'trendy': False, 'upscale': False, 'casual': False}",
+            "RestaurantsDelivery": "False",
+            "RestaurantsReservations": "False",
+            "BusinessAcceptsCreditCards": "True",
+            "Caters": "True",
+            "RestaurantsPriceRange2": "2",
+            "RestaurantsAttire": "u'casual'"
+          },
+          "categories": "Italian, Restaurants",
+          "hours": {
+            "Monday": "11:0-22:0",
+            "Tuesday": "11:0-22:0",
+            "Wednesday": "11:0-22:0",
+            "Thursday": "11:0-22:0",
+            "Friday": "17:0-23:0",
+            "Saturday": "17:0-23:0",
+            "Sunday": "17:0-22:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "item_id": "Mha77MN_BYGB-w7DONZ5YA",
+          "name": "Cuenelli's Peruvian Restaurant",
+          "address": "4801 W Hillsborough Ave",
+          "city": "Tampa",
+          "state": "FL",
+          "postal_code": "33614",
+          "latitude": 27.9966052,
+          "longitude": -82.5243863,
+          "stars": 4.0,
+          "review_count": 249,
+          "is_open": 1,
+          "attributes": {
+            "RestaurantsAttire": "u'casual'",
+            "BusinessAcceptsCreditCards": "True",
+            "RestaurantsReservations": "False",
+            "RestaurantsPriceRange2": "1",
+            "Alcohol": "u'none'",
+            "BusinessParking": "{'garage': False, 'street': False, 'validated': False, 'lot': True, 'valet': False}",
+            "GoodForKids": "True",
+            "RestaurantsTakeOut": "True",
+            "RestaurantsGoodForGroups": "True",
+            "OutdoorSeating": "False",
+            "Caters": "True",
+            "Ambience": "{'romantic': False, 'intimate': False, 'touristy': False, 'hipster': False, 'divey': False, 'classy': False, 'trendy': False, 'upscale': False, 'casual': True}",
+            "NoiseLevel": "u'average'",
+            "HasTV": "True",
+            "BikeParking": "True",
+            "WiFi": "'no'",
+            "RestaurantsDelivery": "True",
+            "GoodForMeal": "{'dessert': None, 'latenight': False, 'lunch': True, 'dinner': True, 'brunch': False, 'breakfast': False}"
+          },
+          "categories": "Peruvian, Restaurants, Latin American",
+          "hours": {
+            "Monday": "11:0-16:0",
+            "Tuesday": "11:0-19:0",
+            "Wednesday": "11:0-19:0",
+            "Thursday": "11:0-19:0",
+            "Friday": "11:0-20:0",
+            "Saturday": "12:0-20:0",
+            "Sunday": "12:0-18:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "item_id": "HTqXI5S2XcSlh_ylx9sE6g",
+          "name": "Termini Bros Bakery",
+          "address": "12th St & Filbert St",
+          "city": "Philadelphia",
+          "state": "PA",
+          "postal_code": "19107",
+          "latitude": 39.9530477103,
+          "longitude": -75.1590135265,
+          "stars": 4.0,
+          "review_count": 263,
+          "is_open": 1,
+          "attributes": {
+            "RestaurantsPriceRange2": "2",
+            "BusinessParking": "{'garage': True, 'street': True, 'validated': False, 'lot': False, 'valet': False}",
+            "BusinessAcceptsCreditCards": "True",
+            "BikeParking": "True",
+            "RestaurantsTakeOut": "True",
+            "RestaurantsDelivery": "True",
+            "Caters": "True"
+          },
+          "categories": "Food, Restaurants, Bakeries",
+          "hours": {
+            "Monday": "10:0-18:0",
+            "Tuesday": "10:0-18:0",
+            "Wednesday": "10:0-18:0",
+            "Thursday": "10:0-18:0",
+            "Friday": "10:0-18:0",
+            "Saturday": "10:0-18:0",
+            "Sunday": "10:0-18:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "item_id": "0a8t_Th0jtWUMmtq0q2dqA",
+          "name": "DK Sushi",
+          "address": "3401 Walnut St",
+          "city": "Philadelphia",
+          "state": "PA",
+          "postal_code": "19104",
+          "latitude": 39.9531984523,
+          "longitude": -75.1928739332,
+          "stars": 3.5,
+          "review_count": 30,
+          "is_open": 1,
+          "attributes": {
+            "BusinessParking": "None",
+            "Alcohol": "'none'",
+            "BusinessAcceptsCreditCards": "True",
+            "GoodForMeal": "{'dessert': False, 'latenight': False, 'lunch': False, 'dinner': False, 'brunch': False, 'breakfast': False}",
+            "RestaurantsTakeOut": "True",
+            "OutdoorSeating": "None",
+            "Ambience": "{u'divey': None, u'hipster': None, u'casual': True, u'touristy': None, u'trendy': None, u'intimate': None, u'romantic': None, u'classy': None, u'upscale': None}",
+            "HasTV": "True",
+            "RestaurantsDelivery": "False",
+            "RestaurantsReservations": "False"
+          },
+          "categories": "Sushi Bars, Japanese, Restaurants",
+          "hours": {
+            "Monday": "11:0-19:0",
+            "Tuesday": "11:0-19:0",
+            "Wednesday": "11:0-19:0",
+            "Thursday": "11:0-19:0",
+            "Friday": "11:0-19:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "item_id": "kuof8pQvg5dSGXzBdlsIPA",
+          "name": "Bella Locs",
+          "address": "",
+          "city": "Philadelphia",
+          "state": "PA",
+          "postal_code": "19149",
+          "latitude": 40.0390934,
+          "longitude": -75.064035,
+          "stars": 2.5,
+          "review_count": 5,
+          "is_open": 1,
+          "attributes": {
+            "ByAppointmentOnly": "True",
+            "BusinessParking": "{'garage': False, 'street': False, 'validated': False, 'lot': False, 'valet': False}",
+            "HairSpecializesIn": "{'straightperms': False, 'coloring': False, 'extensions': False, 'africanamerican': True, 'curly': False, 'kids': False, 'perms': False, 'asian': True}",
+            "BusinessAcceptsCreditCards": "True"
+          },
+          "categories": "Cosmetics & Beauty Supply, Nail Technicians, Hair Stylists, Beauty & Spas, Shopping, Nail Salons, Hair Extensions, Hair Salons",
+          "hours": {
+            "Monday": "10:0-19:0",
+            "Tuesday": "10:0-19:0",
+            "Wednesday": "10:0-19:0",
+            "Thursday": "10:0-19:0",
+            "Friday": "9:0-21:0",
+            "Saturday": "11:0-15:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        }
+      ],
+      "item_structure": {
+        "type": "dict",
+        "sample_item": {
+          "item_id": "V6Om7YZhlRQRU7WfuxHq8Q",
+          "name": "Beck's Cajun Cafe",
+          "address": "51 N 12th St",
+          "city": "Philadelphia",
+          "state": "PA",
+          "postal_code": "19107",
+          "latitude": 39.9533224742,
+          "longitude": -75.1590000821,
+          "stars": 4.0,
+          "review_count": 485,
+          "is_open": 1,
+          "attributes": {
+            "OutdoorSeating": "False",
+            "HasTV": "False",
+            "GoodForKids": "True",
+            "RestaurantsReservations": "False",
+            "RestaurantsAttire": "u'casual'",
+            "BikeParking": "True",
+            "Alcohol": "u'none'",
+            "NoiseLevel": "u'average'",
+            "RestaurantsTakeOut": "True",
+            "RestaurantsPriceRange2": "1",
+            "WiFi": "u'free'",
+            "RestaurantsGoodForGroups": "False",
+            "HappyHour": "False",
+            "GoodForMeal": "{'dessert': False, 'latenight': False, 'lunch': True, 'dinner': None, 'brunch': None, 'breakfast': None}",
+            "BusinessParking": "{'garage': True, 'street': True, 'validated': False, 'lot': False, 'valet': False}",
+            "DogsAllowed": "False",
+            "Caters": "True",
+            "RestaurantsDelivery": "True",
+            "BusinessAcceptsCreditCards": "True",
+            "Ambience": "{'touristy': None, 'hipster': False, 'romantic': False, 'divey': False, 'intimate': False, 'trendy': False, 'upscale': False, 'classy': False, 'casual': True}"
+          },
+          "categories": "Restaurants, Cajun/Creole",
+          "hours": {
+            "Monday": "8:0-18:0",
+            "Tuesday": "8:0-18:0",
+            "Wednesday": "8:0-18:0",
+            "Thursday": "8:0-18:0",
+            "Friday": "8:0-18:0",
+            "Saturday": "8:0-18:0",
+            "Sunday": "8:0-18:0"
+          },
+          "source": "yelp",
+          "type": "business"
+        }
+      },
+      "file_semantic_summary": "- Overall structure and type\n  - JSON array of business items. Each element is a single venue/service record with a stable primary key (item_id).\n  - Core fields: identity (item_id, name), location (address, city, state, postal_code, latitude, longitude), platform metadata (source, type), popularity signals (stars, review_count), operational status (is_open), categorical tags (categories), attributes (amenities/qualities), and hours.\n\n- Relationships and nested elements\n  - attributes: object of venue features (price, alcohol, delivery/takeout, ambience, parking, WiFi, noise, suitability for kids/groups, etc.). Several values are stringified booleans or Python-like dicts/strings (e.g., \"{'garage': True,...}\", \"u'casual'\"), requiring parsing/normalization.\n  - hours: dictionary mapping weekday names to \"start:end\" strings (24h-like times); some days can be \"0:0-0:0\" (closed) or missing.\n  - categories: comma-separated string of multiple categories; should be split into a list.\n  - Type is consistently \"business\"; source here is Yelp (note: task mentions Amazon, but sample data source is yelp).\n\n- How this data should inform simulation entities or interactions\n  - Item agents\n    - Use item_id as key; include location for distance modeling; categories to define domain (restaurants, cafes, tattoo, salons).\n    - Attributes drive experiential facets to mention in reviews (e.g., WiFi, OutdoorSeating, Alcohol, NoiseLevel, GoodForKids, Delivery/TakeOut, Reservations, PriceRange2).\n    - hours and is_open gate availability; GoodForMeal guides scenario selection (breakfast/lunch/dinner/takeout).\n    - stars and review_count provide prior reputation/popularity to shape user expectations and rating variance.\n  - User agents (personas)\n    - Preferences map to attributes: budget (PriceRange2), family-friendly (GoodForKids), remote worker (WiFi), nightlife/bar (Alcohol/HappyHour/HasTV), group size (GoodForGroups), ambience preferences, parking needs, outdoor seating, delivery vs dine-in.\n    - Context variables: time-of-day/day-of-week, party size, purpose (quick lunch vs special dinner), distance tolerance (lat/long).\n    - Expectations calibrated by existing stars; biases influence final rating relative to experience fit.\n  - Interaction flow\n    - Match user persona to candidate items via categories/attributes and current open hours.\n    - Generate visit scenario (e.g., Saturday brunch at Vineyards Cafe; delivery from Cuenelli\u2019s).\n    - Create experience outcomes tied to attributes (praise/complaints about noise, parking, speed, TV, reservations, price, WiFi).\n    - Produce a 1\u20135 star rating and review text grounded in item features and scenario; incorporate popularity priors to modulate rating distribution.\n  - Data handling notes\n    - Normalize attribute types (booleans, dicts, enums), split categories, parse hours, handle null/missing keys and closed businesses (is_open=0).\n    - Preserve source field for cross-platform analyses; here all are Yelp."
+    },
+    "review_sample.json": {
+      "file_type": "json",
+      "data_type": "array",
+      "length": 20704,
+      "sample_data": [
+        {
+          "review_id": "4KpIldEM-tdnrJLqYzRfZQ",
+          "user_id": "Z5j9Xw_G0c7M2b1-iS67wg",
+          "item_id": "HTqXI5S2XcSlh_ylx9sE6g",
+          "stars": 5.0,
+          "useful": 1,
+          "funny": 1,
+          "cool": 1,
+          "text": "I've only had the cannolis here but they are awesome! They're freshly filled when ordered and the filling is phenomenal. Not too sweet, it's perfect. If you like cannoli, if you don't think you like cannoli, you should definitely get one from Termini Bros.",
+          "date": "2018-03-23 14:35:33",
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "review_id": "g7MfpJGKQUGowCvIcrB91A",
+          "user_id": "ci7Q6NvXQ8UZrBHusVX18g",
+          "item_id": "V6Om7YZhlRQRU7WfuxHq8Q",
+          "stars": 4.0,
+          "useful": 1,
+          "funny": 0,
+          "cool": 0,
+          "text": "A wee bit pricey for the portions they serve. I come to Beck's for their gator gumbo over jambalaya. The whole thing is just so savory and the spices are just right. It's not overly spicy and not too salty as well. It's a great meal. The gator is in a sausage form. All chopped up into the gumbo. During this visit, I had to order their pasta. Chicken alfredo, for my 2 year old son. It was alright. The whole pasta tasted a bit dry. It's something I wouldn't get twice.\n\nVerdict - Gator gumbo, end of story.",
+          "date": "2017-07-08 21:23:54",
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "review_id": "spcIXDKR5BV5QCI4GjjEeg",
+          "user_id": "4aM21WsPaP8SUmx9PB-6aw",
+          "item_id": "Mha77MN_BYGB-w7DONZ5YA",
+          "stars": 4.0,
+          "useful": 0,
+          "funny": 0,
+          "cool": 0,
+          "text": "The chicken sandwich was phenomenal. Great food for a very industrial area.",
+          "date": "2013-05-29 13:31:05",
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "review_id": "WuyNRwsB41cf2BJQL2DbRQ",
+          "user_id": "0nOrJJ4gN5BxYIyxWcJaGA",
+          "item_id": "Mha77MN_BYGB-w7DONZ5YA",
+          "stars": 5.0,
+          "useful": 0,
+          "funny": 0,
+          "cool": 0,
+          "text": "Our group of 6 decided to try something different.  So,  we gave this place a shot.   Very happy with our decision. \n\nThe wife and I shared the special,  which was a massive amount of food for the two of us.   It was a great sampling of all their food options. \n\nThe chicken, steak and rice/beans were pretty amazing.  I could do without the egg,  but it was easy enough to push over to the side.   I'm not a fan of Yuca, but this wasn't bad.   The plantains were delicious.   I didn't try the salad... Just wasn't in the mood for it. \n\nAll in all,  the place is a must visit if you are up for trying something new.",
+          "date": "2016-09-30 19:29:08",
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "review_id": "0aC3eVgDQFE6gH2Fk-MrDg",
+          "user_id": "gL0PnnFMmJbWphaOh_6BsQ",
+          "item_id": "Mha77MN_BYGB-w7DONZ5YA",
+          "stars": 4.0,
+          "useful": 3,
+          "funny": 0,
+          "cool": 1,
+          "text": "This review is mainly chicken talk as Cuenelli's Peruvian Style Rotisserie Chicken brings to the table. Pollo a la brasa.... Rotisserie chicken.... Whatever you wanna call it.... I call it a technique done here with love and pride. Lets be clear, you will find no comparison coming from your grocer deli section or at the checkout isle.\n\nWhy do I think this chicken have some TLC put into it? On biting down of this chicken you can note seasoning flavors down to the bone. This is an inclination that prior to even getting into the rotisserie oven, these birds spend some time in some form of marinating process. Building flavor, the chicken also has a seasoning rub all over the skin.\n\nLets go to this rotisserie oven. Another unique element is this oven has a charcoal or grill like component. This gives the chicken a smoky element in the flavor build. As these birds turn in this oven, they keep moist from the natural drippings dropping from bird to bird as they rotate through this oven. In turn, this a reason why some people may note some pieces the skin end up dry and crispy and others get moist or soggy skin on their chicken In the end, you end up with this tender, smoky, well seasoned, fall off the bone goodness. Wait.... how can they add more flavor? Cuenelli's serves it with two dipping sauces, a chimichurri  which gives a herbaceous and slightly spicy flavor, and an aioli which has a garlicky - lemony element.\n\nRound out this meal with some solid sides. Must haves for me would be the cilantro rice. Another herbaceous addition that works well with this meal. I got to use the word herbaceous a few times in this review, it has reflects such great imagery for food talk:) Must have beans with rice no? I pick the spicy pinto beans over the black beans at this establishment but lets be clear these beans are pretty spicy. I also love the maduros here. These sweet plantatains are cooked to perfection where the outsides has this caramelization from the natural sugar of the sweet plantain, leaving you with this toffee-like, stick to your tooth exterior and soft and sweet interior. \n\nWash all down with Inca cola or a bottle of chicha limena.  Inca cola is almost like a cola champagne or a cream soda type of drink. Chicha Limena I say is Christmas in a bottle. This juice has a floral base blended with cinnamon and cloves.\n\nThough Cuenelli's Peruvian Style Rotisserie Chicken have many other notable Latin dishes, the one thing that comes to mind to me is this chicken made with love. This chicken gives new meaning to all who thought they knew what rotisserie chicken is. I say, go to Cuenelli's and taste again for the very first time.",
+          "date": "2013-11-14 01:23:03",
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "review_id": "NYxYahcPBsyVSE88IHNivA",
+          "user_id": "JDBlafv8p0UBtVFZ4LnRhw",
+          "item_id": "GOSVLhjUT6TnrPhkkmDOpw",
+          "stars": 5.0,
+          "useful": 0,
+          "funny": 0,
+          "cool": 0,
+          "text": "I honestly didn't know this place existed until my friend suggested it for brunch over the weekend. I can't believe I live four blocks away and haven't been here before! I ordered the honeybee crepe and an almond croissant. I'm one to typically bring leftovers home but the food was so delicious there was nothing left to take much to the surprise of my friends. There is a small seating area downstairs and some window seating on the first floor. I'd recommend getting there on the earlier side if you're with a group and want to sit. I'd also recommend this for smaller groups. Will definitely be going back.",
+          "date": "2016-10-14 03:31:17",
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "review_id": "d-fLREorT830s70gy_NKOA",
+          "user_id": "5l4d8Ul81LRwAB1RdP4GBA",
+          "item_id": "ERl6OCSEIFBOqfjai_jIUg",
+          "stars": 1.0,
+          "useful": 3,
+          "funny": 1,
+          "cool": 0,
+          "text": "After coming here for many years, I was very disappointed by my last trip. The one place you never cut corners is in the food, and that's exactly what they did. 2 of the 3 salsas were so watery that you didn't get any tomatillo or tomato on your chip, at all. The third salsa, the pics de gallo, was the worst chop job I've ever seen in a restaurant. Huge pieces of Serrano pepper with varying sizes of everything else, and in stark contrast to the other 2, completely dried out. \n\nWithout even looking at the menu, I know what I want... #15. That decision hasn't changed for over 10 years. Today I should have made a different choice. I'm not sure if they recently went thru a purveyor change but the quality of everything on the plate was horrible. \n\nI used to love the rice, it changed. I used to love the chicken quesadilla, now it's flavorless and covered in 2 lbs of cheese for 1/2 a breast.\n\nPlease go back to your old ways and cut costs elsewhere, other than the food.",
+          "date": "2016-03-07 02:42:54",
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "review_id": "AoK4JBbc8_4H8sMGyInY_w",
+          "user_id": "SAcg8qt12JKyN5yLDjniaw",
+          "item_id": "qDkbudGRfmJvf7trQZea4g",
+          "stars": 5.0,
+          "useful": 0,
+          "funny": 0,
+          "cool": 0,
+          "text": "Dinner for 9 was just fantastic. We celebrated a 70th birthday and received first class treatment all the way.  Sure it was very expensive but our steaks and entrees were outstanding. Great service, great food and great ambiance.",
+          "date": "2014-05-26 01:25:27",
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "review_id": "nTj6Dy7YHplPXI5oxcnByA",
+          "user_id": "fwpHDRkxm7ZNxUtl3ExHmw",
+          "item_id": "HTqXI5S2XcSlh_ylx9sE6g",
+          "stars": 1.0,
+          "useful": 0,
+          "funny": 0,
+          "cool": 0,
+          "text": "I had the carrot cake.... Very disappointed tasted like licorice and baking soda cooking powder. It's too bad because everything looks so delicious :( also didn't like the chocolate chips in it either.",
+          "date": "2015-08-06 21:31:14",
+          "source": "yelp",
+          "type": "business"
+        },
+        {
+          "review_id": "Xzp21PmRtxLJ01y-nE6OiA",
+          "user_id": "vXJ7qdNJY4Rjv0zcKkdKYg",
+          "item_id": "HTqXI5S2XcSlh_ylx9sE6g",
+          "stars": 5.0,
+          "useful": 0,
+          "funny": 0,
+          "cool": 0,
+          "text": "simply the best! everything from here is good! I come from a very Italian family and whenever there is a family event, there is always Termini brothers dessert trays! Their cannolis are amazing! Highly recommend.",
+          "date": "2013-11-14 14:04:12",
+          "source": "yelp",
+          "type": "business"
+        }
+      ],
+      "item_structure": {
+        "type": "dict",
+        "sample_item": {
+          "review_id": "4KpIldEM-tdnrJLqYzRfZQ",
+          "user_id": "Z5j9Xw_G0c7M2b1-iS67wg",
+          "item_id": "HTqXI5S2XcSlh_ylx9sE6g",
+          "stars": 5.0,
+          "useful": 1,
+          "funny": 1,
+          "cool": 1,
+          "text": "I've only had the cannolis here but they are awesome! They're freshly filled when ordered and the filling is phenomenal. Not too sweet, it's perfect. If you like cannoli, if you don't think you like cannoli, you should definitely get one from Termini Bros.",
+          "date": "2018-03-23 14:35:33",
+          "source": "yelp",
+          "type": "business"
+        }
+      },
+      "file_semantic_summary": "- Overall data structure and type\n  - A flat JSON array of review objects.\n  - Each review is a single, self-contained record with scalar fields: review_id, user_id, item_id (strings), stars (float 1\u20135), useful/funny/cool (ints), text (string), date (timestamp string), source (platform), type (domain such as business/product).\n  - No nested objects; the only collection is the top-level list.\n\n- Relationships or nested elements\n  - Review is the junction linking a user (user_id) to an item (item_id): many reviews per user and per item.\n  - useful/funny/cool are post-review interaction counts from other users (implicit second-order user\u2192review relationships).\n  - date provides temporal ordering for longitudinal behaviors.\n  - source distinguishes platform (e.g., yelp vs amazon); type distinguishes entity class (e.g., business vs product).\n\n- How this data should inform simulation entities or interactions\n  - Entities\n    - UserAgent: has preferences (taste, leniency/harshness, verbosity), generates stars and text; may also cast interaction votes on others\u2019 reviews.\n    - Item: carries attributes that condition sentiment/aspects mentioned (for Amazon, product specs/quality; for Yelp, service/ambience/food).\n    - Platform/Source policy: determines available interaction types (Amazon: helpful only; Yelp: useful/funny/cool) and any style constraints.\n    - Review object: output artifact with star rating, text, timestamp, and interaction counts.\n  - Interactions\n    - Primary: user\u2192item review creation (stars + text), respecting 1\u20135 scale and platform/type tone.\n    - Secondary: other users\u2019 interaction votes updating useful/funny/cool (or helpful), possibly time-lagged and popularity-biased.\n    - Temporal: use date to simulate review sequences, preference drift, and interaction accumulation over time.\n    - Cross-platform mapping: for Amazon runs, set source=\"amazon\", type=\"product\"; map useful\u2192helpful, drop funny/cool; preserve id uniqueness and timestamp format.\n  - Data constraints to mirror\n    - Unique IDs for review/user/item; non-negative integer interaction counts; float stars in 0.5 steps typical; concise-to-detailed text variability; platform-appropriate content focus guided by type."
+    }
+  }
+}
