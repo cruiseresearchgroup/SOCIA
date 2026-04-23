@@ -1412,6 +1412,29 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     evaluator = Evaluator()
 
     # ─────────────────────────────────────────────────────────────
+    # Stage 2: Clean calibration without α
+    #   q(λ | y_train, S_t)  via CleanCalibrationWrapper
+    #   → deployable λ_t
+    # ─────────────────────────────────────────────────────────────
+    print("\n=== Stage 2: Clean Calibration ===")
+    clean_wrapper = CleanCalibrationWrapper(simulator)
+    optimized_lambda, clean_artifacts = calibrator.fit(
+        clean_wrapper,
+        splits["train"],
+        num_simulations=int(args.num_simulations),
+        device=str(args.device),
+    )
+
+    stage2_dir = os.path.join(args.output_dir, "stage2_clean_calibration")
+    save_stage2_clean_calibration(
+        stage2_dir,
+        optimized_lambda=optimized_lambda,
+        artifacts=clean_artifacts,
+    )
+    print(f"  λ_t: {optimized_lambda}")
+    print(f"  Saved → {os.path.abspath(stage2_dir)}")
+
+    # ─────────────────────────────────────────────────────────────
     # Stage 1: Diagnostic calibration with α
     #   q(λ, α | y_train, S_t)  via AlphaDiagnosticWrapper
     #   → α posterior + structural-error diagnosis per dimension
@@ -1439,29 +1462,6 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     for k, name in enumerate(PARAM_NAMES):
         print(f"    α[{k:2d}] = {optimized_alpha[k]:+.6f}  →  {name}")
     print(f"  Saved → {os.path.abspath(stage1_dir)}")
-
-    # ─────────────────────────────────────────────────────────────
-    # Stage 2: Clean calibration without α
-    #   q(λ | y_train, S_t)  via CleanCalibrationWrapper
-    #   → deployable λ_t
-    # ─────────────────────────────────────────────────────────────
-    print("\n=== Stage 2: Clean Calibration ===")
-    clean_wrapper = CleanCalibrationWrapper(simulator)
-    optimized_lambda, clean_artifacts = calibrator.fit(
-        clean_wrapper,
-        splits["train"],
-        num_simulations=int(args.num_simulations),
-        device=str(args.device),
-    )
-
-    stage2_dir = os.path.join(args.output_dir, "stage2_clean_calibration")
-    save_stage2_clean_calibration(
-        stage2_dir,
-        optimized_lambda=optimized_lambda,
-        artifacts=clean_artifacts,
-    )
-    print(f"  λ_t: {optimized_lambda}")
-    print(f"  Saved → {os.path.abspath(stage2_dir)}")
 
     # ─────────────────────────────────────────────────────────────
     # Stage 3: Validation evaluation
