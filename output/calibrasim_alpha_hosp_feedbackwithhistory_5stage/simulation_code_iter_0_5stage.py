@@ -173,6 +173,11 @@ PARAM_NAMES = [
     "los_mean_d2_Standard",
 ]
 
+# Number of posterior draws used to compute α diagnostic statistics (Stage 1).
+ALPHA_POSTERIOR_NUM_SAMPLES: int = 2000
+# Threshold τ for the tail-probability statistic P(|α_k| > τ | y).
+ALPHA_TAIL_PROB_TAU: float = 0.05
+
 
 def lambda_alpha_xi_to_Lambda(
     lam: np.ndarray,
@@ -768,6 +773,9 @@ class CalibrationArtifacts:
     loss_history: List[float]
     x_mean: np.ndarray
     x_std: np.ndarray
+    # M draws from the fitted posterior q(θ | y); shape (M, theta_dim).
+    # Populated only when num_posterior_samples > 0 is passed to fit().
+    posterior_samples: Optional[np.ndarray] = None
 
 
 class BaseCalibrator:
@@ -839,6 +847,7 @@ class NPEGaussianCalibrator(BaseCalibrator):
         *,
         num_simulations: int,
         device: str,
+        num_posterior_samples: int = 0,
     ) -> Tuple[np.ndarray, CalibrationArtifacts]:
         if num_simulations <= 0:
             raise ValueError("num_simulations must be positive.")
@@ -914,16 +923,26 @@ class NPEGaussianCalibrator(BaseCalibrator):
                 epoch_losses.append(float(loss.detach().cpu().item()))
             loss_history.append(float(np.mean(epoch_losses)) if epoch_losses else float("nan"))
 
+        theta_min_np = np.asarray(theta_min, dtype=np.float64)
+        theta_max_np = np.asarray(theta_max, dtype=np.float64)
+
+        posterior_samples_np: Optional[np.ndarray] = None
         with torch.no_grad():
             xo_t = torch.from_numpy(xo_std.reshape(1, -1)).to(torch_device)
-            mean, _log_std = net(xo_t)
-            optimized_theta = mean.squeeze(0).detach().cpu().numpy().astype(np.float64)
+            mean_pred, log_std_pred = net(xo_t)
+            optimized_theta = mean_pred.squeeze(0).detach().cpu().numpy().astype(np.float64)
 
-        optimized_theta = np.clip(
-            optimized_theta,
-            np.asarray(theta_min, dtype=np.float64),
-            np.asarray(theta_max, dtype=np.float64),
-        )
+            if num_posterior_samples > 0:
+                std_pred = torch.exp(log_std_pred)                        # (1, theta_dim)
+                eps = torch.randn(num_posterior_samples, theta_dim, device=torch_device)
+                samples_t = mean_pred + std_pred * eps                    # (M, theta_dim)
+                posterior_samples_np = np.clip(
+                    samples_t.cpu().numpy().astype(np.float64),
+                    theta_min_np[np.newaxis, :],
+                    theta_max_np[np.newaxis, :],
+                )
+
+        optimized_theta = np.clip(optimized_theta, theta_min_np, theta_max_np)
 
         artifacts = CalibrationArtifacts(
             theta_samples=theta_samples.astype(np.float64),
@@ -931,8 +950,94 @@ class NPEGaussianCalibrator(BaseCalibrator):
             loss_history=loss_history,
             x_mean=x_mean.astype(np.float64),
             x_std=x_std.astype(np.float64),
+            posterior_samples=posterior_samples_np,
         )
         return optimized_theta, artifacts
+
+
+# ============================================================
+# Alpha posterior diagnostics
+# ============================================================
+
+@dataclass
+class AlphaPosteriorDiagnostics:
+    """
+    Per-dimension Bayesian posterior summary statistics for α.
+
+    Computed from M draws {α_k^(m)} sampled from the fitted posterior
+    q(λ, α | y) via the trained NPE network.
+
+    Fields (each a 1-D array of length LAMBDA_DIM):
+        alpha_mean           E[α_k | y]
+        alpha_std            Std[α_k | y]
+        alpha_90pct_CI       (lower, upper) = (Q_0.05, Q_0.95) of α_k | y
+        alpha_tail_prob      P(|α_k| > τ | y)   – not cancelled by sign
+        alpha_abs_mean       E[|α_k| | y]        – average activation magnitude
+    """
+    num_posterior_samples: int
+    tau: float
+    alpha_mean: np.ndarray            # shape (LAMBDA_DIM,)
+    alpha_std: np.ndarray             # shape (LAMBDA_DIM,)
+    alpha_90pct_CI_lower: np.ndarray  # shape (LAMBDA_DIM,)   Q_0.05
+    alpha_90pct_CI_upper: np.ndarray  # shape (LAMBDA_DIM,)   Q_0.95
+    alpha_tail_prob: np.ndarray       # shape (LAMBDA_DIM,)   P(|α_k|>τ|y)
+    alpha_abs_mean: np.ndarray        # shape (LAMBDA_DIM,)   E[|α_k||y]
+
+
+def compute_alpha_posterior_diagnostics(
+    posterior_samples: np.ndarray,
+    tau: float = ALPHA_TAIL_PROB_TAU,
+) -> AlphaPosteriorDiagnostics:
+    """
+    Compute per-dimension posterior summary statistics for α.
+
+    Args:
+        posterior_samples: shape (M, 2*LAMBDA_DIM) – draws from q(λ, α | y).
+        tau: tail-probability threshold τ.
+
+    Returns:
+        AlphaPosteriorDiagnostics with all five summary statistics.
+    """
+    if posterior_samples.ndim != 2 or posterior_samples.shape[1] != 2 * LAMBDA_DIM:
+        raise ValueError(
+            f"posterior_samples must have shape (M, {2 * LAMBDA_DIM}), "
+            f"got {posterior_samples.shape}"
+        )
+    alpha_samples = posterior_samples[:, LAMBDA_DIM:]   # (M, LAMBDA_DIM)
+    M = alpha_samples.shape[0]
+    return AlphaPosteriorDiagnostics(
+        num_posterior_samples=M,
+        tau=tau,
+        alpha_mean=alpha_samples.mean(axis=0),
+        alpha_std=alpha_samples.std(axis=0),
+        alpha_90pct_CI_lower=np.percentile(alpha_samples, 5.0, axis=0),
+        alpha_90pct_CI_upper=np.percentile(alpha_samples, 95.0, axis=0),
+        alpha_tail_prob=np.mean(np.abs(alpha_samples) > tau, axis=0).astype(np.float64),
+        alpha_abs_mean=np.mean(np.abs(alpha_samples), axis=0),
+    )
+
+
+def _alpha_diagnostics_to_dict(diag: AlphaPosteriorDiagnostics) -> Dict[str, Any]:
+    """Serialise AlphaPosteriorDiagnostics to a JSON-friendly dict."""
+    per_dim: Dict[str, Any] = {}
+    for k, name in enumerate(PARAM_NAMES):
+        per_dim[name] = {
+            "alpha_mean": float(diag.alpha_mean[k]),
+            "alpha_std": float(diag.alpha_std[k]),
+            "alpha_90pct_CI": [
+                float(diag.alpha_90pct_CI_lower[k]),
+                float(diag.alpha_90pct_CI_upper[k]),
+            ],
+            f"alpha_tail_prob_tau_{str(diag.tau).replace('.', '')}": float(
+                diag.alpha_tail_prob[k]
+            ),
+            "alpha_abs_mean": float(diag.alpha_abs_mean[k]),
+        }
+    return {
+        "num_posterior_samples": diag.num_posterior_samples,
+        "tau": diag.tau,
+        "per_dimension": per_dim,
+    }
 
 
 # ============================================================
@@ -1143,8 +1248,9 @@ def save_stage1_alpha_diagnostic(
     optimized_lambda: np.ndarray,
     optimized_alpha: np.ndarray,
     artifacts: CalibrationArtifacts,
+    alpha_diagnostics: AlphaPosteriorDiagnostics,
 ) -> None:
-    """Save Stage 1 outputs: alpha calibration summary and alpha artifacts."""
+    """Save Stage 1 outputs: alpha calibration summary, artifacts, and posterior diagnostics."""
     os.makedirs(output_dir, exist_ok=True)
     optimized_lambda = np.asarray(optimized_lambda, dtype=np.float64)
     optimized_alpha = np.asarray(optimized_alpha, dtype=np.float64)
@@ -1162,6 +1268,7 @@ def save_stage1_alpha_diagnostic(
         for k, name in enumerate(PARAM_NAMES)
     ]
     cal_dict = _cal_artifacts_dict(artifacts)
+    diag_dict = _alpha_diagnostics_to_dict(alpha_diagnostics)
 
     with open(os.path.join(output_dir, "results.json"), "w", encoding="utf-8") as f:
         json.dump(
@@ -1171,6 +1278,7 @@ def save_stage1_alpha_diagnostic(
                 "optimized_alpha": alpha_named,
                 "structural_error_alpha_labels": structural_error_alpha_list,
                 "calibration_artifacts": cal_dict,
+                "alpha_posterior_diagnostics": diag_dict,
             },
             f, indent=2, sort_keys=True,
         )
@@ -1198,6 +1306,11 @@ def save_stage1_alpha_diagnostic(
         os.path.join(output_dir, "calibration_artifacts.json"), "w", encoding="utf-8"
     ) as f:
         json.dump(cal_dict, f, indent=2, sort_keys=True)
+
+    with open(
+        os.path.join(output_dir, "alpha_posterior_diagnostics.json"), "w", encoding="utf-8"
+    ) as f:
+        json.dump(diag_dict, f, indent=2, sort_keys=True)
 
     _save_cal_npz(output_dir, artifacts)
 
@@ -1446,9 +1559,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         splits["train"],
         num_simulations=int(args.num_simulations),
         device=str(args.device),
+        num_posterior_samples=ALPHA_POSTERIOR_NUM_SAMPLES,
     )
     optimized_lambda_diag = alpha_wrapper.extract_lambda(optimized_theta_joint)
     optimized_alpha = alpha_wrapper.extract_alpha(optimized_theta_joint)
+
+    alpha_diagnostics = compute_alpha_posterior_diagnostics(
+        alpha_artifacts.posterior_samples,
+        tau=ALPHA_TAIL_PROB_TAU,
+    )
 
     stage1_dir = os.path.join(args.output_dir, "stage1_alpha_diagnostic")
     save_stage1_alpha_diagnostic(
@@ -1456,11 +1575,27 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         optimized_lambda=optimized_lambda_diag,
         optimized_alpha=optimized_alpha,
         artifacts=alpha_artifacts,
+        alpha_diagnostics=alpha_diagnostics,
     )
-    print(f"  λ_diag:   {optimized_lambda_diag}")
-    print(f"  α posterior mean: {optimized_alpha}")
+    print(f"  λ_diag:  {optimized_lambda_diag}")
+    print(
+        f"  Posterior diagnostics  "
+        f"(M={alpha_diagnostics.num_posterior_samples}, τ={alpha_diagnostics.tau})"
+    )
+    print(
+        f"  {'param':<28} {'mean':>9} {'std':>9} "
+        f"{'CI_lo':>9} {'CI_hi':>9} {'tail_p':>8} {'abs_mean':>9}"
+    )
     for k, name in enumerate(PARAM_NAMES):
-        print(f"    α[{k:2d}] = {optimized_alpha[k]:+.6f}  →  {name}")
+        print(
+            f"  {name:<28} "
+            f"{alpha_diagnostics.alpha_mean[k]:>+9.4f} "
+            f"{alpha_diagnostics.alpha_std[k]:>9.4f} "
+            f"{alpha_diagnostics.alpha_90pct_CI_lower[k]:>+9.4f} "
+            f"{alpha_diagnostics.alpha_90pct_CI_upper[k]:>+9.4f} "
+            f"{alpha_diagnostics.alpha_tail_prob[k]:>8.3f} "
+            f"{alpha_diagnostics.alpha_abs_mean[k]:>9.4f}"
+        )
     print(f"  Saved → {os.path.abspath(stage1_dir)}")
 
     # ─────────────────────────────────────────────────────────────
