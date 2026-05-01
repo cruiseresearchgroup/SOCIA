@@ -55,7 +55,7 @@ def parse_arguments():
     parser.add_argument('--output', type=str, default='./output', help='Path to output directory')
     parser.add_argument('--config', type=str, default='./config.yaml', help='Path to configuration file')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
-    parser.add_argument('--mode', type=str, default='persona', choices=['lite', 'medium', 'persona', 'blueprint', 'odd', 'ace', 'alpha'], help='Workflow mode')
+    parser.add_argument('--mode', type=str, default='persona', choices=['lite', 'medium', 'persona', 'blueprint', 'odd', 'ace', 'alpha', 'gsim'], help='Workflow mode')
     parser.add_argument('--selfloop', type=int, default=3, help='Number of self-checking loop attempts for code generation')
     parser.add_argument('--persisted-data-analysis-file', type=str, help='Path to persisted data analysis file (task_spec.json) to skip data analysis phase')
     parser.add_argument('--persisted-code-file', type=str, help='Path to persisted code file (simulation_code_iter_N.py) to skip data analysis and initial code generation')
@@ -940,6 +940,16 @@ def run_data_analysis_test(
             feedback_generation_agent = agent_container.feedback_generation_alpha_agent()
             logger.info("Alpha mode: Using feedback_generation_alpha_agent for feedback generation")
             iteration_control_agent = agent_container.iteration_control_ace_agent()
+        elif args.mode == "gsim":
+            data_analysis_agent = agent_container.data_analysis_gsim_agent()
+            logger.info("Gsim mode: Using data_analysis_gsim_agent for data analysis")
+            code_generation_agent = agent_container.code_generation_gsim_agent()
+            logger.info("Gsim mode: Using code_generation_gsim_agent for code generation")
+            simulation_execution_agent = agent_container.simulation_execution_gsim_agent()
+            logger.info("Gsim mode: Using simulation_execution_gsim_agent for execution")
+            feedback_generation_agent = agent_container.feedback_generation_gsim_agent()
+            logger.info("Gsim mode: Using feedback_generation_gsim_agent for feedback generation")
+            iteration_control_agent = agent_container.iteration_control_ace_agent()
         else:
             # Default to odd agents for odd mode and other modes
             data_analysis_agent = agent_container.data_analysis_odd_agent()
@@ -1050,7 +1060,7 @@ def run_data_analysis_test(
             }
             
             # Alpha mode: generate simulator_description for persisted code (once per iteration)
-            if args.mode == "alpha":
+            if args.mode in ["alpha", "gsim"]:
                 try:
                     sim_desc = agents["code_generation"]._generate_simulator_description(persisted_code, task_spec)
                     state["generated_code"]["simulator_description"] = sim_desc
@@ -1189,7 +1199,7 @@ def run_data_analysis_test(
         # ==================================================
         # BLUEPRINT FEEDBACK AFTER DATA ANALYSIS (ACE/ALPHA mode only)
         # ==================================================
-        if args.mode in ["ace", "alpha"]:
+        if args.mode in ["ace", "alpha", "gsim"]:
             logger.info("=" * 50)
             logger.info("BLUEPRINT FEEDBACK AFTER DATA ANALYSIS (ACE mode)")
             logger.info("=" * 50)
@@ -1238,7 +1248,7 @@ def run_data_analysis_test(
         # Initialize best_simulator_info and simulation_info_history for alpha mode (track best code across iterations)
         best_simulator_info = None
         simulation_info_history = []
-        if args.mode == "alpha":
+        if args.mode in ["alpha", "gsim"]:
             logger.info("Alpha mode: Initializing best_simulator_info tracker and simulation_info_history")
             
             # Try to load simulation_info_history from previous run
@@ -1366,7 +1376,7 @@ def run_data_analysis_test(
                 }
                 
                 # Add best_simulator_info and simulation_info_history for alpha mode
-                if args.mode == "alpha":
+                if args.mode in ["alpha", "gsim"]:
                     if best_simulator_info is not None:
                         process_kwargs["best_simulator_info"] = best_simulator_info
                         if best_simulator_info.get("iteration") is not None:
@@ -1424,7 +1434,7 @@ def run_data_analysis_test(
                 save_artifact(args.output, f"evaluation_results_iter_{current_iteration}", state["evaluation_results"])
                 logger.info(f"{args.mode.upper()} mode: Placeholders created for verification, simulation, and evaluation results")
             # ACE/ALPHA mode: Skip verification, but execute simulation
-            elif args.mode in ["ace", "alpha"]:
+            elif args.mode in ["ace", "alpha", "gsim"]:
                 logger.info(f"{args.mode.upper()} mode: Skipping verification, but executing simulation")
                 state["verification_results"] = {
                     "placeholder": True,
@@ -1457,7 +1467,7 @@ def run_data_analysis_test(
                     logger.info(f"✅ Simulation execution completed successfully")
                     
                     # Update simulation_info_history and best_simulator_info for alpha mode
-                    if args.mode == "alpha":
+                    if args.mode in ["alpha", "gsim"]:
                         # Extract val_loss from simulation_results
                         simulation_metrics = state["simulation_results"].get("simulation_metrics", {})
                         current_val_loss = simulation_metrics.get("val_loss")
@@ -1605,7 +1615,7 @@ def run_data_analysis_test(
             # --------------------------------------------------
             # STEP 5: Blueprint Feedback (ACE/ALPHA mode only)
             # --------------------------------------------------
-            if args.mode in ["ace", "alpha"]:
+            if args.mode in ["ace", "alpha", "gsim"]:
                 logger.info("BLUEPRINT FEEDBACK (ACE/ALPHA mode)")
                 
                 # Extract current blueprint from task_spec
@@ -1705,7 +1715,7 @@ def run_data_analysis_test(
             }
             
             # Add best_simulator_info and simulation_info_history for alpha mode
-            if args.mode == "alpha":
+            if args.mode in ["alpha", "gsim"]:
                 if best_simulator_info is not None:
                     process_kwargs["best_simulator_info"] = best_simulator_info
                     if best_simulator_info.get("iteration") is not None:
@@ -1854,7 +1864,7 @@ def run_data_analysis_test(
             # The #STOP# check is now done in the main workflow before calling iteration_control
             # ACE/ALPHA mode uses decision function with simulation_results and feedback
             # Other modes use LLM-based iteration control
-            if args.mode in ["ace", "alpha"]:
+            if args.mode in ["ace", "alpha", "gsim"]:
                 state["iteration_decision"] = agents["iteration_control"].process(
                     current_iteration=current_iteration,
                     max_iterations=args.iterations,
