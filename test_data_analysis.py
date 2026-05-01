@@ -1371,9 +1371,10 @@ def run_data_analysis_test(
                     "blueprint": None,
                     "output_dir": args.output,
                     "iteration": current_iteration,
-                    "playbook": playbook,
                     "simulation_results": prev_simulation_results  # Pass previous iteration's results for patch prompt
                 }
+                if args.mode in ["ace", "alpha"]:
+                    process_kwargs["playbook"] = playbook
                 
                 # Add best_simulator_info and simulation_info_history for alpha mode
                 if args.mode in ["alpha", "gsim"]:
