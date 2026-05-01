@@ -38,7 +38,6 @@ class CodeGenerationAgent(BaseAgent):
         blueprint: Optional[Any] = None,
         output_dir: Optional[str] = None,
         iteration: Optional[int] = None,
-        playbook: Optional[Dict[str, Any]] = None,
         simulation_results: Optional[Dict[str, Any]] = None,
         best_simulator_info: Optional[Dict[str, Any]] = None,
         simulation_info_history: Optional[List[Dict[str, Any]]] = None,
@@ -65,12 +64,10 @@ class CodeGenerationAgent(BaseAgent):
         """
         self.logger.info("Generating simulation code")
         
-        # Log blueprint / playbook usage if available
+        # Log blueprint usage if available
         if blueprint is not None:
             self.logger.info("Using blueprint for code generation in blueprint mode")
             self.logger.debug(f"Blueprint contains {len(blueprint)} items")
-        if playbook is not None:
-            self.logger.info("Playbook provided to code generation (ACE/ODD mode)")
         
         # # Override model_plan data_sources with processed file paths (skip in lite mode)
         # if mode != "lite" and model_plan and data_analysis and "file_references" in data_analysis:
@@ -95,7 +92,6 @@ class CodeGenerationAgent(BaseAgent):
             "data_path": data_path,
             "previous_code": previous_code,
             "mode": mode,
-            "playbook": playbook,
             "simulation_results": simulation_results,
             "iteration": iteration,
         }
@@ -110,15 +106,13 @@ class CodeGenerationAgent(BaseAgent):
                     task_spec=task_spec,
                     previous_code=previous_code,
                     simulation_results=simulation_results,
-                    playbook=playbook,
                 )
-            elif mode == "alpha" and simulation_info_history is not None:
-                self.logger.info(f"Using patch prompt for iteration {iteration} (ALPHA mode with simulation_info_history)")
+            elif mode in ["alpha", "gsim"] and simulation_info_history is not None:
+                self.logger.info(f"Using patch prompt for iteration {iteration} ({mode.upper()} mode with simulation_info_history)")
                 prompt = self._build_patch_prompt(
                     task_spec=task_spec,
                     previous_code=previous_code,
                     simulation_results=simulation_results,
-                    playbook=playbook,
                     best_simulator_info=best_simulator_info,
                     simulation_info_history=simulation_info_history,
                     iteration=iteration,
@@ -1195,7 +1189,6 @@ Respond as:
         data_path: Optional[str] = None,
         previous_code: Optional[Dict[str, str]] = None,
         mode: str = "full",
-        playbook: Optional[Dict[str, Any]] = None,
         simulation_results: Optional[Dict[str, Any]] = None,
         iteration: Optional[int] = None,
     ) -> str:
@@ -1278,15 +1271,6 @@ Respond as:
             file_summaries = task_spec.get("file_summaries", [])
             file_summaries_str = json.dumps(file_summaries, indent=2) if file_summaries else "No file summaries available"
             
-            # Format playbook as string (only for ACE/ALPHA mode)
-            playbook_str = "No playbook provided"
-            if mode in ["ace", "alpha"] and playbook:
-                try:
-                    playbook_str = json.dumps(playbook, indent=2, ensure_ascii=False)
-                except TypeError:
-                    # Fallback if playbook contains non-serializable objects
-                    playbook_str = str(playbook)
-            
             model_plan_str = json.dumps(model_plan, indent=2) if model_plan else "No model plan provided"
             data_analysis_str = json.dumps(data_analysis, indent=2) if data_analysis else "No data analysis provided"
             
@@ -1305,8 +1289,8 @@ Respond as:
             # Data path string
             data_path_str = f"Data directory: {data_path}" if data_path else "No data path provided"
             
-            # For ACE/ALPHA mode, use template with blue_print, file_summaries, and playbook placeholders
-            if mode in ["ace", "alpha"]:
+            # For ACE/ALPHA/GSIM mode, use template with blue_print, file_summaries placeholders
+            if mode in ["ace", "alpha", "gsim"]:
                 # Task description (both raw and lower-cased for matching)
                 task_description_raw = task_spec.get('description', '')
                 task_description = task_description_raw.lower()
@@ -1361,14 +1345,14 @@ Respond as:
                     except Exception as e:
                         self.logger.error(f"Error loading llmob_patch_prompt.txt: {e}")
                 
-                # Replace {coding_patch} placeholder before formatting other placeholders
+                # Replace {coding_patch} and {playbook} placeholders before formatting
                 prompt_template_with_patch = prompt_template.replace("{coding_patch}", coding_patch_content)
+                prompt_template_with_patch = prompt_template_with_patch.replace("{playbook}", "")
                 
-                # Fill in the ACE template with all placeholders
+                # Fill in the template with blueprint and file_summaries placeholders
                 prompt = prompt_template_with_patch.format(
                     blue_print=blueprint_str,
                     file_summaries=file_summaries_str,
-                    playbook=playbook_str
                 )
             else:
                 # For other modes, use the original format (without file_summaries and playbook)
@@ -1426,74 +1410,11 @@ Respond as:
         
         return prompt
     
-    def _transform_playbook_for_prompt(self, playbook: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Transform playbook format for prompt usage:
-        - Remove playbook_metadata
-        - Filter to only include strategies with status="in_progress"
-          (These are strategies that were selected via select_strategies_for_prompt())
-        - Remove meta_info from each strategy
-        - Flatten reflection content to be the direct content of each strategy
-        
-        Status lifecycle:
-        - open: New or reactivated strategy, waiting for selection
-        - queued: Not selected due to budget, waiting in queue
-        - in_progress: Selected for current prompt (E_selected event)
-        - resolved: Successfully resolved
-        
-        Args:
-            playbook: Original playbook dictionary
-            
-        Returns:
-            Transformed playbook dictionary with only in_progress strategies (reflection content flattened)
-        """
-        if not playbook or not isinstance(playbook, dict):
-            return {"strategies": {}}
-        
-        transformed = {"strategies": {}}
-        
-        # Valid statuses for inclusion in prompt (strategies that were selected)
-        SELECTABLE_STATUSES = ["in_progress"]
-        
-        strategies = playbook.get("strategies", {})
-        for strategy_id, strategy_data in strategies.items():
-            if not isinstance(strategy_data, dict):
-                continue
-            
-            # Check status: only include strategies with in_progress status
-            # Status is stored in meta_info.status
-            meta_info = strategy_data.get("meta_info", {})
-            if not isinstance(meta_info, dict):
-                # Skip if meta_info is missing or not a dict
-                self.logger.debug(f"Skipping strategy '{strategy_id}' - missing or invalid meta_info")
-                continue
-            
-            status = meta_info.get("status", "open")
-            
-            # Skip if status is not in_progress
-            if status not in SELECTABLE_STATUSES:
-                self.logger.debug(f"Skipping strategy '{strategy_id}' with status '{status}' (only in_progress strategies included)")
-                continue
-            
-            # Get reflection content (flatten it)
-            reflection = strategy_data.get("reflection", {})
-            
-            # If reflection is empty or not a dict, skip this strategy
-            if not reflection or not isinstance(reflection, dict):
-                continue
-            
-            # Flatten reflection: reflection fields become direct fields of the strategy
-            transformed["strategies"][strategy_id] = dict(reflection)
-        
-        self.logger.debug(f"Transformed playbook: {len(transformed['strategies'])} in_progress strategies included")
-        return transformed
-    
     def _build_patch_prompt(
         self,
         task_spec: Dict[str, Any],
         previous_code: Optional[Dict[str, str]] = None,
         simulation_results: Optional[Dict[str, Any]] = None,
-        playbook: Optional[Dict[str, Any]] = None,
         best_simulator_info: Optional[Dict[str, Any]] = None,
         simulation_info_history: Optional[List[Dict[str, Any]]] = None,
         iteration: Optional[int] = None,
@@ -1505,8 +1426,7 @@ Respond as:
             task_spec: Task specification containing blueprint
             previous_code: Code from the previous iteration
             simulation_results: Results from simulation execution
-            playbook: Playbook dictionary (will be transformed)
-            best_simulator_info: Best simulator info for alpha mode (optional)
+            best_simulator_info: Best simulator info for alpha/gsim mode (optional)
         
         Returns:
             Formatted prompt string
@@ -1868,11 +1788,6 @@ Respond as:
             # Format simulation results
             simulation_results_str = json.dumps(simulation_results, indent=2, default=str, ensure_ascii=False) if simulation_results else "No simulation results provided"
         
-        # Transform and format playbook (always follow ACE-mode behavior):
-        # only include strategies that were selected for the current prompt (status="in_progress").
-        transformed_playbook = self._transform_playbook_for_prompt(playbook)
-        playbook_str = json.dumps(transformed_playbook, indent=2, ensure_ascii=False)
-        
         # For ACE mode: check if task description contains "daily mobility trajectories"
         # For alpha mode with best_simulator_info: check if task description contains "COVID SIR"
         coding_patch_content = ""
@@ -1925,14 +1840,13 @@ Respond as:
                     self.logger.error(f"Error loading gsim_supply_patch_prompt.txt: {e}")
                     coding_patch_content = ""
         
-        # Replace {coding_patch} placeholder first
+        # Replace placeholders (strip {playbook} since gsim does not use playbook)
         prompt_template_with_patch = prompt_template.replace("{coding_patch}", coding_patch_content)
+        prompt_template_with_patch = prompt_template_with_patch.replace("{playbook}", "")
         
-        # Replace other placeholders
         prompt = prompt_template_with_patch.replace("{blue_print}", blueprint_str)
         prompt = prompt.replace("{previous_code}", previous_code_str)
         prompt = prompt.replace("{simulation_results}", simulation_results_str)
-        prompt = prompt.replace("{playbook}", playbook_str)
         
         return prompt
     

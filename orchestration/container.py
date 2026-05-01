@@ -17,6 +17,7 @@ from agents.code_generation.agent import CodeGenerationAgent
 from agents.code_generation_odd.agent import CodeGenerationAgent as CodeGenerationOddAgent
 from agents.code_generation_ace.agent import CodeGenerationAgent as CodeGenerationAceAgent
 from agents.code_generation_alpha.agent import CodeGenerationAgent as CodeGenerationAlphaAgent
+from agents.code_generation_gsim.agent import CodeGenerationAgent as CodeGenerationGsimAgent
 from agents.code_verification.agent import CodeVerificationAgent
 from agents.simulation_execution.agent import SimulationExecutionAgent
 from agents.simulation_execution_ace.agent import SimulationExecutionAgent as SimulationExecutionAceAgent
@@ -148,7 +149,7 @@ class AgentContainer(containers.DeclarativeContainer):
     )
 
     code_generation_gsim_agent = providers.Factory(
-        CodeGenerationAlphaAgent,
+        CodeGenerationGsimAgent,
         config=config.agents.code_generation_gsim
     )
     
