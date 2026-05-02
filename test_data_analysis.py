@@ -105,6 +105,7 @@ def setup_container(config_path: str) -> AgentContainer:
         "agents.code_verification.agent",
         "agents.simulation_execution.agent",
         "agents.simulation_execution_alpha.agent",
+        "agents.simulation_execution_gsim.agent",
         "agents.result_evaluation.agent",
         "agents.feedback_generation.agent",
         "agents.feedback_generation_odd.agent",
@@ -985,6 +986,11 @@ def run_data_analysis_test(
         code_memory = {}
         state["code_memory"] = code_memory
         
+        # Initialize code description memory to store simulator_description per iteration
+        # Mirrors code_memory shape: {iteration: {artifact_name: content}}
+        code_description_memory = {}
+        state["code_description_memory"] = code_description_memory
+        
         # Initialize historical fix log
         historical_fix_log = {}
         
@@ -1059,17 +1065,39 @@ def run_data_analysis_test(
                 }
             }
             
-            # Alpha mode: generate simulator_description for persisted code (once per iteration)
+            # For persisted start, load simulator_description from generated_code_iter_<persisted_iteration>.json
+            # instead of regenerating it from code.
             if args.mode in ["alpha", "gsim"]:
-                try:
-                    sim_desc = agents["code_generation"]._generate_simulator_description(persisted_code, task_spec)
-                    state["generated_code"]["simulator_description"] = sim_desc
-                    logger.info("Alpha mode: simulator_description generated for persisted code")
-                except Exception as e:
-                    logger.warning(f"Alpha mode: failed to generate simulator_description for persisted code: {e}")
+                persisted_generated_json = os.path.join(
+                    args.output, f"generated_code_iter_{persisted_iteration}.json"
+                )
+                persisted_sim_desc = ""
+                if os.path.exists(persisted_generated_json):
+                    try:
+                        with open(persisted_generated_json, "r", encoding="utf-8") as gf:
+                            persisted_generated_payload = json.load(gf)
+                        persisted_sim_desc = (
+                            persisted_generated_payload.get("simulator_description", "") or ""
+                        )
+                        logger.info(
+                            f"Loaded simulator_description from: {persisted_generated_json}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to load simulator_description from {persisted_generated_json}: {e}"
+                        )
+                else:
+                    logger.warning(
+                        f"generated_code JSON not found for persisted iteration: {persisted_generated_json}"
+                    )
+                state["generated_code"]["simulator_description"] = persisted_sim_desc
             
             # Store in code_memory at the correct iteration number
             code_memory[persisted_iteration] = {f"simulation_code_iter_{persisted_iteration}.py": persisted_code}
+            persisted_sim_desc = state["generated_code"].get("simulator_description", "")
+            code_description_memory[persisted_iteration] = {
+                f"simulator_description_iter_{persisted_iteration}.txt": persisted_sim_desc
+            }
             
             # Save the loaded code to output directory (if it doesn't exist already)
             persisted_code_path = os.path.join(args.output, f"simulation_code_iter_{persisted_iteration}.py")
@@ -1097,6 +1125,19 @@ def run_data_analysis_test(
                             with open(prev_code_file, 'r', encoding='utf-8') as f:
                                 prev_code = f.read()
                             code_memory[prev_iter] = {f"simulation_code_iter_{prev_iter}.py": prev_code}
+                            # Restore simulator_description memory (best-effort) from generated_code artifact.
+                            prev_generated_json = os.path.join(args.output, f"generated_code_iter_{prev_iter}.json")
+                            prev_sim_desc = ""
+                            if os.path.exists(prev_generated_json):
+                                try:
+                                    with open(prev_generated_json, 'r', encoding='utf-8') as gf:
+                                        prev_generated_payload = json.load(gf)
+                                    prev_sim_desc = prev_generated_payload.get("simulator_description", "") or ""
+                                except Exception as desc_err:
+                                    logger.warning(f"  ✗ Failed to load simulator_description from iteration {prev_iter}: {desc_err}")
+                            code_description_memory[prev_iter] = {
+                                f"simulator_description_iter_{prev_iter}.txt": prev_sim_desc
+                            }
                             logger.info(f"  ✓ Loaded code from iteration {prev_iter}")
                         except Exception as e:
                             logger.warning(f"  ✗ Failed to load code from iteration {prev_iter}: {e}")
@@ -1397,6 +1438,10 @@ def run_data_analysis_test(
                 # Store in code_memory (key: current_iteration, value: {filename: code})
                 gen_code_dict = state["generated_code"]["code"]
                 code_memory[current_iteration] = {f"simulation_code_iter_{current_iteration}.py": gen_code_dict}
+                gen_sim_desc = state["generated_code"].get("simulator_description", "")
+                code_description_memory[current_iteration] = {
+                    f"simulator_description_iter_{current_iteration}.txt": gen_sim_desc
+                }
                 
                 logger.info(f"Code generation completed for iteration {current_iteration} (saved as iter_{current_iteration})")
             else:
@@ -1444,9 +1489,8 @@ def run_data_analysis_test(
                 }
                 save_artifact(args.output, f"verification_results_iter_{current_iteration}", state["verification_results"])
                 
-                # Execute simulation using simulation_execution_ace agent
-                # ACE mode uses subprocess execution (same as lite mode)
-                logger.info("SIMULATION EXECUTION (ACE mode)")
+                # Execute simulation (ACE/ALPHA/GSIM: subprocess path in each agent when mode matches)
+                logger.info("SIMULATION EXECUTION (ACE/GSIM/Alpha path)")
                 
                 # Extract environment variables and output directory for subprocess execution
                 project_root = os.environ.get("PROJECT_ROOT", os.getcwd())

@@ -165,7 +165,7 @@ class SimulationExecutionAgent(BaseAgent):
     3. Collecting metrics and outputs
     4. Handling any runtime errors
     5. Executing code in an isolated Docker container for security (full mode)
-    6. Executing code directly with subprocess for lightweight execution (lite/ace/alpha mode)
+    6. Executing code directly with subprocess for lightweight execution (lite/ace/alpha/gsim mode)
     """
     
     def __init__(self, output_dir: str, config: Dict[str, Any] = None):
@@ -225,7 +225,7 @@ class SimulationExecutionAgent(BaseAgent):
             code_path: Path to the simulation code file
             task_spec: Task specification from the Task Understanding Agent
             data_path: Path to input data (optional)
-            mode: Execution mode ("full", "lite", "ace", or "alpha"). ACE/ALPHA mode uses subprocess like lite mode.
+            mode: Execution mode ("full", "lite", "ace", "alpha", or "gsim"). ACE/ALPHA/GSIM mode uses subprocess like lite mode.
             output_dir: Output directory for simulation results (optional, used to generate --output file path)
             iteration: Current iteration number (optional, used to generate output filename)
             project_root: PROJECT_ROOT environment variable value (optional, will use existing env var if not provided)
@@ -253,7 +253,7 @@ class SimulationExecutionAgent(BaseAgent):
             }
         
         # Choose execution method based on mode
-        # ACE/ALPHA mode and lite mode both use subprocess execution (same as lite mode)
+        # ACE/ALPHA/GSIM mode and lite mode both use subprocess execution (same path)
         if mode in ["ace", "alpha", "lite", "gsim"]:
             # Use direct subprocess execution for lite/ace/alpha mode
             self.logger.info(f"Using subprocess execution for {mode} mode")
@@ -351,7 +351,7 @@ class SimulationExecutionAgent(BaseAgent):
         task_spec: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Execute Python script using subprocess for lite/ace/alpha mode.
+        Execute Python script using subprocess for lite/ace/alpha/gsim mode.
         
         Args:
             script_file: Path to the Python script to execute

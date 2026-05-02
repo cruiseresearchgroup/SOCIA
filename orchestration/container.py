@@ -22,6 +22,7 @@ from agents.code_verification.agent import CodeVerificationAgent
 from agents.simulation_execution.agent import SimulationExecutionAgent
 from agents.simulation_execution_ace.agent import SimulationExecutionAgent as SimulationExecutionAceAgent
 from agents.simulation_execution_alpha.agent import SimulationExecutionAgent as SimulationExecutionAlphaAgent
+from agents.simulation_execution_gsim.agent import SimulationExecutionAgent as SimulationExecutionGsimAgent
 from agents.result_evaluation.agent import ResultEvaluationAgent
 from agents.feedback_generation.agent import FeedbackGenerationAgent
 from agents.feedback_generation_odd.agent import FeedbackGenerationOddAgent
@@ -74,7 +75,7 @@ class AgentContainer(containers.DeclarativeContainer):
             "code_generation_gsim": {"prompt_template": "templates/code_generation_ace_prompt.txt", "output_format": "python"},
             "data_analysis_gsim": {"prompt_template": "templates/data_analysis_alpha_prompt.txt", "output_format": "json"},
             "simulation_execution_gsim": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
-            "feedback_generation_gsim": {"prompt_template": "templates/feedback_generation_alpha_prompt.txt", "output_format": "json"},
+            "feedback_generation_gsim": {"prompt_template": "templates/feedback_generation_gsim_prompt.txt", "output_format": "json"},
             "code_verification": {"prompt_template": "templates/code_verification_prompt.txt", "output_format": "json"},
             "simulation_execution": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
             "simulation_execution_ace": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
@@ -179,7 +180,7 @@ class AgentContainer(containers.DeclarativeContainer):
     )
 
     simulation_execution_gsim_agent = providers.Factory(
-        SimulationExecutionAlphaAgent,
+        SimulationExecutionGsimAgent,
         output_dir=providers.Callable(lambda op: f"{op}/execution", output_path),
         config=config.agents.simulation_execution_gsim
     )

@@ -225,7 +225,7 @@ class SimulationExecutionAgent(BaseAgent):
             code_path: Path to the simulation code file
             task_spec: Task specification from the Task Understanding Agent
             data_path: Path to input data (optional)
-            mode: Execution mode ("full", "lite", "ace", or "alpha"). ACE/ALPHA mode uses subprocess like lite mode.
+            mode: Execution mode ("full", "lite", "ace", "alpha", or "gsim"). ACE/ALPHA/GSIM mode uses subprocess like lite mode.
             output_dir: Output directory for simulation results (optional, used to generate --output file path)
             iteration: Current iteration number (optional, used to generate output filename)
             project_root: PROJECT_ROOT environment variable value (optional, will use existing env var if not provided)
@@ -253,8 +253,8 @@ class SimulationExecutionAgent(BaseAgent):
             }
         
         # Choose execution method based on mode
-        # ACE/ALPHA mode and lite mode both use subprocess execution (same as lite mode)
-        if mode == "lite" or mode in ["ace", "alpha"]:
+        # ACE/ALPHA/GSIM mode and lite mode both use subprocess execution (same as lite mode)
+        if mode == "lite" or mode in ["ace", "alpha", "gsim"]:
             # Use direct subprocess execution for lite/ace/alpha mode
             self.logger.info(f"Using subprocess execution for {mode} mode")
             
