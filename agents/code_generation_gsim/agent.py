@@ -125,7 +125,9 @@ class CodeGenerationAgent(BaseAgent):
         # Call LLM to generate code
         # Use medium effort for initial generation to reduce timeout risk
         # Self-loop will improve the code quality in subsequent iterations
-        llm_response = self._call_llm(prompt, reasoning={"effort": "medium"})
+        llm_response, simulator_description_from_llm = self._call_llm_with_functions(
+            prompt, reasoning={"effort": "medium"}
+        )
         
         # Extract code from the response
         # Since code generation typically produces Python code rather than JSON,
@@ -164,12 +166,14 @@ class CodeGenerationAgent(BaseAgent):
             iteration=iteration
         )
 
-        # Generate simulator description once per iteration (not inside self-loop)
-        simulator_description = ""
-        try:
-            simulator_description = self._generate_simulator_description(code, task_spec)
-        except Exception as e:
-            self.logger.warning(f"Failed to generate simulator_description: {e}")
+        # Use the description returned by the LLM tool call; fall back to a
+        # separate generation call only when the tool call returned nothing.
+        simulator_description = simulator_description_from_llm
+        if not simulator_description:
+            try:
+                simulator_description = self._generate_simulator_description(code, task_spec)
+            except Exception as e:
+                self.logger.warning(f"Failed to generate simulator_description: {e}")
         
         # Generate a summary of the code
         code_summary = self._generate_code_summary(code)
@@ -195,7 +199,168 @@ class CodeGenerationAgent(BaseAgent):
             self._update_blueprint_from_generated_code(blueprint, result, task_spec)
             
         return result
-    
+
+    def _call_llm_with_functions(
+        self, prompt: str, reasoning: Optional[Dict[str, Any]] = None
+    ) -> tuple:
+        """
+        Call the LLM using structured messages + OpenAI Responses API tool_choice to
+        force structured code output.
+
+        Builds two messages:
+          - system: high-level objective / role instructions
+          - user:   the full prompt string
+
+        Forces the model to call `complete_SimStep_code` via tool_choice, then
+        extracts both `SimulatorStep_code` and `simulator_description_and_reasoning`
+        from the tool call arguments.
+
+        Compatible with reasoning models (o-series) via the Responses API.
+        Falls back to the standard `_call_llm` for non-OpenAI providers or on
+        any API error.
+
+        Args:
+            prompt:    The prompt string (used as user message content)
+            reasoning: Optional reasoning parameters forwarded to responses.create
+
+        Returns:
+            Tuple[str, str]: (SimulatorStep_code, simulator_description_and_reasoning).
+            On fallback paths the description is an empty string.
+        """
+        system_content = (
+            "Objective: Write code to create an accurate and realistic simulator for a given task in NumPy.\n"
+            "Please note that the code should be fully functional. No placeholders.\n"
+            "You must act autonomously and you will receive no human input at any stage. "
+            "You have to return as output the complete code for completing this task, and correctly "
+            "improve the code to create the most accurate and realistic simulator possible.\n"
+            "You always write out the code contents. You always indent code with tabs.\n"
+            "You cannot visualize any graphical output. You exist within a machine. "
+            "The code can include black box multi-layer perceptions where required.\n"
+            "Use the functions provided. When calling any helper function, only provide a "
+            "RFC8259 compliant JSON request (no additional text or formatting)."
+        )
+
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": prompt},
+        ]
+
+        tool_spec = {
+            "type": "function",
+            "name": "complete_SimStep_code",
+            "description": "Write out the code for the pytorch simulator.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "simulator_description_and_reasoning": {
+                        "type": "string",
+                        "description": "A concise description and reasoning of the code model.",
+                    },
+                    "SimulatorStep_code": {
+                        "type": "string",
+                        "description": (
+                            "Code for the pytorch simulator, inclusive of the simulator definition. "
+                            "If you are unsure, take your best guess. This must be a nonempty string."
+                        ),
+                    },
+                },
+                "required": ["simulator_description_and_reasoning", "SimulatorStep_code"],
+            },
+        }
+
+        # Determine which provider is active
+        try:
+            import yaml
+            with open("config.yaml", "r") as f:
+                global_config = yaml.safe_load(f)
+            provider_name = global_config.get("llm", {}).get("provider", "mock").lower()
+        except Exception as cfg_err:
+            self.logger.error(f"Could not read config.yaml for provider detection: {cfg_err}")
+            provider_name = "mock"
+
+        if provider_name != "openai":
+            self.logger.info(
+                f"Provider '{provider_name}' does not support tool_choice; "
+                "falling back to standard _call_llm"
+            )
+            return self._call_llm(prompt, reasoning=reasoning), ""
+
+        try:
+            from openai import OpenAI
+            from utils.llm_utils import load_api_key
+
+            api_key = load_api_key("OPENAI_API_KEY")
+            if not api_key:
+                api_key = global_config.get("llm_providers", {}).get("openai", {}).get("api_key")
+            if not api_key:
+                self.logger.warning("OpenAI API key not found; falling back to _call_llm")
+                return self._call_llm(prompt, reasoning=reasoning), ""
+
+            client = OpenAI(api_key=api_key)
+            provider_cfg = global_config.get("llm_providers", {}).get("openai", {})
+            model = provider_cfg.get("model", "gpt-4o")
+            max_output_tokens = provider_cfg.get("max_output_tokens") or provider_cfg.get("max_tokens", 100000)
+
+            responses_kwargs: Dict[str, Any] = {
+                "model": model,
+                "input": messages,
+                "tools": [tool_spec],
+                "tool_choice": {"type": "function", "name": "complete_SimStep_code"},
+                "max_output_tokens": max_output_tokens,
+            }
+            if reasoning:
+                responses_kwargs["reasoning"] = reasoning
+
+            self.logger.info(
+                f"Calling OpenAI Responses API with tool_choice=complete_SimStep_code "
+                f"(model={model}, reasoning={reasoning})"
+            )
+            resp = client.responses.create(**responses_kwargs)
+
+            # Extract function call arguments from the response output list
+            for item in getattr(resp, "output", []):
+                item_type = getattr(item, "type", None)
+                if item_type == "function_call":
+                    raw_args = getattr(item, "arguments", None)
+                    if raw_args:
+                        try:
+                            args = json.loads(raw_args)
+                            code = args.get("SimulatorStep_code", "")
+                            description = args.get("simulator_description_and_reasoning", "")
+                            if code:
+                                self.logger.info(
+                                    "Successfully extracted SimulatorStep_code from tool_call response"
+                                )
+                                return code, description
+                            self.logger.warning(
+                                "SimulatorStep_code is empty in tool_call arguments; "
+                                "returning raw arguments string"
+                            )
+                            return raw_args, description
+                        except json.JSONDecodeError as parse_err:
+                            self.logger.error(
+                                f"Failed to parse tool_call arguments as JSON: {parse_err}; "
+                                "returning raw arguments string"
+                            )
+                            return raw_args, ""
+
+            # Fallback: try output_text helper (plain text response)
+            output_text = getattr(resp, "output_text", None)
+            if output_text:
+                self.logger.warning(
+                    "Model did not return a tool_call; using output_text fallback"
+                )
+                return output_text, ""
+
+            self.logger.warning("No usable output found in Responses API response")
+            return "", ""
+
+        except Exception as exc:
+            self.logger.error(
+                f"Error in _call_llm_with_functions: {exc}; falling back to _call_llm"
+            )
+            return self._call_llm(prompt, reasoning=reasoning), ""
+
     def _run_self_checking_loop(
         self,
         code: str,
@@ -1431,315 +1596,12 @@ Respond as:
         Returns:
             Formatted prompt string
         """
-        # Hardcoded patch prompt template
-#         prompt_template = """SYSTEM:
-# You are the Code Patch Agent in a system that generates social simulations.
-# Your job is to FIX and IMPROVE the existing simulator code to better satisfy the Blueprint, while keeping changes minimal.
-# You MUST use the Playbook as an external tool: read it first, then selectively apply only the relevant strategies.
-# Treat the Playbook as a tool. Use relevant parts, do NOT force irrelevant parts into the solution.
-# If the Playbook conflicts with the Blueprint, ALWAYS follow the Blueprint.
-#
-# CRITICAL "PATCH-LEVEL" RULES (HARD CONSTRAINTS):
-# - You must NOT rewrite the entire program from scratch.
-# - You must output a single updated standalone Python program (full code) based on PREVIOUS_CODE.
-# - Make minimal, targeted edits to PREVIOUS_CODE: prefer editing only the functions/classes implicated by Playbook code_refs, error logs, or blueprint mismatches.
-# - Preserve stable public interfaces and the orchestrator pipeline unless Blueprint explicitly requires change:
-#   parse_cli() (optional) → load_data() → build_network_and_agents() → holdout_split()
-#   → calibrator.fit() → simulator.rollout() → evaluator.compute_metrics() → save_results()
-# - Do NOT rename existing public functions/classes unless absolutely necessary.
-# - Do NOT reorder major code blocks unless necessary.
-# - Do NOT delete required steps in main(). You may add small helper functions/classes if needed.
-# - Ensure deterministic behavior via a global random seed and keep existing seeding approach if present.
-#
-# USER:
-# You will be given:
-# (1) A BLUEPRINT (ground truth requirements)
-# (2) PREVIOUS_CODE (the simulator code from the previous iteration)
-# (3) SIMULATION RESULTS (tracebacks, errors, metrics) and/or REFLECTOR_ISSUES (structured issues)
-# (4) A PLAYBOOK (reusable best practices, pitfalls, templates; structured "strategies");
-#
-# Your job: patch the PREVIOUS_CODE to resolve the failures/underperformance, aligned with BLUEPRINT, leveraging PLAYBOOK strategies.
-#
-# ========================
-# BLUEPRINT (AUTHORITATIVE)
-# ========================
-# {blue_print}
-#
-# ========================
-# PREVIOUS_CODE (BASELINE TO PATCH)
-# ========================
-# {previous_code}
-#
-# ========================
-# SIMULATION RESULTS
-# ========================
-# {simulation_results}
-#
-# ========================
-# PLAYBOOK (READ FIRST)
-# ========================
-# {playbook}
-#
-# ========================
-# ADDITIONAL CONSTRAINTS
-# ========================
-# 1. Global Requirements:
-#  - Write clean, modular, PEP-8 compliant code with complete docstrings (triple-quoted, not truncated).
-#  - Provide full class/function bodies (no stubs).
-#  - The output must be a single standalone Python program that runs end-to-end without manual edits.
-#  - Validate all inputs; raise clear exceptions with actionable messages.
-#  - Avoid unnecessary refactors. Only touch code necessary for fixes.
-#
-# 2. Path Handling Instructions (MUST PRESERVE):
-# Keep the path setup exactly:
-# ```python
-# import os
-# PROJECT_ROOT = os.environ.get("PROJECT_ROOT")
-# DATA_PATH = os.environ.get("DATA_PATH")
-# DATA_DIR = os.path.join(PROJECT_ROOT, DATA_PATH)
-#
-# 3. Orchestrator (MUST PRESERVE MAIN FLOW):
-#  - main() must remain non-empty and executable end-to-end.
-#  - main() must call, in order: parse_cli() (optional) → load_data() → build_network_and_agents() → holdout_split()
-# → calibrator.fit() → simulator.rollout() → evaluator.compute_metrics() → save_results().
-#  - You may add logging/checks, but do not remove steps.
-#
-# ========================
-# PLAYBOOK USAGE POLICY (MANDATORY)
-#  - The Playbook is a JSON object with top-level key "strategies".
-#  - Each strategy contains fields like: issue_type, severity, blueprint_refs, code_refs, correct_approach.
-#  - Prioritize applying strategies in this order: blocker > high > medium > low.
-#  - Select only strategies that are relevant to:
-#     - current Blueprint requirements, OR
-#     - implicated symbols/lines in PREVIOUS_CODE, OR
-#     - SIMULATION_RESULTS / REFLECTOR_ISSUES symptoms.
-#  - If a selected strategy suggests a change, you must implement it in code.
-#  - If a strategy seems relevant but you do NOT implement it, you must explain why in the change summary.
-#
-# ========================
-# OUTPUT FORMAT (STRICT)
-# 1. First line: a Python comment block starting with:
-# PLAYBOOK_USAGE_JSON = '''<one-line valid JSON enclosed in triple quotes>'''
-# JSON format MUST be:
-# {{"used_bullets":[{{"id":"<strategy_id>","why":"<one-line relevance>"}}]}}
-# CRITICAL: Wrap the entire JSON content in triple quotes (''') to make it a Python string literal.
-# Example: PLAYBOOK_USAGE_JSON = '''{{"used_bullets":[{{"id":"strategy-1","why":"reason"}}]}}'''
-#
-# 2. Second line: a Python comment block starting with:
-# CHANGE_SUMMARY_JSON = '''<one-line valid JSON enclosed in triple quotes>'''
-# JSON format MUST be:
-# {{
-# "touched_symbols":[{{"symbol":"<func/class>","reason":"<why changed>"}}],
-# "applied_strategies":[{{"id":"<strategy_id>","applied":true|false,"note":"<short>"}}]
-# }}
-# CRITICAL: Wrap the entire JSON content in triple quotes (''') to make it a Python string literal.
-# Keep it one line JSON. No extra commentary.
-#
-# 3. Then output PURE PYTHON CODE ONLY (no markdown fences).
-# The code must be the full updated program after applying patch-level edits.
-#
-# DO NOT output anything else.
-# """
 
-        # Use new prompt template for alpha mode with simulation_info_history, otherwise use original
-        if simulation_info_history is not None:
-            # New prompt template for alpha mode
-            prompt_template = """SYSTEM:
-        # ROLE & OBJECTIVE
-        You are the Code Patch Agent for a social simulation system.
-        Your Goal: FIX and IMPROVE the `PREVIOUS_CODE` and resolve `SIMULATION_RESULTS`, with the specific aim of achieving a LOWER validation error.
-        You MUST use the Playbook as an external tool: read it first, then selectively apply only the relevant strategies.
-        Treat the Playbook as a tool. Use relevant parts, do NOT force irrelevant parts into the solution.
-
-        # CRITICAL "PATCH-LEVEL" PROTOCOL (HARD CONSTRAINTS)
-        1. **Refinement, Not Rewrite**: Do NOT rewrite the entire program from scratch. Make minimal, targeted edits.
-        2. **Single File**: You must output a single updated standalone Python program based on PREVIOUS_CODE.
-        3. **Preserve Interfaces / Skeleton**:
-           - You MUST NOT change the existing code skeleton, or input variables.
-           - Do NOT rename existing public functions/classes or reorder major blocks unless Blueprint explicitly requires it.
-           - Keep function signatures and the orchestrator flow intact.
-        4. **You MUST generate code**: You cannot give an empty-string answer. You must output runnable Python code.
-
-        # DO-NOT-CHANGE GUARANTEES (STRICT)
-        A) **Do NOT modify any output files, filenames, output paths, output schemas, or output formats** produced by the program.
-           - Keep the exact same files written to disk as in PREVIOUS_CODE.
-           - Keep the exact same CSV/JSON structure, column names, key names, and serialization format.
-        B) **Do NOT modify metric computation**:
-           - Keep metric definitions, aggregation, and reporting exactly the same as PREVIOUS_CODE.
-           - Do NOT change how training/validation/test metrics are computed, named, or logged.
-        C) **Do NOT change integration-required path handling** (must copy exactly as provided below).
-
-        # OUTPUT REQUIREMENT (STRICT, but position-aware):
-        You must output the following two variables as triple-quoted JSON strings somewhere near the top of the file, but do NOT break Python syntax.
-        1. `PLAYBOOK_USAGE_JSON = '''...'''` (Triple-quoted JSON string)
-        Schema: {{"used_bullets":[{{"id":"<strategy_id>","why":"<relevance>"}}]}}
-        2. `CHANGE_SUMMARY_JSON = '''...'''` (Triple-quoted JSON string)
-        Schema: {{"touched_symbols":[{{"symbol":"<name>","reason":"<why>"}}], "applied_strategies":[{{"id":"<id>","applied":true}}]}}
-        Placement rules (to avoid SyntaxError):
-           - If the program includes any from __future__ import ... statements (e.g., from __future__ import annotations), those future-import lines MUST appear before any other executable statements. Therefore, place the two JSON variables immediately after the future-import line(s) and after the module docstring (if any), but before the rest of the code.
-           - If there is no future-import, place the two JSON variables at the top of the file after an optional module docstring.
-           - Do not wrap these JSON strings in Markdown fences. The rest of the output must be pure Python code.
-
-        # CORE FUNCTIONAL REQUIREMENT (MERGED; HIGH PRIORITY)
-        Please now regenerate the code function(s) / implementation where needed, with the aim to improve the code to achieve a lower validation error.
-        - Use the feedback where applicable (Simulation Results + Playbook + Blueprint).
-        - When you are unsure about something, take your best guess.
-        - You have to generate code, and cannot give an empty string answer.
-        - You cannot change the code skeleton, or input variables.
-        - You MUST preserve the program's external behavior: output files and formats, and metric computation, must remain unchanged.
-
-        USER:
-        Here is the context for the current iteration.
-
-        # PART 1: CONTEXT & DIAGNOSTICS (Reference Material)
-        ========================
-        PREVIOUS_CODE (Baseline to Patch)
-        ========================
-        {previous_code}
-
-        ========================
-        SIMULATION RESULTS (Symptoms & Metrics)
-        ========================
-        {simulation_results}
-
-        # PART 2: IMPLEMENTATION CONSTRAINTS (MUST FOLLOW)
-        *Attention: The following rules determine the correctness of the system integration.*
-        1. **Path Handling Instructions (COPY EXACTLY)**:
-           Keep the path setup exactly as follows:
-           ```python
-           PROJECT_ROOT = os.environ.get("PROJECT_ROOT")
-           DATA_PATH = os.environ.get("DATA_PATH")
-           DATA_DIR = os.path.join(PROJECT_ROOT, DATA_PATH)
-           ```
-           Note: Do NOT add `import os` inside functions if `os` is already imported at the module level.
-           Only use the path setup code above.
-
-        2. Global Requirements:
-            - Write clean, modular, PEP-8 compliant code.
-            - Complete docstrings (triple-quoted).
-            - Full class/function bodies (NO stubs, NO pass without reason).
-            - Validate all inputs; raise clear exceptions.
-
-        3. Coding patch:
-            {coding_patch}
-
-        # PART 3: TARGET & STRATEGY (High-Attention Region)
-        CRITICAL: Read the Blueprint and Playbook immediately before coding.
-        ========================
-        BLUEPRINT (AUTHORITATIVE)
-        ========================
-        {blue_print}
-
-        ========================
-        PLAYBOOK (The Solution Strategy)
-        Usage Policy:
-        - Prioritize: blocker > high > medium > low.
-        - Select only strategies relevant to the current Blueprint or Simulation Results.
-        - If a strategy suggests a change, you MUST implement it.
-        ========================
-        {playbook}
-
-        # FINAL INSTRUCTION:
-        1. Review the Playbook and Blueprint above.
-        2. Check the Simulation Results to identify what broke and what causes high validation error.
-        3. Apply the Playbook strategies to fix PREVIOUS_CODE while strictly adhering to the Implementation Constraints (Path & Orchestrator).
-        4. Improve validation error by fixing mechanisms/logic bugs/mismatches, but do NOT change:
-           - output files, filenames, output schemas/formats
-           - metric computation and metric reporting
-           - code skeleton, input variables, or public interfaces
-
-        Generate the response now, starting strictly with the first line:
-        PLAYBOOK_USAGE_JSON = '''
-        """
-        else:
-            # Original prompt template for ACE mode
-            prompt_template = """SYSTEM:
-        # ROLE & OBJECTIVE
-        You are the Code Patch Agent for a social simulation system.
-        Your Goal: FIX and IMPROVE the `PREVIOUS_CODE` to satisfy the `BLUEPRINT` and resolve `SIMULATION_RESULTS`.
-        You MUST use the Playbook as an external tool: read it first, then selectively apply only the relevant strategies.
-        Treat the Playbook as a tool. Use relevant parts, do NOT force irrelevant parts into the solution.
-
-        # CRITICAL "PATCH-LEVEL" PROTOCOL (HARD CONSTRAINTS)
-        1. **Refinement, Not Rewrite**: Do NOT rewrite the entire program from scratch. Make minimal, targeted edits.
-        2. **Single File**: You must output a single updated standalone Python program based on PREVIOUS_CODE.
-        3. **Preserve Interfaces**: Do NOT rename existing public functions/classes or reorder major blocks unless Blueprint explicitly requires it.
-        4. **Deterministic**: Ensure deterministic behavior via a global random seed.
-
-        # OUTPUT REQUIREMENT (STRICT, but position-aware):
-        You must output the following two variables as triple-quoted JSON strings somewhere near the top of the file, but do NOT break Python syntax.
-        1. `PLAYBOOK_USAGE_JSON = '''...'''` (Triple-quoted JSON string)
-        Schema: {{"used_bullets":[{{"id":"<strategy_id>","why":"<relevance>"}}]}}
-        2. `CHANGE_SUMMARY_JSON = '''...'''` (Triple-quoted JSON string)
-        Schema: {{"touched_symbols":[{{"symbol":"<name>","reason":"<why>"}}], "applied_strategies":[{{"id":"<id>","applied":true}}]}}
-        Placement rules (to avoid SyntaxError):
-           - If the program includes any from __future__ import ... statements (e.g., from __future__ import annotations), those future-import lines MUST appear before any other executable statements. Therefore, place the two JSON variables immediately after the future-import line(s) and after the module docstring (if any), but before the rest of the code.
-           - If there is no future-import, place the two JSON variables at the top of the file after an optional module docstring.
-           - Do not wrap these JSON strings in Markdown fences. The rest of the output must be pure Python code.
-
-        USER:
-        Here is the context for the current iteration.
-        
-        # PART 1: CONTEXT & DIAGNOSTICS (Reference Material)
-        ========================
-        PREVIOUS_CODE (Baseline to Patch)
-        ========================
-        {previous_code}
-        
-        ========================
-        SIMULATION RESULTS (Symptoms & Metrics)
-        ========================
-        {simulation_results}
-        
-        
-        # PART 2: IMPLEMENTATION CONSTRAINTS (MUST FOLLOW)
-        *Attention: The following rules determine the correctness of the system integration.*
-        1. **Path Handling Instructions (COPY EXACTLY)**:
-           Keep the path setup exactly as follows:
-           ```python
-           import os
-           PROJECT_ROOT = os.environ.get("PROJECT_ROOT")
-           DATA_PATH = os.environ.get("DATA_PATH")
-           DATA_DIR = os.path.join(PROJECT_ROOT, DATA_PATH)
-        
-        2. Orchestrator Pipeline (MUST PRESERVE MAIN FLOW):
-            main() must call, in strict order: parse_cli() (optional) → load_data() → build_network_and_agents() → holdout_split() → calibrator.fit() → simulator.rollout() → evaluator.compute_metrics() → save_results()
-            You may add logging/checks, but do not remove these steps.
-        
-        3. Global Requirements:
-            Write clean, modular, PEP-8 compliant code.
-            Complete docstrings (triple-quoted).
-            Full class/function bodies (NO stubs, NO pass without reason).
-            Validate all inputs; raise clear exceptions.
-            
-        4. Coding patch:
-            {coding_patch}
-        
-        
-        # PART 3: TARGET & STRATEGY (High-Attention Region)
-        CRITICAL: Read the Blueprint and Playbook immediately before coding.
-        ========================
-        BLUEPRINT (AUTHORITATIVE)
-        ========================
-        {blue_print}
-
-        ========================
-        PLAYBOOK (The Solution Strategy)
-        Usage Policy:
-        Prioritize: blocker > high > medium > low.
-        Select only strategies relevant to the current Blueprint or Simulation Results.
-        If a strategy suggests a change, you MUST implement it.
-        ========================
-        {playbook}
-
-
-        # FINAL INSTRUCTION:
-        1. Review the Playbook and Blueprint above.
-        2. Check the Simulation Results to identify what broke.
-        3. Apply the Playbook strategies to fix PREVIOUS_CODE while strictly adhering to the Implementation Constraints (Path & Orchestrator).
-        
-        Generate the response now, starting strictly with the first line: PLAYBOOK_USAGE_JSON = ''' 
-        """
+        # Use the prompt template loaded from configuration via BaseAgent
+        prompt_template = self.prompt_template
+        if not prompt_template:
+            self.logger.error("No patch prompt template loaded from config")
+            raise ValueError("Patch prompt template not available. Check config.yaml for code_generation_gsim.prompt_template")
         
         # Extract blueprint from task_spec (excluding file_summaries)
         blueprint = {k: v for k, v in task_spec.get("data_analysis_result", {}).items() if k != "file_summaries"}
