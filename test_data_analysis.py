@@ -1629,9 +1629,13 @@ def run_data_analysis_test(
                                 args.mode == "gsim"
                                 and "daily mobility trajectories" in _task_description_lower
                             )
+                            _is_user_modeling = (
+                                args.mode == "gsim"
+                                and "user rates a given item" in _task_description_lower
+                            )
                             _gsim_simulation_metrics = None
                             _gsim_optimized_parameters = None
-                            if _is_gsim_mask or _is_daily_mobility:
+                            if _is_gsim_mask or _is_daily_mobility or _is_user_modeling:
                                 _gsim_simulation_metrics = state["simulation_results"].get("simulation_metrics")
                                 _sim_output = state["simulation_results"].get("simulation_output", {})
                                 _gsim_optimized_parameters = _sim_output.get("optimized_parameters")
@@ -1644,7 +1648,7 @@ def run_data_analysis_test(
                                 "simulator_description": current_simulator_description,
                                 "results_json": current_results_json
                             }
-                            if _is_gsim_mask or _is_daily_mobility:
+                            if _is_gsim_mask or _is_daily_mobility or _is_user_modeling:
                                 if _gsim_simulation_metrics is not None:
                                     current_iteration_info["simulation_metrics"] = _gsim_simulation_metrics
                                 if _gsim_optimized_parameters is not None:
@@ -1674,7 +1678,7 @@ def run_data_analysis_test(
                                     best_simulator_info["code"] = current_code
                                     best_simulator_info["simulator_description"] = current_simulator_description
                                     best_simulator_info["results_json"] = current_results_json
-                                    if _is_gsim_mask or _is_daily_mobility:
+                                    if _is_gsim_mask or _is_daily_mobility or _is_user_modeling:
                                         if _gsim_simulation_metrics is not None:
                                             best_simulator_info["simulation_metrics"] = _gsim_simulation_metrics
                                         if _gsim_optimized_parameters is not None:

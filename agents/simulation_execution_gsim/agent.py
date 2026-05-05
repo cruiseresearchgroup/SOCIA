@@ -676,16 +676,20 @@ class SimulationExecutionAgent(BaseAgent):
                     # Detect task type for special field mapping
                     is_mask_wearing = False
                     is_daily_mobility = False
+                    is_user_modeling = False
                     if task_spec:
                         task_description = task_spec.get("description", "").lower()
                         is_mask_wearing = "mask-wearing behavior" in task_description
                         is_daily_mobility = "daily mobility trajectories" in task_description
+                        is_user_modeling = "user rates a given item" in task_description
                         if is_mask_wearing:
                             self.logger.info("Mask-wearing behavior task detected: applying special mapping from single output file")
                         if is_daily_mobility:
                             self.logger.info("Daily mobility trajectories task detected: applying val_metrics->simulation_metrics mapping from single output file")
+                        if is_user_modeling:
+                            self.logger.info("User modeling task detected: applying val_metrics->simulation_metrics mapping from single output file")
 
-                    if is_mask_wearing or is_daily_mobility:
+                    if is_mask_wearing or is_daily_mobility or is_user_modeling:
                         # --- Unified mapping for mask-wearing and daily-mobility tasks ---
                         val_metrics = simulation_output.get("val_metrics", {})
                         if isinstance(val_metrics, dict):
