@@ -990,6 +990,12 @@ def run_data_analysis_test(
         # Mirrors code_memory shape: {iteration: {artifact_name: content}}
         code_description_memory = {}
         state["code_description_memory"] = code_description_memory
+
+        # Shared conversation message list for gsim mode.
+        # Stores list[{"role": str, "content": str}] that grows across code-gen
+        # and feedback-gen calls, enabling multi-turn LLM conversations.
+        if args.mode == "gsim":
+            state["messages"] = []
         
         # Initialize historical fix log
         historical_fix_log = {}
@@ -1161,6 +1167,38 @@ def run_data_analysis_test(
             
             logger.info(f"State restoration complete. Ready to continue from iteration {persisted_iteration}.")
             logger.info(f"Persisted code loaded successfully as iter_{persisted_iteration}, will skip code generation and continue with simulation execution and feedback generation")
+
+            # For gsim mode: reconstruct the two messages that would have been sent
+            # to the LLM during the persisted iteration's code generation, so that
+            # subsequent feedback generation can continue the conversation naturally.
+            if args.mode == "gsim" and "messages" in state:
+                try:
+                    from agents.code_generation_gsim.agent import CodeGenerationAgent as _CgGsim
+                    _cg_agent = agents["code_generation"]
+                    # Build the same prompt_args that _build_prompt() would receive
+                    # for iteration 0 (no previous code, no feedback).
+                    _prompt_args = {
+                        "task_spec": task_spec,
+                        "model_plan": None,
+                        "data_analysis": None,
+                        "feedback": None,
+                        "data_path": data_path,
+                        "previous_code": None,
+                        "mode": args.mode,
+                        "simulation_results": None,
+                        "iteration": persisted_iteration,
+                    }
+                    _user_prompt = _cg_agent._build_prompt(**_prompt_args)
+                    state["messages"].extend([
+                        {"role": "system", "content": _CgGsim.SYSTEM_CONTENT},
+                        {"role": "user",   "content": _user_prompt},
+                    ])
+                    logger.info(
+                        f"Gsim mode: Reconstructed {len(state['messages'])} messages "
+                        f"for persisted iteration {persisted_iteration}"
+                    )
+                except Exception as _msg_err:
+                    logger.warning(f"Gsim mode: Failed to reconstruct messages from persisted code: {_msg_err}")
             
         elif hasattr(args, 'persisted_data_analysis_file') and getattr(args, 'persisted_data_analysis_file', None):
             # Skip only data analysis, but still do initial code generation
@@ -1333,8 +1371,36 @@ def run_data_analysis_test(
                 except Exception as e:
                     logger.warning(f"Alpha mode: Failed to load simulation_info_history from {simulation_info_history_path}: {e}. Starting fresh.")
                     simulation_info_history = []
-            
-            # Initialize best_simulator_info if not loaded from history
+
+            # Try to load best_simulator_info from persisted file (takes priority over history-derived one,
+            # because it preserves extra fields like simulation_metrics / optimized_parameters)
+            best_simulator_info_path = os.path.join(args.output, "best_simulator_info.json")
+            if os.path.exists(best_simulator_info_path):
+                try:
+                    with open(best_simulator_info_path, 'r', encoding='utf-8') as f:
+                        _loaded_best = json.load(f)
+                    # Validate that it has a finite val_loss before accepting
+                    _bvl = _loaded_best.get("val_loss")
+                    _bvl_valid = (
+                        _bvl is not None
+                        and isinstance(_bvl, (int, float))
+                        and str(_bvl).lower() not in ['inf', 'infinity', 'nan', '-inf', '-infinity']
+                    )
+                    if _bvl_valid:
+                        best_simulator_info = _loaded_best
+                        logger.info(
+                            f"Alpha mode: Loaded best_simulator_info from {best_simulator_info_path} "
+                            f"(iteration {best_simulator_info.get('iteration')}, "
+                            f"val_loss: {float(_bvl):.4f})"
+                        )
+                    else:
+                        logger.warning(
+                            f"Alpha mode: best_simulator_info.json has invalid val_loss ({_bvl}); ignoring"
+                        )
+                except Exception as e:
+                    logger.warning(f"Alpha mode: Failed to load best_simulator_info from {best_simulator_info_path}: {e}")
+
+            # Initialize best_simulator_info if not loaded from history or file
             if best_simulator_info is None:
                 best_simulator_info = {
                     "iteration": None,
@@ -1429,6 +1495,11 @@ def run_data_analysis_test(
                     # Pass simulation_info_history to code generation
                     process_kwargs["simulation_info_history"] = simulation_info_history
                     logger.info(f"Alpha mode: Passing simulation_info_history to code generation ({len(simulation_info_history) if simulation_info_history else 0} iterations)")
+
+                # Pass shared message list to code_generation_gsim so it can
+                # append the [system, user] messages it sends to the LLM.
+                if args.mode == "gsim" and "messages" in state:
+                    process_kwargs["messages"] = state["messages"]
                 
                 state["generated_code"] = agents["code_generation"].process(**process_kwargs)
                 
@@ -1546,6 +1617,25 @@ def run_data_analysis_test(
                             else:
                                 logger.debug(f"Alpha mode: results.json not found at {results_json_path}")
                             
+                            # For gsim mask-wearing tasks: extract extra fields to embed in history
+                            _task_description_lower = (
+                                task_spec.get("description", "") if task_spec else ""
+                            ).lower()
+                            _is_gsim_mask = (
+                                args.mode == "gsim"
+                                and "mask-wearing behavior" in _task_description_lower
+                            )
+                            _is_daily_mobility = (
+                                args.mode == "gsim"
+                                and "daily mobility trajectories" in _task_description_lower
+                            )
+                            _gsim_simulation_metrics = None
+                            _gsim_optimized_parameters = None
+                            if _is_gsim_mask or _is_daily_mobility:
+                                _gsim_simulation_metrics = state["simulation_results"].get("simulation_metrics")
+                                _sim_output = state["simulation_results"].get("simulation_output", {})
+                                _gsim_optimized_parameters = _sim_output.get("optimized_parameters")
+
                             # Add current iteration info to simulation_info_history
                             current_iteration_info = {
                                 "iteration": current_iteration,
@@ -1554,6 +1644,12 @@ def run_data_analysis_test(
                                 "simulator_description": current_simulator_description,
                                 "results_json": current_results_json
                             }
+                            if _is_gsim_mask or _is_daily_mobility:
+                                if _gsim_simulation_metrics is not None:
+                                    current_iteration_info["simulation_metrics"] = _gsim_simulation_metrics
+                                if _gsim_optimized_parameters is not None:
+                                    current_iteration_info["optimized_parameters"] = _gsim_optimized_parameters
+
                             simulation_info_history.append(current_iteration_info)
                             logger.info(f"Alpha mode: Added iteration {current_iteration} to simulation_info_history (val_loss: {current_val_loss:.4f})")
                             
@@ -1571,15 +1667,30 @@ def run_data_analysis_test(
                             if best_simulator_info is not None:
                                 if current_val_loss < best_simulator_info["val_loss"]:
                                     logger.info(f"Alpha mode: New best iteration found! val_loss: {best_simulator_info['val_loss']:.4f} -> {current_val_loss:.4f}")
-                                    
+
                                     # Update best_simulator_info
                                     best_simulator_info["iteration"] = current_iteration
                                     best_simulator_info["val_loss"] = current_val_loss
                                     best_simulator_info["code"] = current_code
                                     best_simulator_info["simulator_description"] = current_simulator_description
                                     best_simulator_info["results_json"] = current_results_json
+                                    if _is_gsim_mask or _is_daily_mobility:
+                                        if _gsim_simulation_metrics is not None:
+                                            best_simulator_info["simulation_metrics"] = _gsim_simulation_metrics
+                                        if _gsim_optimized_parameters is not None:
+                                            best_simulator_info["optimized_parameters"] = _gsim_optimized_parameters
                                 else:
                                     logger.info(f"Alpha mode: Current iteration val_loss ({current_val_loss:.4f}) >= best ({best_simulator_info['val_loss']:.4f}), keeping best from iteration {best_simulator_info['iteration']}")
+
+                            # Persist best_simulator_info to disk (gsim + alpha)
+                            try:
+                                best_simulator_info_path = os.path.join(args.output, "best_simulator_info.json")
+                                os.makedirs(args.output, exist_ok=True)
+                                with open(best_simulator_info_path, 'w', encoding='utf-8') as f:
+                                    json.dump(best_simulator_info, f, indent=2, ensure_ascii=False)
+                                logger.info(f"Alpha mode: Persisted best_simulator_info to {best_simulator_info_path}")
+                            except Exception as e:
+                                logger.warning(f"Alpha mode: Failed to persist best_simulator_info: {e}")
                         else:
                             logger.warning("Alpha mode: val_loss not found in simulation_metrics, skipping simulation_info_history and best_simulator_info update")
                 else:
@@ -1771,11 +1882,24 @@ def run_data_analysis_test(
                 # Pass simulation_info_history to feedback generation
                 process_kwargs["simulation_info_history"] = simulation_info_history
                 logger.info(f"Alpha mode: Passing simulation_info_history to feedback generation ({len(simulation_info_history) if simulation_info_history else 0} iterations)")
-            
+
+                # Pass shared message list to feedback_generation_gsim so it can
+                # append the feedback user-message and the assistant reply in-place.
+                if args.mode == "gsim" and "messages" in state:
+                    process_kwargs["messages"] = state["messages"]
+
             # Call feedback generation agent
             # In ACE mode with --auto=False, agent handles user feedback collection internally
             # In ACE mode with --auto=True, agent skips user feedback collection (interactive=False)
             system_feedback = agents["feedback_generation"].process(**process_kwargs)
+            # gsim feedback may be returned as a raw string (multi-turn Responses API path).
+            # Normalize to dict so downstream logic remains stable.
+            if isinstance(system_feedback, str):
+                system_feedback = {
+                    "summary": system_feedback,
+                    "feedback_sections": [],
+                    "should_stop": False,
+                }
             
             # Check if user requested stop
             # In ACE mode: check feedback from agent (set by feedback_generation_ace agent internally)

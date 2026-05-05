@@ -34,7 +34,7 @@ class FeedbackGenerationAgent(BaseAgent):
         # If config is not provided, use a minimal default configuration
         if config is None:
             config = {
-                "prompt_template": "templates/feedback_generation_alpha_prompt.txt",
+                "prompt_template": "templates/feedback_generation_gsim_prompt.txt",
                 "output_format": "json"
             }
         
@@ -68,6 +68,7 @@ class FeedbackGenerationAgent(BaseAgent):
         simulation_info_history: Optional[List[Dict[str, Any]]] = None,
         current_simulator_description: Optional[str] = None,
         previous_simulator_description: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
         Generate feedback for improving the simulation.
@@ -83,10 +84,14 @@ class FeedbackGenerationAgent(BaseAgent):
             previous_code: Previous iteration's code (optional)
             iteration: Current iteration number
             historical_fix_log: Log of historical issues and their fix status (optional)
-            mode: Workflow mode ('ace', 'odd', 'lite', etc.)
+            mode: Workflow mode ('ace', 'alpha', 'gsim', 'odd', 'lite', etc.)
             interactive: Whether to collect user feedback interactively (default: False)
             current_simulator_description: simulator_description for the current iteration (optional, gsim mode)
             previous_simulator_description: simulator_description for the previous iteration (optional, gsim mode)
+            messages: Shared conversation message list (list[dict]).  When provided
+                in gsim mode the feedback prompt is appended as a user message, the
+                LLM is called with the full list via Responses API, and the reply
+                is appended as an assistant message - all in-place.
         
         Returns:
             Dictionary containing feedback for improvement. In ACE mode, includes
@@ -97,10 +102,16 @@ class FeedbackGenerationAgent(BaseAgent):
         # Step 1: Detect work mode
         is_ace_mode = (mode == "ace")
         is_alpha_mode = (mode == "alpha")
-        
-        # ACE/ALPHA mode workflow
-        if is_ace_mode or is_alpha_mode:
-            mode_name = "ACE" if is_ace_mode else "ALPHA"
+        is_gsim_mode = (mode == "gsim")
+
+        # ACE / ALPHA / GSIM: same prompt + LLM path (history / best_simulator_info for gsim like alpha)
+        if is_ace_mode or is_alpha_mode or is_gsim_mode:
+            if is_ace_mode:
+                mode_name = "ACE"
+            elif is_alpha_mode:
+                mode_name = "ALPHA"
+            else:
+                mode_name = "GSIM"
             self.logger.info(f"{mode_name} mode: Using ACE-specific feedback generation workflow")
             
             # Step 2: Collect user feedback if in interactive mode
@@ -134,19 +145,83 @@ class FeedbackGenerationAgent(BaseAgent):
                 simulation_info_history=simulation_info_history,
                 iteration=iteration
             )
-            
+
             # Step 6: Call LLM
-            llm_response = self._call_llm(prompt)
-            
-            # Step 7: Parse response according to ACE format
-            feedback = self._parse_ace_response(llm_response)
-            
-            # Step 8: Add should_stop flag to feedback if user requested stop
-            if should_stop:
+            # In gsim mode with a shared message list: use Responses API with the
+            # full conversation (system + user[code-gen] + user[feedback-prompt]).
+            # Otherwise fall back to the standard single-turn _call_llm.
+            llm_response = None
+            if is_gsim_mode and messages is not None:
+                # Append the feedback prompt as the next user turn
+                messages.append({"role": "user", "content": prompt})
+                self.logger.info(
+                    f"GSIM mode: calling Responses API with {len(messages)} messages "
+                    f"(multi-turn conversation)"
+                )
+                try:
+                    import yaml
+                    from openai import OpenAI
+                    from utils.llm_utils import load_api_key
+
+                    with open("config.yaml", "r") as _f:
+                        _global_cfg = yaml.safe_load(_f)
+                    _provider = _global_cfg.get("llm", {}).get("provider", "openai").lower()
+
+                    if _provider == "openai":
+                        _api_key = load_api_key("OPENAI_API_KEY") or \
+                                   _global_cfg.get("llm_providers", {}).get("openai", {}).get("api_key")
+                        _client = OpenAI(api_key=_api_key)
+                        _provider_cfg = _global_cfg.get("llm_providers", {}).get("openai", {})
+                        _model = _provider_cfg.get("model", "gpt-4o")
+                        _max_tokens = _provider_cfg.get("max_output_tokens") or \
+                                      _provider_cfg.get("max_tokens", 10000)
+                        _resp = _client.responses.create(
+                            model=_model,
+                            input=messages,
+                            max_output_tokens=_max_tokens,
+                        )
+                        llm_response = getattr(_resp, "output_text", None) or ""
+                        self.logger.info(
+                            f"GSIM mode: Responses API feedback call succeeded "
+                            f"({len(llm_response)} chars)"
+                        )
+                    else:
+                        self.logger.info(
+                            f"GSIM mode: provider '{_provider}' not openai, falling back to _call_llm"
+                        )
+                        llm_response = self._call_llm(prompt)
+
+                except Exception as _fb_exc:
+                    self.logger.error(
+                        f"GSIM mode: Responses API feedback call failed ({_fb_exc}); "
+                        "falling back to _call_llm"
+                    )
+                    llm_response = self._call_llm(prompt)
+            else:
+                llm_response = self._call_llm(prompt)
+
+            # Step 7: Determine feedback value
+            # In gsim mode the raw LLM response IS the feedback (no structured parsing needed).
+            # In ace/alpha mode parse the response into a structured dict.
+            if is_gsim_mode:
+                feedback = llm_response
+            else:
+                feedback = self._parse_ace_response(llm_response)
+
+            # Step 8: Add should_stop flag (for ace/alpha; gsim feedback is a plain string)
+            if should_stop and not is_gsim_mode:
                 feedback["should_stop"] = True
                 feedback["stop_reason"] = "User requested stop via #STOP# command in User Problem Feedback"
-            
-            # Step 9: Return structured feedback dictionary
+
+            # Append the assistant reply to the shared conversation (gsim only)
+            if is_gsim_mode and messages is not None:
+                messages.append({"role": "assistant", "content": feedback if isinstance(feedback, str) else str(feedback)})
+                self.logger.info(
+                    f"GSIM mode: appended assistant message; messages list now has "
+                    f"{len(messages)} entries"
+                )
+
+            # Step 9: Return feedback
             self.logger.info(f"{mode_name} mode feedback generation completed")
             return feedback
         
@@ -890,6 +965,69 @@ class FeedbackGenerationAgent(BaseAgent):
             
             self.logger.info(f"Alpha mode: Built simulator_description from {len(simulation_info_history) if simulation_info_history else 0} iterations")
             self.logger.info(f"Alpha mode: Using current iteration {iteration} info, extracted {len(available_metric_keys)} available metric keys")
+
+            # ----------------------------------------------------------------
+            # {history_best_completions_str}: one line per iteration
+            # Format: "Iteration N. Best Val Loss: <metrics>. Model description: <desc>."
+            # ----------------------------------------------------------------
+            history_lines = []
+            if simulation_info_history:
+                for idx, hist_item in enumerate(simulation_info_history, start=1):
+                    iter_num = hist_item.get("iteration", idx)
+                    hist_sim_metrics = hist_item.get("simulation_metrics")
+                    if isinstance(hist_sim_metrics, dict):
+                        val_loss_display = json.dumps(hist_sim_metrics, ensure_ascii=False)
+                    elif hist_sim_metrics is not None:
+                        val_loss_display = str(hist_sim_metrics)
+                    else:
+                        # fallback: try the top-level val_loss scalar
+                        vl = hist_item.get("val_loss")
+                        val_loss_display = f"{vl:.4f}" if isinstance(vl, (int, float)) else str(vl)
+                    hist_desc = hist_item.get("simulator_description") or "No description available"
+                    history_lines.append(
+                        f"Iteration {iter_num}. Best Val Loss: {val_loss_display}. Model description: {hist_desc}."
+                    )
+            history_best_completions_str = "\n".join(history_lines) if history_lines else "No history available"
+
+            # ----------------------------------------------------------------
+            # {completions}: best_simulator_info summary block
+            # Format:
+            #   Val Loss: <metrics> Iteration: <iter>
+            #   ###
+            #   ```
+            #   <code>
+            #   ```
+            #   optimized_parameters = <params>
+            #   ###
+            # ----------------------------------------------------------------
+            completions_str = "No best completion available"
+            if best_simulator_info is not None:
+                best_sim_metrics = best_simulator_info.get("simulation_metrics")
+                if isinstance(best_sim_metrics, dict):
+                    best_val_loss_display = json.dumps(best_sim_metrics, ensure_ascii=False)
+                elif best_sim_metrics is not None:
+                    best_val_loss_display = str(best_sim_metrics)
+                else:
+                    bvl = best_simulator_info.get("val_loss")
+                    best_val_loss_display = f"{bvl:.4f}" if isinstance(bvl, (int, float)) else str(bvl)
+                best_iter_num = best_simulator_info.get("iteration", "N/A")
+                best_code = best_simulator_info.get("code") or ""
+                best_opt_params = best_simulator_info.get("optimized_parameters")
+                if isinstance(best_opt_params, dict):
+                    best_opt_params_display = json.dumps(best_opt_params, indent=2, ensure_ascii=False)
+                elif best_opt_params is not None:
+                    best_opt_params_display = str(best_opt_params)
+                else:
+                    best_opt_params_display = "None"
+                completions_str = (
+                    f"Val Loss: {best_val_loss_display} Iteration: {best_iter_num}\n"
+                    f"###\n"
+                    f"```\n"
+                    f"{best_code}\n"
+                    f"```\n"
+                    f"optimized_parameters = {best_opt_params_display}\n"
+                    f"###"
+                )
             
             # Load coding_patch content if task description contains "COVID SIR"
             coding_patch_content = ""
@@ -917,6 +1055,9 @@ class FeedbackGenerationAgent(BaseAgent):
             prompt = prompt.replace("{calibrated_parameters}", calibrated_parameters_str)
             prompt = prompt.replace("{simulation_results}", simulation_results_str)
             prompt = prompt.replace("{available_metric_keys}", available_metric_keys_str)
+            prompt = prompt.replace("{history_best_completions_str}", history_best_completions_str)
+            prompt = prompt.replace("{completions}", completions_str)
+            prompt = prompt.replace("{iteration}", str(iteration) if iteration is not None else "N/A")
 
         else:
             
@@ -963,6 +1104,12 @@ class FeedbackGenerationAgent(BaseAgent):
                 prompt = prompt.replace("{simulation_metrics}", "No simulation metrics available")
             if "{calibrated_parameters}" in prompt:
                 prompt = prompt.replace("{calibrated_parameters}", "No calibrated parameters available")
+            if "{history_best_completions_str}" in prompt:
+                prompt = prompt.replace("{history_best_completions_str}", "No history available")
+            if "{completions}" in prompt:
+                prompt = prompt.replace("{completions}", "No completions available")
+            if "{iteration}" in prompt:
+                prompt = prompt.replace("{iteration}", str(iteration) if iteration is not None else "N/A")
         
         return prompt
     

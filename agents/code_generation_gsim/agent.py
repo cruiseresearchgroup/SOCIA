@@ -23,7 +23,23 @@ class CodeGenerationAgent(BaseAgent):
     3. Following best practices and coding standards
     4. Incorporating feedback from previous iterations (if available)
     """
-    
+
+    # Fixed system-role content used by _call_llm_with_functions.
+    # Exposed as a class constant so orchestrators can reconstruct the same
+    # message without duplicating the string.
+    SYSTEM_CONTENT: str = (
+        "Objective: Write code to create an accurate and realistic simulator for a given task in NumPy.\n"
+        "Please note that the code should be fully functional. No placeholders.\n"
+        "You must act autonomously and you will receive no human input at any stage. "
+        "You have to return as output the complete code for completing this task, and correctly "
+        "improve the code to create the most accurate and realistic simulator possible.\n"
+        "You always write out the code contents. You always indent code with tabs.\n"
+        "You cannot visualize any graphical output. You exist within a machine. "
+        "The code can include black box multi-layer perceptions where required.\n"
+        "Use the functions provided. When calling any helper function, only provide a "
+        "RFC8259 compliant JSON request (no additional text or formatting)."
+    )
+
     def process(
         self,
         task_spec: Dict[str, Any],
@@ -41,6 +57,7 @@ class CodeGenerationAgent(BaseAgent):
         simulation_results: Optional[Dict[str, Any]] = None,
         best_simulator_info: Optional[Dict[str, Any]] = None,
         simulation_info_history: Optional[List[Dict[str, Any]]] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
         Generate simulation code based on the model plan.
@@ -58,6 +75,9 @@ class CodeGenerationAgent(BaseAgent):
             blueprint: Blueprint object for blueprint mode (optional)
             output_dir: Output directory for saving intermediate code versions (optional)
             iteration: Current iteration number for file naming (optional)
+            messages: Shared conversation message list (list[dict]). When provided,
+                the [system, user] messages used for this LLM call are appended
+                in-place so callers can track the full conversation.
         
         Returns:
             Dictionary containing the generated code and metadata
@@ -99,16 +119,87 @@ class CodeGenerationAgent(BaseAgent):
         # Use patch prompt for iteration >= 1 (second iteration and beyond)
         # For ACE mode: use patch prompt
         # For ALPHA mode: use patch prompt if simulation_info_history is available
+        # For GSIM mode (iter >= 1): use _build_gsim_patch_prompt which feeds
+        #   best_simulator_info['code'] into the gsim-specific patch template and
+        #   calls the LLM via Responses API with the shared messages conversation.
         if iteration is not None and iteration >= 1:
-            if mode == "ace":
+            if mode == "gsim":
+                self.logger.info(
+                    f"Using gsim patch prompt for iteration {iteration} (GSIM mode)"
+                )
+                llm_response, simulator_description_from_llm = self._build_gsim_patch_prompt(
+                    task_spec=task_spec,
+                    previous_code=previous_code,
+                    simulation_results=simulation_results,
+                    best_simulator_info=best_simulator_info,
+                    simulation_info_history=simulation_info_history,
+                    iteration=iteration,
+                    messages=messages,
+                )
+                # After getting refined code, trim the shared messages back to
+                # the original [system, user] pair so the next iteration starts
+                # from a clean two-message context.
+                if messages is not None and len(messages) > 2:
+                    del messages[2:]
+                    self.logger.info(
+                        "GSIM patch: trimmed messages back to [system, user] (2 entries)"
+                    )
+                # llm_response already IS the code string; skip the standard LLM call below
+                code = self._extract_code(llm_response)
+                code = self._strip_markdown_fences(code)
+                if feedback and isinstance(feedback, dict) and 'code_snippets' in feedback:
+                    for snippet in feedback['code_snippets']:
+                        before = snippet.get('before', '')
+                        after = snippet.get('after', '')
+                        if before and after and before in code:
+                            self.logger.info(f"Applying feedback snippet from {snippet.get('file')}")
+                            code = code.replace(before, f"# FIXED: Applied feedback snippet from {snippet.get('file')}\n{after}")
+                code = self._fix_unclosed_docstrings(code)
+                if model_plan is None:
+                    model_plan = {}
+                self.logger.info("Starting self-checking loop for code improvement (mode=%s)", mode)
+                code = self._run_self_checking_loop(
+                    code=code,
+                    task_spec=task_spec,
+                    model_plan=model_plan,
+                    feedback=feedback,
+                    historical_fix_log=historical_fix_log,
+                    max_attempts=selfloop,
+                    mode=mode,
+                    output_dir=output_dir,
+                    iteration=iteration
+                )
+                simulator_description = simulator_description_from_llm
+                if not simulator_description:
+                    try:
+                        simulator_description = self._generate_simulator_description(code, task_spec)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to generate simulator_description: {e}")
+                code_summary = self._generate_code_summary(code)
+                result = {
+                    "code": code,
+                    "code_summary": code_summary,
+                    "simulator_description": simulator_description,
+                    "metadata": {
+                        "model_type": model_plan.get("model_type", mode) if model_plan else mode,
+                        "entities": [e.get("name") for e in model_plan.get("entities", [])] if model_plan else [],
+                        "behaviors": [b.get("name") for b in model_plan.get("behaviors", [])] if model_plan else [],
+                        "mode": mode
+                    }
+                }
+                self.logger.info("Code generation (gsim patch) completed")
+                if blueprint is not None:
+                    self._update_blueprint_from_generated_code(blueprint, result, task_spec)
+                return result
+            elif mode == "ace":
                 self.logger.info(f"Using patch prompt for iteration {iteration} (ACE mode)")
                 prompt = self._build_patch_prompt(
                     task_spec=task_spec,
                     previous_code=previous_code,
                     simulation_results=simulation_results,
                 )
-            elif mode in ["alpha", "gsim"] and simulation_info_history is not None:
-                self.logger.info(f"Using patch prompt for iteration {iteration} ({mode.upper()} mode with simulation_info_history)")
+            elif mode == "alpha" and simulation_info_history is not None:
+                self.logger.info(f"Using patch prompt for iteration {iteration} (ALPHA mode with simulation_info_history)")
                 prompt = self._build_patch_prompt(
                     task_spec=task_spec,
                     previous_code=previous_code,
@@ -125,9 +216,13 @@ class CodeGenerationAgent(BaseAgent):
         # Call LLM to generate code
         # Use medium effort for initial generation to reduce timeout risk
         # Self-loop will improve the code quality in subsequent iterations
-        llm_response, simulator_description_from_llm = self._call_llm_with_functions(
+        llm_response, simulator_description_from_llm, _built_messages = self._call_llm_with_functions(
             prompt, reasoning={"effort": "medium"}
         )
+        # Append the [system, user] messages used for this call to the shared
+        # conversation list so the orchestrator can track the full transcript.
+        if messages is not None and _built_messages:
+            messages.extend(_built_messages)
         
         # Extract code from the response
         # Since code generation typically produces Python code rather than JSON,
@@ -208,7 +303,7 @@ class CodeGenerationAgent(BaseAgent):
         force structured code output.
 
         Builds two messages:
-          - system: high-level objective / role instructions
+          - system: high-level objective / role instructions  (from SYSTEM_CONTENT)
           - user:   the full prompt string
 
         Forces the model to call `complete_SimStep_code` via tool_choice, then
@@ -224,24 +319,12 @@ class CodeGenerationAgent(BaseAgent):
             reasoning: Optional reasoning parameters forwarded to responses.create
 
         Returns:
-            Tuple[str, str]: (SimulatorStep_code, simulator_description_and_reasoning).
-            On fallback paths the description is an empty string.
+            Tuple[str, str, List[dict]]:
+              (SimulatorStep_code, simulator_description_and_reasoning, messages_sent).
+            On fallback paths the description is an empty string and messages_sent is [].
         """
-        system_content = (
-            "Objective: Write code to create an accurate and realistic simulator for a given task in NumPy.\n"
-            "Please note that the code should be fully functional. No placeholders.\n"
-            "You must act autonomously and you will receive no human input at any stage. "
-            "You have to return as output the complete code for completing this task, and correctly "
-            "improve the code to create the most accurate and realistic simulator possible.\n"
-            "You always write out the code contents. You always indent code with tabs.\n"
-            "You cannot visualize any graphical output. You exist within a machine. "
-            "The code can include black box multi-layer perceptions where required.\n"
-            "Use the functions provided. When calling any helper function, only provide a "
-            "RFC8259 compliant JSON request (no additional text or formatting)."
-        )
-
         messages = [
-            {"role": "system", "content": system_content},
+            {"role": "system", "content": self.SYSTEM_CONTENT},
             {"role": "user", "content": prompt},
         ]
 
@@ -283,7 +366,7 @@ class CodeGenerationAgent(BaseAgent):
                 f"Provider '{provider_name}' does not support tool_choice; "
                 "falling back to standard _call_llm"
             )
-            return self._call_llm(prompt, reasoning=reasoning), ""
+            return self._call_llm(prompt, reasoning=reasoning), "", []
 
         try:
             from openai import OpenAI
@@ -294,7 +377,7 @@ class CodeGenerationAgent(BaseAgent):
                 api_key = global_config.get("llm_providers", {}).get("openai", {}).get("api_key")
             if not api_key:
                 self.logger.warning("OpenAI API key not found; falling back to _call_llm")
-                return self._call_llm(prompt, reasoning=reasoning), ""
+                return self._call_llm(prompt, reasoning=reasoning), "", []
 
             client = OpenAI(api_key=api_key)
             provider_cfg = global_config.get("llm_providers", {}).get("openai", {})
@@ -331,18 +414,18 @@ class CodeGenerationAgent(BaseAgent):
                                 self.logger.info(
                                     "Successfully extracted SimulatorStep_code from tool_call response"
                                 )
-                                return code, description
+                                return code, description, messages
                             self.logger.warning(
                                 "SimulatorStep_code is empty in tool_call arguments; "
                                 "returning raw arguments string"
                             )
-                            return raw_args, description
+                            return raw_args, description, messages
                         except json.JSONDecodeError as parse_err:
                             self.logger.error(
                                 f"Failed to parse tool_call arguments as JSON: {parse_err}; "
                                 "returning raw arguments string"
                             )
-                            return raw_args, ""
+                            return raw_args, "", messages
 
             # Fallback: try output_text helper (plain text response)
             output_text = getattr(resp, "output_text", None)
@@ -350,16 +433,16 @@ class CodeGenerationAgent(BaseAgent):
                 self.logger.warning(
                     "Model did not return a tool_call; using output_text fallback"
                 )
-                return output_text, ""
+                return output_text, "", messages
 
             self.logger.warning("No usable output found in Responses API response")
-            return "", ""
+            return "", "", messages
 
         except Exception as exc:
             self.logger.error(
                 f"Error in _call_llm_with_functions: {exc}; falling back to _call_llm"
             )
-            return self._call_llm(prompt, reasoning=reasoning), ""
+            return self._call_llm(prompt, reasoning=reasoning), "", []
 
     def _run_self_checking_loop(
         self,
@@ -1575,6 +1658,166 @@ Respond as:
         
         return prompt
     
+    def _build_gsim_patch_prompt(
+        self,
+        task_spec: Dict[str, Any],
+        previous_code: Optional[Dict[str, str]] = None,
+        simulation_results: Optional[Dict[str, Any]] = None,
+        best_simulator_info: Optional[Dict[str, Any]] = None,
+        simulation_info_history: Optional[List[Dict[str, Any]]] = None,
+        iteration: Optional[int] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
+    ) -> tuple:
+        """
+        Build a gsim-specific patch prompt (iteration >= 1) and call the LLM via
+        the Responses API using the shared messages conversation.
+
+        Template: templates/code_generation_gsim_patch.txt
+        Placeholder: {completions} → best_simulator_info['code']
+
+        Appends a new user message (with function_call hint) to `messages`, calls
+        client.responses.create with tool_choice=complete_SimStep_code, then
+        returns (code_str, description_str).  The caller is responsible for
+        trimming messages back to [0,1] after this returns.
+
+        Args:
+            Same signature as _build_patch_prompt plus `messages`.
+
+        Returns:
+            Tuple[str, str]: (SimulatorStep_code, simulator_description_and_reasoning)
+        """
+        # Load the gsim patch template
+        try:
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            patch_template_path = os.path.join(project_root, "templates", "code_generation_gsim_patch.txt")
+            with open(patch_template_path, "r", encoding="utf-8") as f:
+                patch_template = f.read()
+        except Exception as e:
+            self.logger.error(f"Failed to load code_generation_gsim_patch.txt: {e}")
+            raise
+
+        # Fill {completions} with best_simulator_info['code']
+        best_code = ""
+        if best_simulator_info and best_simulator_info.get("code"):
+            best_code = best_simulator_info["code"]
+        else:
+            self.logger.warning("_build_gsim_patch_prompt: best_simulator_info has no code; using empty string")
+        prompt = patch_template.replace("{completions}", best_code)
+
+        # Build the tool spec (same as _call_llm_with_functions)
+        tool_spec = {
+            "type": "function",
+            "name": "complete_SimStep_code",
+            "description": "Write out the code for the pytorch simulator.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "simulator_description_and_reasoning": {
+                        "type": "string",
+                        "description": "A concise description and reasoning of the code model.",
+                    },
+                    "SimulatorStep_code": {
+                        "type": "string",
+                        "description": (
+                            "Code for the pytorch simulator, inclusive of the simulator definition. "
+                            "If you are unsure, take your best guess. This must be a nonempty string."
+                        ),
+                    },
+                },
+                "required": ["simulator_description_and_reasoning", "SimulatorStep_code"],
+            },
+        }
+
+        # Append the patch user-turn to the shared messages list
+        patch_message = {
+            "role": "user",
+            "content": prompt,
+            "function_call": {"name": "complete_SimStep_code"},
+        }
+        if messages is not None:
+            messages.append(patch_message)
+            call_messages = messages
+            self.logger.info(
+                f"GSIM patch: appended user message; calling Responses API with "
+                f"{len(call_messages)} messages"
+            )
+        else:
+            call_messages = [
+                {"role": "system", "content": self.SYSTEM_CONTENT},
+                patch_message,
+            ]
+            self.logger.info("GSIM patch: no shared messages list; building standalone call")
+
+        # Call OpenAI Responses API
+        try:
+            import yaml as _yaml
+            with open("config.yaml", "r") as _f:
+                _global_cfg = _yaml.safe_load(_f)
+            provider_name = _global_cfg.get("llm", {}).get("provider", "openai").lower()
+        except Exception as cfg_err:
+            self.logger.error(f"Could not read config.yaml: {cfg_err}")
+            provider_name = "mock"
+
+        if provider_name != "openai":
+            self.logger.warning(
+                f"GSIM patch: provider '{provider_name}' not openai; falling back to _call_llm"
+            )
+            return self._call_llm(prompt, reasoning={"effort": "medium"}), ""
+
+        try:
+            from openai import OpenAI
+            from utils.llm_utils import load_api_key
+
+            api_key = load_api_key("OPENAI_API_KEY") or \
+                      _global_cfg.get("llm_providers", {}).get("openai", {}).get("api_key")
+            if not api_key:
+                self.logger.warning("GSIM patch: OpenAI API key not found; falling back to _call_llm")
+                return self._call_llm(prompt, reasoning={"effort": "medium"}), ""
+
+            client = OpenAI(api_key=api_key)
+            provider_cfg = _global_cfg.get("llm_providers", {}).get("openai", {})
+            model = provider_cfg.get("model", "gpt-4o")
+            max_output_tokens = provider_cfg.get("max_output_tokens") or provider_cfg.get("max_tokens", 100000)
+
+            responses_kwargs: Dict[str, Any] = {
+                "model": model,
+                "input": call_messages,
+                "tools": [tool_spec],
+                "tool_choice": {"type": "function", "name": "complete_SimStep_code"},
+                "max_output_tokens": max_output_tokens,
+                "reasoning": {"effort": "medium"},
+            }
+            resp = client.responses.create(**responses_kwargs)
+
+            for item in getattr(resp, "output", []):
+                if getattr(item, "type", None) == "function_call":
+                    raw_args = getattr(item, "arguments", None)
+                    if raw_args:
+                        try:
+                            args_dict = json.loads(raw_args)
+                            code_out = args_dict.get("SimulatorStep_code", "")
+                            desc_out = args_dict.get("simulator_description_and_reasoning", "")
+                            if code_out:
+                                self.logger.info(
+                                    "GSIM patch: successfully extracted SimulatorStep_code"
+                                )
+                                return code_out, desc_out
+                            return raw_args, desc_out
+                        except json.JSONDecodeError:
+                            return raw_args, ""
+
+            output_text = getattr(resp, "output_text", None)
+            if output_text:
+                self.logger.warning("GSIM patch: model returned plain text, not a tool_call")
+                return output_text, ""
+
+            self.logger.warning("GSIM patch: no usable output from Responses API")
+            return "", ""
+
+        except Exception as exc:
+            self.logger.error(f"GSIM patch: Responses API error ({exc}); falling back to _call_llm")
+            return self._call_llm(prompt, reasoning={"effort": "medium"}), ""
+
     def _build_patch_prompt(
         self,
         task_spec: Dict[str, Any],

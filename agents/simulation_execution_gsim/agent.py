@@ -669,36 +669,88 @@ class SimulationExecutionAgent(BaseAgent):
                     self.logger.info(f"Reading simulation results from output file: {output_file}")
                     with open(output_file, 'r', encoding='utf-8') as f:
                         simulation_output = json.load(f)
-                    
+
                     # Add the entire output file content as a new field in execution_result
                     execution_result["simulation_output"] = simulation_output
-                    
-                    # Also try to extract useful metrics from the output for easier access
-                    if "calibrated_parameters" in simulation_output:
-                        execution_result["calibrated_parameters"] = simulation_output["calibrated_parameters"]
-                    if "evaluation_results_on_validation" in simulation_output:
-                        execution_result["evaluation_results_on_validation"] = simulation_output["evaluation_results_on_validation"]
-                        # Extract metrics from evaluation_results_on_validation
-                        eval_results = simulation_output["evaluation_results_on_validation"]
-                        if isinstance(eval_results, dict):
-                            # Check for summary.metrics format (older format)
-                            if "summary" in eval_results and isinstance(eval_results["summary"], dict):
-                                summary = eval_results["summary"]
-                                for key, value in summary.items():
-                                    if isinstance(value, dict) and "mean" in value:
-                                        execution_result["simulation_metrics"][key] = value.get("mean")
-                            # Also check for metrics field directly
-                            if "metrics" in eval_results and isinstance(eval_results["metrics"], dict):
-                                for key, value in eval_results["metrics"].items():
-                                    if isinstance(value, (int, float)):
-                                        execution_result["simulation_metrics"][key] = value
-                    if "generated_at_utc" in simulation_output:
-                        execution_result["generated_at_utc"] = simulation_output["generated_at_utc"]
-                    
-                    # Update summary to reflect that results were loaded from output file
+
+                    # Detect task type for special field mapping
+                    is_mask_wearing = False
+                    is_daily_mobility = False
+                    if task_spec:
+                        task_description = task_spec.get("description", "").lower()
+                        is_mask_wearing = "mask-wearing behavior" in task_description
+                        is_daily_mobility = "daily mobility trajectories" in task_description
+                        if is_mask_wearing:
+                            self.logger.info("Mask-wearing behavior task detected: applying special mapping from single output file")
+                        if is_daily_mobility:
+                            self.logger.info("Daily mobility trajectories task detected: applying val_metrics->simulation_metrics mapping from single output file")
+
+                    if is_mask_wearing or is_daily_mobility:
+                        # --- Unified mapping for mask-wearing and daily-mobility tasks ---
+                        val_metrics = simulation_output.get("val_metrics", {})
+                        if isinstance(val_metrics, dict):
+                            # Keep all numeric val_metrics fields
+                            for key, value in val_metrics.items():
+                                if isinstance(value, (int, float)):
+                                    execution_result["simulation_metrics"][key] = float(value)
+
+                            # Normalize selection metric for best_simulator_info updates.
+                            # Prefer explicit val_metrics.val_loss, otherwise fall back to RMSE_aggregate.
+                            if "val_loss" in val_metrics and isinstance(val_metrics["val_loss"], (int, float)):
+                                execution_result["simulation_metrics"]["val_loss"] = float(val_metrics["val_loss"])
+                            elif "RMSE_aggregate" in val_metrics and isinstance(val_metrics["RMSE_aggregate"], (int, float)):
+                                execution_result["simulation_metrics"]["val_loss"] = float(val_metrics["RMSE_aggregate"])
+
+                            self.logger.debug(
+                                f"Mapped unified val_metrics to simulation_metrics: {execution_result['simulation_metrics']}"
+                            )
+
+                        # optimized_parameters -> calibrated_parameters
+                        if "optimized_parameters" in simulation_output:
+                            execution_result["calibrated_parameters"] = simulation_output["optimized_parameters"]
+                            self.logger.debug("Mapped optimized_parameters to calibrated_parameters")
+
+                        # Preserve common top-level fields
+                        for field in (
+                            "test_metrics",
+                            "val_metrics",
+                            "test_transition_summary",
+                            "aggregate_forecast",
+                            "train_days",
+                            "test_days",
+                            "calibration_method",
+                            "seed",
+                        ):
+                            if field in simulation_output:
+                                execution_result[field] = simulation_output[field]
+                    else:
+                        # Generic single-file extraction (existing logic)
+                        if "calibrated_parameters" in simulation_output:
+                            execution_result["calibrated_parameters"] = simulation_output["calibrated_parameters"]
+                        if "evaluation_results_on_validation" in simulation_output:
+                            execution_result["evaluation_results_on_validation"] = simulation_output["evaluation_results_on_validation"]
+                            eval_results = simulation_output["evaluation_results_on_validation"]
+                            if isinstance(eval_results, dict):
+                                if "summary" in eval_results and isinstance(eval_results["summary"], dict):
+                                    summary = eval_results["summary"]
+                                    for key, value in summary.items():
+                                        if isinstance(value, dict) and "mean" in value:
+                                            execution_result["simulation_metrics"][key] = value.get("mean")
+                                if "metrics" in eval_results and isinstance(eval_results["metrics"], dict):
+                                    for key, value in eval_results["metrics"].items():
+                                        if isinstance(value, (int, float)):
+                                            execution_result["simulation_metrics"][key] = value
+                        if "generated_at_utc" in simulation_output:
+                            execution_result["generated_at_utc"] = simulation_output["generated_at_utc"]
+
+                    # Update summary
                     if execution_status == "success":
-                        execution_result["summary"] = f"Executed with subprocess in {execution_time:.2f} seconds. Results loaded from output file: {output_file}"
-                    
+                        metrics_count = len(execution_result["simulation_metrics"])
+                        execution_result["summary"] = (
+                            f"Executed with subprocess in {execution_time:.2f} seconds. "
+                            f"Results loaded from output file: {output_file} ({metrics_count} metrics)"
+                        )
+
                     self.logger.info("Successfully loaded simulation results from output file")
                 except json.JSONDecodeError as e:
                     self.logger.warning(f"Failed to parse JSON from output file {output_file}: {e}")

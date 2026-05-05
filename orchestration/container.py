@@ -28,6 +28,7 @@ from agents.feedback_generation.agent import FeedbackGenerationAgent
 from agents.feedback_generation_odd.agent import FeedbackGenerationOddAgent
 from agents.feedback_generation_ace.agent import FeedbackGenerationAgent as FeedbackGenerationAceAgent
 from agents.feedback_generation_alpha.agent import FeedbackGenerationAgent as FeedbackGenerationAlphaAgent
+from agents.feedback_generation_gsim.agent import FeedbackGenerationAgent as FeedbackGenerationGsimAgent
 from agents.iteration_control.agent import IterationControlAgent
 from agents.iteration_control_ace.agent import IterationControlAgent as IterationControlAceAgent
 
@@ -211,7 +212,7 @@ class AgentContainer(containers.DeclarativeContainer):
     )
 
     feedback_generation_gsim_agent = providers.Factory(
-        FeedbackGenerationAlphaAgent,
+        FeedbackGenerationGsimAgent,
         config=config.agents.feedback_generation_gsim
     )
     
