@@ -1,0 +1,92 @@
+{
+  "date-token-parsing-includes-trailing-colon": {
+    "issue_type": "CODE_BUG",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Parse each daily string: extract date after 'Activities at ', then split events by comma"
+    ],
+    "code_refs": [
+      {
+        "symbol": "TrajectoryParser._extract_date_prefix",
+        "lines": "L310-L333"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": "ValueError: Invalid isoformat string: '2019-01-09:' ... Failed to parse date from token '2019-01-09:' in string: 'Activities at 2019-01-09: Rest Area#1120 at 10:50:00, ...'",
+      "metrics": null
+    },
+    "error_identification": "Simulation crashes during parsing because the extracted date token contains a trailing ':' (e.g., '2019-01-09:') which dt.date.fromisoformat cannot parse.",
+    "root_cause_analysis": "TrajectoryParser._extract_date_prefix() extracts the substring after 'Activities at ' and then uses `after.split(\",\",1)[0]` and `date_token.split()[0]`, which does not remove punctuation. For strings formatted as 'Activities at YYYY-MM-DD: ...', the first token includes the colon, producing '2019-01-09:' and causing dt.date.fromisoformat to raise.",
+    "correct_approach": "Harden date extraction to strip trailing punctuation around the date. Minimal patch: after computing date_token, apply `date_token = date_token.strip(\" \t:;,-\")` (and possibly strip trailing '.'), then parse. Alternatively use a regex to capture an ISO date `r\"(\\d{4}-\\d{2}-\\d{2})\"` from the prefix portion and parse that capture. Ensure `rest` starts after the delimiter (':' or ',') so events parse correctly.",
+    "key_insight": "When parsing semi-structured logs/strings, never rely on whitespace tokenization alone\u2014strip punctuation or capture with a strict pattern (regex) for critical fields like dates."
+  },
+  "script-executes-main-on-import": {
+    "issue_type": "CODE_BUG",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [],
+    "code_refs": [
+      {
+        "symbol": "main (module bottom-level invocation)",
+        "lines": "L910-L910"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": "Process exited with code 1 (script runs parsing immediately upon execution).",
+      "metrics": null
+    },
+    "error_identification": "Module calls main() unconditionally at import time, which can break tooling/test harnesses that import the module (and makes failures harder to isolate).",
+    "root_cause_analysis": "At the end of the file the code calls `main()` directly instead of guarding with `if __name__ == \"__main__\": main()`.",
+    "correct_approach": "Wrap the final `main()` call in a `if __name__ == \"__main__\":` guard. This is a safe refactor and does not change runtime behavior when executed as a script.",
+    "key_insight": "Always guard CLI entrypoints; unguarded main() calls make modules untestable and can cause unintended execution in evaluators/import contexts."
+  },
+  "poi-transition-graph-not-used-for-prior-weights": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "mobility_transition_graph: Directed weighted edges between consecutive POIs observed in training trajectories; used as a candidate set and as a transition prior for resident destination choice."
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator._candidate_pois / MobilitySimulator._choose_poi",
+        "lines": "L585-L676"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": null
+    },
+    "error_identification": "The simulator only uses the empirical POI transition graph to filter candidates, but ignores edge weights when choosing among candidates, diverging from the blueprint's 'transition prior' requirement.",
+    "root_cause_analysis": "_candidate_pois() selects up to top-K neighbors by edge count, but _choose_poi() utility does not include any term for POI->POI transition probability/weight. As a result, transitions are driven only by personal affinity, global popularity, and distance, not by learned sequential structure.",
+    "correct_approach": "In _choose_poi(), add a transition-prior term for candidates that appear in `global_models.poi_transition_graph[current_poi]` (and optionally a personal POI transition prior if available). For example, precompute a dict `{to_poi: normalized_weight}` for the current_poi and include `w_transition_poi * log(p_transition + eps)` in utility. This aligns destination choice with the mobility graph beyond candidate filtering.",
+    "key_insight": "If a learned graph is intended as a probabilistic prior, incorporate its weights into the choice model\u2014not just as a hard candidate generator\u2014otherwise sequential realism collapses."
+  },
+  "no-per-agent-train-validation-safeguard-min-1-val-day": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "If an agent has very few days, enforce minimum 1 day validation when possible (designed safeguard)."
+    ],
+    "code_refs": [
+      {
+        "symbol": "holdout_split",
+        "lines": "L392-L428"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": null
+    },
+    "error_identification": "Holdout split can yield zero validation days for agents with only 1 day of data, and does not attempt to enforce the blueprint's 'minimum 1 day validation when possible' beyond the n>=2 case.",
+    "root_cause_analysis": "holdout_split() sets split=n when n==1, producing validation=[]; blueprint suggests ensuring at least one validation day when possible, but the implementation doesn't provide an alternate strategy (e.g., global split, or skipping such agents consistently in evaluation/calibration).",
+    "correct_approach": "Decide and implement a consistent policy: (a) if n==1, put the single day into validation and leave training empty (if the goal is evaluation), or (b) drop such agents from calibration/evaluation with explicit logging. If keeping them, guard model estimation against empty training profiles and ensure simulator has fallbacks.",
+    "key_insight": "Temporal splits must define behavior for low-data agents explicitly; otherwise calibration/evaluation silently changes population composition and biases metrics."
+  }
+}

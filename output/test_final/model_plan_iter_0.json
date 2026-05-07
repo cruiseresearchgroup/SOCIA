@@ -1,0 +1,406 @@
+{
+  "model_type": "agent_based_network",
+  "description": "A multiplex agent-based simulation on a social network modeling mask-wearing behavior with layer-specific peer influence, information exposure, and a government intervention starting on Day 10. Parameters are calibrated on days 0-29 and used to predict days 30-39.",
+  "entities": [
+    {
+      "name": "Agent",
+      "attributes": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "wearing_mask",
+        "received_info",
+        "neighbors_family",
+        "neighbors_work_school",
+        "neighbors_community",
+        "degree_family",
+        "degree_work_school",
+        "degree_community",
+        "random_intercept",
+        "subgroup_label",
+        "info_memory",
+        "is_isolate"
+      ],
+      "behaviors": [
+        "update_info_exposure",
+        "compute_peer_mask_rates",
+        "adoption_persistence_decision",
+        "apply_policy_effects"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "state_source": "train_data.csv day==0 wearing_mask, fallback agent_attributes.csv initial_mask_wearing",
+          "risk_imputation": "impute missing risk_perception via subgroup Beta posterior",
+          "random_intercept": "draw from N(0, sigma_u^2) if using GLMM; else set to 0",
+          "isolate_flag": "is_isolate = (degree_family + degree_work_school + degree_community == 0)"
+        }
+      }
+    },
+    {
+      "name": "InterventionPolicy",
+      "attributes": [
+        "start_day",
+        "mandate_layers",
+        "info_boost_factor",
+        "mandate_logit_shift",
+        "target_groups"
+      ],
+      "behaviors": [
+        "activate_on_schedule",
+        "modify_info_process",
+        "modify_behavioral_logits"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "start_day": 10,
+          "mandate_layers": [
+            "work_school",
+            "community"
+          ],
+          "info_boost_factor": 1.0,
+          "mandate_logit_shift": {
+            "adoption": 0.0,
+            "persistence": 0.0
+          },
+          "target_groups": "all or subgroup-specific"
+        }
+      }
+    },
+    {
+      "name": "NetworkLayer",
+      "attributes": [
+        "name",
+        "edges",
+        "weight",
+        "clustering_target",
+        "mixing_matrix"
+      ],
+      "behaviors": [
+        "symmetrize_edges",
+        "compute_neighbor_rates",
+        "aggregate_influence"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "layers": [
+            "family",
+            "work_school",
+            "community"
+          ],
+          "weights": {
+            "family": 0.5,
+            "work_school": 0.35,
+            "community": 0.15
+          },
+          "symmetrize": true,
+          "deduplicate_overlaps": true
+        }
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "update_info_exposure",
+      "description": "Simulate whether an agent receives information on a given day from exogenous campaigns and social propagation with decay.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "p_info_base_by_day": "vector pi_info[t] estimated from train_data.csv",
+        "social_info_coeff": "beta_info_social (influence of neighbors' info at t-1)",
+        "info_decay_half_life_days": "H (geometric decay on info_memory)",
+        "policy_info_boost_factor": ">=1 multiplier after Day 10"
+      },
+      "algorithm": "For each agent i at day t: 1) Compute decayed info_memory_i = info_memory_i * exp(-ln(2)/H). 2) Compute neighbor_info_rate = fraction of neighbors that had received_info at day t-1 (across all layers or weighted). 3) Compute p_info_i(t) = clip(p_info_base_by_day[t] * policy_info_boost_factor + social_info_coeff * neighbor_info_rate, 0, 1). 4) Draw received_info_i(t) ~ Bernoulli(p_info_i(t)). 5) If received_info_i(t)==1, set info_memory_i = 1."
+    },
+    {
+      "name": "compute_peer_mask_rates",
+      "description": "Compute lagged fraction of neighbors wearing masks by layer to drive social influence.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "layer_weights": {
+          "family": 0.5,
+          "work_school": 0.35,
+          "community": 0.15
+        },
+        "overlap_handling": "do not double-count neighbors across layers when computing overall rate"
+      },
+      "algorithm": "For each agent i and layer l in {family, work_school, community}: m_i,l(t-1) = (# neighbors in layer l wearing mask at t-1) / (degree in layer l). If degree==0, set m_i,l(t-1)=0. Option A (layered logit): pass m_i,l individually to behavior model. Option B (aggregated): m_i,agg = sum_l w_l * m_i,l(t-1)."
+    },
+    {
+      "name": "adoption_persistence_decision",
+      "description": "Update agent mask state using a two-regime logistic model with peer effects, info effects, risk perception, subgroup effects, and random intercepts.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "logit_params_adoption": {
+          "intercept": "a0",
+          "peer_coeffs": {
+            "family": "a_fam",
+            "work_school": "a_work",
+            "community": "a_comm"
+          },
+          "risk_coeff": "a_risk",
+          "info_coeff": "a_info",
+          "policy_shift": "a_policy",
+          "subgroup_fixed_effects": "a_FE[group]"
+        },
+        "logit_params_persistence": {
+          "intercept": "c0",
+          "peer_coeffs": {
+            "family": "c_fam",
+            "work_school": "c_work",
+            "community": "c_comm"
+          },
+          "risk_coeff": "c_risk",
+          "info_coeff": "c_info",
+          "policy_shift": "c_policy",
+          "subgroup_fixed_effects": "c_FE[group]"
+        },
+        "random_intercept_sd": "sigma_u"
+      },
+      "algorithm": "For agent i at day t: If wearing_mask_i(t-1)==0, compute logit p01_i(t) = a0 + u_i + a_info*received_info_i(t) + a_risk*risk_i + sum_l a_l*m_i,l(t-1) + a_FE[group_i] + a_policy*I(t>=10); set wearing_mask_i(t) ~ Bernoulli(sigmoid(p01_i(t))). If wearing_mask_i(t-1)==1, compute logit p11_i(t) = c0 + u_i + c_info*received_info_i(t) + c_risk*risk_i + sum_l c_l*m_i,l(t-1) + c_FE[group_i] + c_policy*I(t>=10); set wearing_mask_i(t) ~ Bernoulli(sigmoid(p11_i(t)))."
+    },
+    {
+      "name": "apply_policy_effects",
+      "description": "Impose intervention effects on targeted layers (e.g., workplace mandates) as logit shifts and optional direct compliance.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "policy_start_day": 10,
+        "mandate_layers": [
+          "work_school",
+          "community"
+        ],
+        "mandate_logit_shift": {
+          "adoption": 0.0,
+          "persistence": 0.0
+        },
+        "direct_compliance_prob": 0.0
+      },
+      "algorithm": "If t >= policy_start_day and agent has degree in a mandated layer: add mandate_logit_shift.{adoption|persistence} to the corresponding logits. Optionally, with probability direct_compliance_prob, force wearing_mask_i(t)=1 for that day (emulating on-site enforcement), which also feeds into neighbors' observed mask rates at t."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "social_influence_peer_effect",
+      "description": "Layer-weighted peer influence where neighbors' mask-wearing at t-1 affects agent adoption/persistence at t.",
+      "entities_involved": [
+        "Agent",
+        "NetworkLayer"
+      ],
+      "trigger": "time",
+      "effect": "Shifts adoption/persistence logits via layer-specific coefficients applied to lagged neighbor mask rates."
+    },
+    {
+      "name": "information_propagation",
+      "description": "Agents receive information from exogenous campaigns and socially via neighbors' info exposure, with memory decay.",
+      "entities_involved": [
+        "Agent"
+      ],
+      "trigger": "time",
+      "effect": "Increases probability of adoption and persistence for informed agents; may have lingering effects via info_memory."
+    },
+    {
+      "name": "government_intervention",
+      "description": "From Day 10, modifies info intensity and/or behavioral logits; can also impose direct compliance in targeted layers.",
+      "entities_involved": [
+        "Agent",
+        "InterventionPolicy"
+      ],
+      "trigger": "time",
+      "effect": "Boosts info exposure probability and adds positive shifts to adoption/persistence logits for targeted agents."
+    }
+  ],
+  "environment": {
+    "type": "network_multiplex",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "parameters": {
+    "network_source": "data_fitting/mask_adoption_data/social_network.json",
+    "symmetrize_edges": true,
+    "layer_weights": {
+      "family": 0.5,
+      "work_school": 0.35,
+      "community": 0.15
+    },
+    "assortativity_mixing": "estimated from data; used only if synthesizing network",
+    "clustering_target": {
+      "family": "high",
+      "work_school": "medium",
+      "community": "low"
+    },
+    "time_step_days": 1,
+    "persistence_baseline_p11": "estimated from train_data.csv",
+    "adoption_baseline_p01": "estimated from train_data.csv",
+    "peer_effect_coefficients": {
+      "family": "beta_fam",
+      "work_school": "beta_work",
+      "community": "beta_comm"
+    },
+    "risk_perception_weight": "beta_risk",
+    "relapse_probability": "1 - p11",
+    "threshold_mapping": "optional: theta_i = 1 - risk_perception_i (if using threshold variant)",
+    "p_info_daily": "vector by day; boosted after policy start",
+    "info_decay_half_life_days": 7,
+    "info_social_coeff": 0.0,
+    "policy": {
+      "start_day": 10,
+      "mandate_layers": [
+        "work_school",
+        "community"
+      ],
+      "info_boost_factor": 1.2,
+      "mandate_logit_shift": {
+        "adoption": 0.3,
+        "persistence": 0.15
+      },
+      "direct_compliance_prob": 0.0
+    },
+    "subgroup_effects": "age_group and occupation fixed effects",
+    "random_intercept_sd": 0.0,
+    "calibration": {
+      "use_glmm": true,
+      "day_fixed_effects": true,
+      "holdout_strategy": "fit on days 0-29; predict 30-39",
+      "lagged_variables": "use t-1 for neighbors and info"
+    }
+  },
+  "initialization": {
+    "population_size": "infer from agent_attributes.csv or social_network.json",
+    "random_seed": 42,
+    "steps": [
+      "Load agent_attributes.csv; coerce types; derive subgroup_label = f(age_group, occupation).",
+      "Load social_network.json; normalize keys to int; symmetrize edges per layer; remove self-loops; de-duplicate overlaps for 'all'.",
+      "Attach attributes to nodes; compute degrees per layer; flag isolates.",
+      "Load train_data.csv; verify continuity per agent; fill or drop missing days per rules.",
+      "Set initial wearing_mask from train_data day==0 if available; else from agent_attributes initial_mask_wearing.",
+      "Estimate risk_perception Beta(alpha,beta); impute missing values from subgroup posterior.",
+      "Precompute lagged neighbor mask rates by layer for days 0-29 for calibration.",
+      "Calibrate behavior model (GLMM/logit) to obtain coefficients; freeze parameters for prediction.",
+      "Set policy parameters and info schedule; mark policy activation on day 10."
+    ]
+  },
+  "algorithms": {
+    "SymmetrizeMultiplex": "For each layer, add reciprocal edges if missing; remove self-loops and duplicates.",
+    "LaggedNeighborRates": "For each agent-day, compute fraction of neighbors wearing masks at t-1 by layer; handle zero-degree as 0.",
+    "TwoRegimeLogisticUpdate": "Separate logistic equations for adoption (0->1) and persistence (1->1) with peer, info, risk, subgroup, policy, and random intercept terms.",
+    "InfoProcessWithDecay": "Bernoulli draw with base day effect, social exposure from neighbors' info, and geometric decay memory.",
+    "InterventionScheduler": "Activate policy at configured start_day; apply info boost and logit shifts thereafter.",
+    "NetworkSynthesisFallback": "If JSON missing, generate per-layer configuration models from degree sequences with assortative rewiring; enforce even stub sums.",
+    "Evaluation": "Compute daily aggregate adoption rates; RMSE on days 30-39; Peak Adoption Rate Error and Time-to-Peak Error during intervention window.",
+    "Sensitivity": "Sweep peer coefficients, info boost, and layer weights to test robustness (optional)."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Agent attributes, degrees per layer, initial mask-wearing fallback, risk perception",
+      "fields_used": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "initial_mask_wearing",
+        "family_connections",
+        "work_school_connections",
+        "community_connections",
+        "total_connections"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Primary multiplex network topology per layer",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibrate transition dynamics and info process on days 0-29; provide initial state at day 0",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.yaml",
+        "description": "All tunable parameters, file paths, policy schedule, seeds"
+      },
+      {
+        "name": "data_loader.py",
+        "description": "Load and validate CSV/JSON, normalize IDs, join attributes, handle missingness"
+      },
+      {
+        "name": "network_utils.py",
+        "description": "Symmetrization, layer handling, de-duplication, mixing metrics, optional synthesis"
+      },
+      {
+        "name": "features.py",
+        "description": "Construct lagged neighbor mask rates and info exposure features by layer"
+      },
+      {
+        "name": "calibration.py",
+        "description": "Fit GLM/GLMM for adoption and persistence; estimate info process; save coefficients"
+      },
+      {
+        "name": "policy.py",
+        "description": "InterventionPolicy class; schedule activation and apply effects"
+      },
+      {
+        "name": "simulator.py",
+        "description": "Core daily loop: update info, compute peer rates, apply policy, update mask states"
+      },
+      {
+        "name": "evaluation.py",
+        "description": "Compute RMSE, Peak Adoption Rate Error, and Time-to-Peak Error for prediction period"
+      },
+      {
+        "name": "run_train.py",
+        "description": "End-to-end calibration on days 0-29; persists model parameters"
+      },
+      {
+        "name": "run_predict.py",
+        "description": "Load parameters; simulate days 30-39; output per-agent and aggregate predictions"
+      }
+    ],
+    "dependencies": [
+      "python>=3.10",
+      "pandas",
+      "numpy",
+      "networkx",
+      "scipy",
+      "statsmodels",
+      "scikit-learn",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "Peak Adoption Rate Error",
+    "Time-to-Peak Error"
+  ]
+}

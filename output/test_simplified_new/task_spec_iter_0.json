@@ -1,0 +1,1209 @@
+{
+  "title": "Simulation Task",
+  "description": "Develop a multi-agent simulation system that models the spread of mask-wearing behavior through social networks.",
+  "simulation_focus": [
+    "Predict agents' mask-wearing behavior over day 30 - day 39 (last ten days) based on their attributes, social connections, and past behavior",
+    "Model information propagation and behavioral changes triggered by social influence and government intervention starting on Day 10"
+  ],
+  "data_folder": "data_fitting/mask_adoption_data/",
+  "data_files": {
+    "agent_attributes.csv": "Contains demographic and behavioral attributes of each agent, including age, occupation, risk perception, and social connection counts",
+    "social_network.json": "Contains structured data representing a social network. Each entry corresponds to a user (identified by a unique integer ID), and the values describe the different types of relationships that user has with others. Data Structure: The top-level structure is a dictionary ({} in JSON). Keys: Each key is a unique user ID (as an integer, e.g., 0, 1, 2, etc.). Values: Each value is another dictionary with the following fields: \"family\": a list of user IDs representing family connections. \"work_school\": a list of user IDs representing colleagues or schoolmates. \"community\": a list of user IDs representing community-level acquaintances. \"all\": a merged list of all user IDs connected to the user across the three categories above.",
+    "train_data.csv": "Time series data for the first 30 days, used for training the model"
+  },
+  "evaluation_metrics": {
+    "RMSE": {
+      "description": "Root Mean Square Error measuring overall predictive accuracy of mask adoption rates",
+      "interpretation": "Directly interpretable as percentage deviations due to the 0-1 range",
+      "formula": "RMSE = sqrt(sum((predicted_rate - actual_rate)^2) / n)"
+    },
+    "Peak Adoption Rate Error": {
+      "description": "Measures model accuracy in predicting maximum mask adoption during intervention",
+      "formula": "abs(predicted_peak_rate - actual_peak_rate)"
+    },
+    "Time-to-Peak Error": {
+      "description": "Measures model accuracy in predicting the time lag from intervention to peak behavior change",
+      "formula": "abs(predicted_peak_day - actual_peak_day)"
+    }
+  },
+  "data_analysis_result": {
+    "data_summary": {
+      "key_patterns": [
+        {
+          "name": "Multiplex structure with heterogeneous degrees",
+          "description": "Community layers have larger neighbor lists, work/school moderate, family smallest. Some edges are non-reciprocal; overlap across layers is possible.",
+          "relevance": "Layer-specific degree and overlap affect exposure frequency and social reinforcement; informs layer weights and contact sampling."
+        },
+        {
+          "name": "Seeded early adopters",
+          "description": "initial_mask_wearing provides a non-zero base of adopters at t0 that likely varies by demographics and risk_perception.",
+          "relevance": "Seeds drive cascade initiation; must be honored to reproduce early dynamics."
+        },
+        {
+          "name": "Risk perception heterogeneity",
+          "description": "risk_perception is continuous in [0,1] and is expected to correlate positively with adoption propensity.",
+          "relevance": "Use to modulate thresholds or adoption probabilities; supports heterogeneity in agent susceptibility."
+        },
+        {
+          "name": "Behavioral persistence with asymmetric switching",
+          "description": "In panel data, wearing_mask tends to persist once adopted; drop-off events occur but are less frequent than adoption (expected).",
+          "relevance": "Calibrate separate persistence (stickiness) and dropout rates; necessary to match wearing streak-length distributions."
+        },
+        {
+          "name": "Information precedes adoption",
+          "description": "received_info is a leading indicator for wearing_mask; adoption can occur without received_info but at a lower rate.",
+          "relevance": "Model two coupled processes (information then behavior) with distinct parameters; estimate uplift from information."
+        },
+        {
+          "name": "Demographic and role structure",
+          "description": "age_group and occupation align with degree by layer (e.g., students/working-age have more work/school ties).",
+          "relevance": "Supports homophily and role-constrained wiring; informs contact rates and susceptibility modifiers."
+        },
+        {
+          "name": "Assortativity/homophily",
+          "description": "Neighbors likely share age_group/occupation more than random; especially within work/school and family.",
+          "relevance": "Increases local reinforcement; impacts threshold models and cascade sizes."
+        }
+      ],
+      "key_distributions": [
+        {
+          "name": "Risk perception",
+          "description": "Continuous [0,1]; suitable for Beta distribution fit.",
+          "parameters": "Fit Beta(a,b) to risk_perception from agent_attributes.csv; use method-of-moments or MLE."
+        },
+        {
+          "name": "Degree by layer",
+          "description": "Right-skewed counts per layer (family < work/school < community). Negative binomial often fits better than Poisson.",
+          "parameters": "For each layer L in {family, work_school, community}: mean_L and dispersion k_L from social_network.json degrees."
+        },
+        {
+          "name": "Initial adoption rate",
+          "description": "Overall and stratified by demographics.",
+          "parameters": "p0 = mean(initial_mask_wearing); p0_g by age_group; p0_o by occupation from agent_attributes.csv."
+        },
+        {
+          "name": "Wearing streak lengths",
+          "description": "Geometric-like distribution for consecutive days wearing; parameterized by dropout probability.",
+          "parameters": "p_drop = P(wearing_t+1=0 | wearing_t=1); estimate from train_data.csv."
+        },
+        {
+          "name": "Adoption waiting times",
+          "description": "Time from not-wearing to first wearing; mixture of baseline and info-triggered hazards.",
+          "parameters": "h_base = P(wearing_t+1=1 | wearing_t=0, received_info_t=0); h_info = P(wearing_t+1=1 | wearing_t=0, received_info_t=1)."
+        },
+        {
+          "name": "Information exposure rate",
+          "description": "Per-day probability of receiving info given neighbor exposures by layer.",
+          "parameters": "For each layer L: p_info_L per contact per day; and p_info_ext for exogenous info; estimated from train_data.csv + social_network.json."
+        }
+      ],
+      "key_relationships": [
+        {
+          "variables": [
+            "received_info_t",
+            "wearing_mask_t+1"
+          ],
+          "relationship": "Positive association; receiving info increases next-day adoption probability.",
+          "strength": "Estimate odds ratio via logistic regression; expected moderate-to-strong."
+        },
+        {
+          "variables": [
+            "wearing_mask_t",
+            "wearing_mask_t+1"
+          ],
+          "relationship": "Strong state persistence (habit effect).",
+          "strength": "High; estimate P(stay wearing) and P(stay not-wearing)."
+        },
+        {
+          "variables": [
+            "neighbor_wearing_fraction_by_layer_t",
+            "wearing_mask_t+1"
+          ],
+          "relationship": "Positive peer effect with layer heterogeneity (family > work/school > community).",
+          "strength": "Estimate layer-specific coefficients; expected small-to-moderate per 10% neighbor increase."
+        },
+        {
+          "variables": [
+            "risk_perception",
+            "wearing_mask"
+          ],
+          "relationship": "Higher risk_perception correlates with higher adoption.",
+          "strength": "Estimate marginal effect or interaction with peer influence; expected moderate."
+        },
+        {
+          "variables": [
+            "age_group/occupation",
+            "degree_by_layer"
+          ],
+          "relationship": "Role-specific degree patterns (e.g., students/working adults higher work/school degree).",
+          "strength": "Quantify via mean degree differences and assortativity indices; expected strong."
+        }
+      ]
+    },
+    "simulation_parameters": {
+      "population_and_network": {
+        "n_agents": {
+          "value": 1000,
+          "source": "social_network.json (ID keys appear 0\u2013999)",
+          "confidence": "Medium",
+          "notes": "Confirm by counting unique keys."
+        },
+        "layers": {
+          "value": [
+            "family",
+            "work_school",
+            "community"
+          ],
+          "source": "social_network.json schema",
+          "confidence": "High",
+          "notes": "Use as multiplex layers."
+        },
+        "symmetrize_edges": {
+          "value": true,
+          "source": "social_network.json (adjacency may not be reciprocal)",
+          "confidence": "High",
+          "notes": "Undirected influence assumed; keep edge if i->j or j->i."
+        },
+        "degree_stats_by_layer": {
+          "value": "Compute empirical mean and dispersion per layer",
+          "source": "social_network.json",
+          "confidence": "High",
+          "notes": "Store mean_L and k_L for contact sampling and sensitivity analyses."
+        },
+        "assortativity_by_attribute": {
+          "value": "Compute r_age and r_occupation",
+          "source": "agent_attributes.csv + social_network.json",
+          "confidence": "Medium",
+          "notes": "Use Newman assortativity; informs homophily strength for any synthetic rewiring."
+        },
+        "overlap_across_layers": {
+          "value": "Compute Jaccard overlap of neighbor sets per layer pair per agent",
+          "source": "social_network.json",
+          "confidence": "Medium",
+          "notes": "Used for multi-layer reinforcement modeling."
+        }
+      },
+      "information_diffusion": {
+        "p_info_family": {
+          "value": "Estimate per-contact per-day probability via complementary log-log hazard model",
+          "source": "train_data.csv (received_info) + social_network.json (family neighbors)",
+          "confidence": "Medium",
+          "notes": "Model: cloglog(P(received_info_t+1)) = alpha_f * frac_info_family_t + controls."
+        },
+        "p_info_work_school": {
+          "value": "Estimate per-contact per-day probability",
+          "source": "train_data.csv + social_network.json (work_school)",
+          "confidence": "Medium",
+          "notes": "Allow different coefficient than family/community."
+        },
+        "p_info_community": {
+          "value": "Estimate per-contact per-day probability",
+          "source": "train_data.csv + social_network.json (community)",
+          "confidence": "Medium",
+          "notes": "Typically smallest per-contact effect."
+        },
+        "p_info_external": {
+          "value": "Estimate baseline info rate when no informed neighbors",
+          "source": "train_data.csv (received_info when neighbor exposure=0)",
+          "confidence": "Medium",
+          "notes": "Captures media and other exogenous channels."
+        },
+        "info_decay_days": {
+          "value": 7,
+          "source": "Design recommendation",
+          "confidence": "Low",
+          "notes": "Optional: number of days info remains salient; calibrate if data show waning effect."
+        }
+      },
+      "behavioral_adoption": {
+        "update_rule": {
+          "value": "Two-stage daily update: (1) update received_info; (2) update wearing_mask via logistic model",
+          "source": "Design based on train_data.csv structure",
+          "confidence": "High",
+          "notes": "Synchronous daily time step."
+        },
+        "baseline_adoption_hazard": {
+          "value": "h_base = P(wearing_t+1=1 | wearing_t=0, received_info_t=0)",
+          "source": "train_data.csv",
+          "confidence": "High",
+          "notes": "Compute directly from transitions."
+        },
+        "adoption_uplift_from_info": {
+          "value": "Delta_info = h_info - h_base",
+          "source": "train_data.csv",
+          "confidence": "High",
+          "notes": "h_info = P(wearing_t+1=1 | wearing_t=0, received_info_t=1)."
+        },
+        "persistence_probability": {
+          "value": "P_stay = P(wearing_t+1=1 | wearing_t=1)",
+          "source": "train_data.csv",
+          "confidence": "High",
+          "notes": "Controls habit; derive dropout as 1 - P_stay."
+        },
+        "dropout_probability": {
+          "value": "p_drop = P(wearing_t+1=0 | wearing_t=1)",
+          "source": "train_data.csv",
+          "confidence": "High",
+          "notes": "May vary with neighbor behavior and risk_perception; allow dependence if supported."
+        },
+        "peer_influence_weights_by_layer": {
+          "value": {
+            "family": 0.5,
+            "work_school": 0.3,
+            "community": 0.2
+          },
+          "source": "Design prior; refine via calibration to match layer-conditional adoption",
+          "confidence": "Low",
+          "notes": "Initial weights; replace with estimated coefficients scaled to sum to 1."
+        },
+        "beta_peer_by_layer": {
+          "value": "Estimate logistic coefficients for neighbor_wearing_fraction_family/work_school/community at time t",
+          "source": "train_data.csv + social_network.json",
+          "confidence": "Medium",
+          "notes": "Use lagged neighbor wearing to reduce simultaneity bias."
+        },
+        "beta_risk_perception": {
+          "value": "Estimate coefficient for risk_perception in adoption model",
+          "source": "agent_attributes.csv + train_data.csv",
+          "confidence": "High",
+          "notes": "Include interaction with peer influence to capture heterogeneous susceptibility."
+        },
+        "beta_demographics": {
+          "value": "Estimate effects for age_group and occupation (fixed effects or slopes)",
+          "source": "agent_attributes.csv + train_data.csv",
+          "confidence": "Medium",
+          "notes": "Controls for role differences; improves out-of-sample fit."
+        },
+        "saturation_function": {
+          "value": "Use fractional neighbor wearing with logistic link; cap at [0,1]",
+          "source": "Design recommendation",
+          "confidence": "High",
+          "notes": "Avoid linear probability overflow."
+        }
+      },
+      "initialization": {
+        "initial_mask_seed": {
+          "value": "Use initial_mask_wearing from agent_attributes.csv unless simulating a specific day from train_data.csv",
+          "source": "agent_attributes.csv / train_data.csv (earliest day)",
+          "confidence": "High",
+          "notes": "If reproducing observed trajectory from day 0 in train_data.csv, initialize from that day instead."
+        },
+        "risk_perception_values": {
+          "value": "Assign per agent from agent_attributes.csv",
+          "source": "agent_attributes.csv",
+          "confidence": "High",
+          "notes": "Optionally rescale or transform (e.g., logit) for modeling."
+        },
+        "network_state": {
+          "value": "Use social_network.json as fixed multiplex topology",
+          "source": "social_network.json",
+          "confidence": "High",
+          "notes": "Preprocess to ints, dedupe, symmetrize."
+        }
+      },
+      "design_recommendations": {
+        "time_step_days": {
+          "value": 1,
+          "source": "train_data.csv granularity",
+          "confidence": "High",
+          "notes": "Daily synchronous updates."
+        },
+        "contact_sampling_per_day": {
+          "value": {
+            "family": "contact all family neighbors daily",
+            "work_school": "sample min(5, deg_ws) contacts",
+            "community": "sample min(3, deg_comm) contacts"
+          },
+          "source": "Design prior; adjust to match info rates",
+          "confidence": "Low",
+          "notes": "Convert adjacency into daily contacts; tune to match observed info hazards."
+        },
+        "edge_overlap_reinforcement": {
+          "value": "If the same neighbor is connected in multiple layers, add a reinforcement multiplier to peer influence for that alter",
+          "source": "Design recommendation",
+          "confidence": "Low",
+          "notes": "Calibrate multiplier to match adoption acceleration in dense neighborhoods."
+        },
+        "update_order": {
+          "value": "Stage 1: info; Stage 2: behavior",
+          "source": "Observed precedence in train_data.csv",
+          "confidence": "High",
+          "notes": "Prevents same-day simultaneity; use t neighbor states to predict t+1."
+        }
+      }
+    },
+    "calibration_strategy": {
+      "preprocessing_steps": [
+        {
+          "step": "Convert JSON keys to integers; de-duplicate adjacency lists; enforce undirected edges (symmetrize).",
+          "purpose": "Ensure consistent node IDs and undirected influence topology."
+        },
+        {
+          "step": "Compute per-layer neighbor sets, degrees, and overlaps; cache for fast exposure calculations.",
+          "purpose": "Speed up repeated exposure/hazard computations."
+        },
+        {
+          "step": "Validate total_connections equals sum of layer counts; correct or recompute as needed.",
+          "purpose": "Data integrity for degree-based analyses."
+        },
+        {
+          "step": "Merge agent_attributes.csv into the panel by agent_id; align earliest day as t0.",
+          "purpose": "Unify covariates with time series."
+        },
+        {
+          "step": "Construct lagged neighbor summaries per layer per day: fraction_wearing_t, fraction_info_t.",
+          "purpose": "Create exposure variables for hazard models; mitigate simultaneity by using lagged states."
+        },
+        {
+          "step": "Handle missing days/states via explicit NA and exclude or impute conservatively.",
+          "purpose": "Avoid biased transition estimates."
+        }
+      ],
+      "calibration_approach": "Use a two-stage discrete-time hazard modeling framework. Stage A (information): Fit a complementary log-log or logistic model for received_info_t+1 with predictors: lagged fraction of informed neighbors by layer, agent fixed effects or demographics, and day fixed effects. Extract per-layer per-contact transmission probabilities (p_info_family, p_info_work_school, p_info_community) and exogenous baseline (p_info_external). Stage B (behavior): Fit a logistic model for wearing_mask_t+1 with predictors: wearing_mask_t (persistence), received_info_t, lagged neighbor_wearing_fraction by layer, risk_perception, demographics, and interactions (e.g., risk_perception \u00d7 peer influence). From this, compute baseline adoption hazard (h_base), adoption uplift (Delta_info), persistence and dropout, and layer-specific peer coefficients. Optionally estimate a Bayesian hierarchical version with partial pooling across demographics to stabilize layer coefficients. Use these estimates directly as simulation parameters or translate to equivalent per-contact probabilities via contact sampling assumptions.",
+      "validation_strategy": "Perform out-of-sample temporal validation: fit on initial window (e.g., days 1\u2013T_train), simulate forward from the observed state at T_train using calibrated parameters on the fixed network, and compare predicted vs observed trajectories on days T_train+1\u2013T_end. Validate on: (1) population-level prevalence of wearing_mask and received_info over time (RMSE/MAE); (2) transition matrices (stay/adopt/drop rates); (3) stratified prevalence by age_group/occupation and degree quantiles; (4) peer effect diagnostics: correlation between predicted and observed adoption conditional on neighbor_wearing_fraction bins; (5) distributional checks: wearing streak lengths, time-to-first-adoption, and cascade sizes for received_info. Use posterior predictive checks if Bayesian. Sensitivity test to edge symmetrization and contact sampling assumptions.",
+      "key_variables_to_calibrate": [
+        "p_info_family",
+        "p_info_work_school",
+        "p_info_community",
+        "p_info_external",
+        "baseline_adoption_hazard (h_base)",
+        "adoption_uplift_from_info (Delta_info or beta_info)",
+        "persistence_probability (P_stay)",
+        "dropout_probability (p_drop)",
+        "beta_peer_family",
+        "beta_peer_work_school",
+        "beta_peer_community",
+        "beta_risk_perception",
+        "layer_contact_rates (daily contacts per layer)",
+        "edge_overlap_reinforcement_multiplier",
+        "assortativity/homophily parameters (if generating synthetic edges)"
+      ]
+    },
+    "file_summaries": [
+      {
+        "file_name": "agent_attributes.csv",
+        "file_type": "csv",
+        "semantic_summary": "Semantic metadata summary for agent_attributes.csv\n\n- Overall structure/type:\n  - Flat CSV; one row per agent.\n  - Primary key: agent_id (integer).\n  - Field types: integers (age, connection counts), categorical strings (age_group, occupation), float in [0,1] (risk_perception), boolean (initial_mask_wearing).\n\n- Fields and meanings:\n  - Demographics: age, age_group, occupation.\n  - Behavior state: initial_mask_wearing (seed adoption state at t0).\n  - Psychometric: risk_perception (propensity to adopt; continuous).\n  - Social degree by layer: family_connections, work_school_connections, community_connections; total_connections (intended sum of the three).\n\n- Relationships/nested elements:\n  - No nested/relational structures present; data are agent-level attributes only.\n  - Implied multilayer social network via connection counts; total_connections should equal the sum of layer-specific counts (validate/recompute if needed).\n  - No explicit edges or neighbor identities; network topology must be generated from degree counts (e.g., configuration model) and optionally homophily (age_group, occupation).\n\n- How to inform simulation entities/interactions:\n  - Agent initialization:\n    - Set each agent\u2019s state: mask_wearing = initial_mask_wearing.\n    - Assign attributes: risk_perception, age_group, occupation for heterogeneity in thresholds/influence.\n  - Network construction:\n    - Build a multilayer graph with three layers: family, work/school, community.\n    - Use the per-layer degree counts as target degrees for stub-matching; ensure total degree consistency across agents per layer.\n    - Optionally bias edge wiring by homophily (same age_group/occupation) and enforce role constraints (e.g., Students receive work/school ties; retirees fewer).\n  - Interaction dynamics:\n    - Influence/update rules use:\n      - Neighbor mask-wearing fraction per layer with layer-specific weights (e.g., family > work > community).\n      - Agent risk_perception to modulate adoption probability/threshold.\n      - Demographics to adjust susceptibility/influence (e.g., Students higher work/school exposure).\n    - initial_mask_wearing seeds early adopters for diffusion.\n  - Metrics:\n    - Track adoption over time overall and by layer/demographic; degree distributions derived from connection counts."
+      },
+      {
+        "file_name": "social_network.json",
+        "file_type": "json",
+        "semantic_summary": "Semantic metadata summary for social_network.json\n\nOverall data structure and type\n- JSON object (dictionary) keyed by agent IDs as strings (e.g., \"0\", \"1\"). IDs map to integer node IDs; range appears to be 0\u2013999.\n- Each value is an object containing four adjacency lists: family, work_school, community, and all. Elements are integer IDs of other agents.\n- The all list is the union of the three context-specific lists (may contain duplicates in source; treat as a set).\n\nRelationships or nested elements\n- Multiplex network: three explicit relationship layers (family, work/school, community) representing tie types/contexts.\n- Edges are stored as per-node adjacency lists; reciprocity (undirected symmetry) is not guaranteed and may need enforcement or acceptance as directed ties.\n- No edge weights or timestamps; tie strength is implied by context only.\n- Possible overlaps across layers (an alter could be both family and co-worker), though not evident in the sample; do not assume disjointness.\n- Variable degree per layer; community lists tend to be larger, family smaller.\n\nHow this data should inform simulation entities or interactions\n- Agents: one per node ID. State includes mask-wearing status (binary or probabilistic), susceptibility/threshold, and possibly context-specific behaviors.\n- Interaction topology: use the three layers to schedule contacts and influence. Weight contact frequency or influence strength by layer (e.g., family > work/school > community).\n- Dynamics:\n  - Use all for aggregate peer influence when context is not modeled explicitly; otherwise sample interactions per layer according to a daily/weekly schedule.\n  - Choose a diffusion model (e.g., independent cascade with context-specific transmission probabilities, or threshold model with layer-weighted neighbor adoption).\n- Preprocessing: convert keys to ints; de-duplicate neighbors; optionally enforce undirected edges; precompute neighbor sets per layer and degrees for efficiency.\n- Seeding and interventions: select initial adopters and apply context-targeted policies (e.g., workplace mandates) by altering layer-specific adoption probabilities or exposure schedules.\n- Metrics: track adoption over time overall and by layer/degree; examine cascade size and layer contributions."
+      },
+      {
+        "file_name": "train_data.csv",
+        "file_type": "csv",
+        "semantic_summary": "Semantic metadata summary for train_data.csv\n\nOverall data structure and type\n- Format: CSV (sample shown as JSON records for readability)\n- Granularity: panel/longitudinal time series at daily resolution\n- Schema:\n  - day: integer (time index)\n  - agent_id: integer (entity identifier)\n  - wearing_mask: boolean (agent behavioral state)\n  - received_info: boolean (agent information/exposure state)\n- One row per agent per day; no nested fields\n\nRelationships or nested elements\n- Flat schema with a composite key (agent_id, day)\n- Temporal dependency within agent trajectories (state at day t influences day t+1)\n- Two binary state variables per agent:\n  - received_info may act as a precursor/modulator for wearing_mask adoption\n  - wearing_mask can switch over time even without received_info (as in sample), indicating baseline adoption/abandonment dynamics\n- No explicit social network structure included; edges/contacts must be provided elsewhere or synthesized\n\nHow this data should inform simulation entities or interactions\n- Agents: nodes with two binary states: wearing_mask and received_info\n- Time step: daily updates\n- Initialization: set initial states from earliest day per agent\n- Dynamics/calibration:\n  - Estimate transition probabilities:\n    - P(received_info_t+1 | received_info_t, exogenous factors)\n    - P(wearing_mask_t+1 | wearing_mask_t, received_info_t, possibly neighbor influence)\n  - Capture baseline adoption/abandonment (when received_info = false) and the uplift when received_info = true\n- Interactions:\n  - Information diffusion process: received_info propagates over the social network (not in file; define/generate network and contagion rules)\n  - Behavioral contagion: wearing_mask adoption influenced by own prior state, info state, and neighbors\u2019 states\n- Validation: compare simulated panel outputs to observed trajectories (marginal rates over time, persistence, switching rates, and conditional effects of received_info)"
+      }
+    ]
+  },
+  "schemas": {
+    "agent_attributes.csv": {
+      "file_type": "csv",
+      "row_count": 1000,
+      "column_count": 10,
+      "columns": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "initial_mask_wearing",
+        "family_connections",
+        "work_school_connections",
+        "community_connections",
+        "total_connections"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 1000 entries, 0 to 999\nData columns (total 10 columns):\n #   Column                   Non-Null Count  Dtype  \n---  ------                   --------------  -----  \n 0   agent_id                 1000 non-null   int64  \n 1   age                      1000 non-null   int64  \n 2   age_group                1000 non-null   object \n 3   occupation               1000 non-null   object \n 4   risk_perception          1000 non-null   float64\n 5   initial_mask_wearing     1000 non-null   bool   \n 6   family_connections       1000 non-null   int64  \n 7   work_school_connections  1000 non-null   int64  \n 8   community_connections    1000 non-null   int64  \n 9   total_connections        1000 non-null   int64  \ndtypes: bool(1), float64(1), int64(6), object(2)\nmemory usage: 71.4+ KB\n",
+      "sample_data": [
+        {
+          "agent_id": 0,
+          "age": 41,
+          "age_group": "Middle Age",
+          "occupation": "Blue Collar",
+          "risk_perception": 0.3536766572335658,
+          "initial_mask_wearing": false,
+          "family_connections": 3,
+          "work_school_connections": 4,
+          "community_connections": 11,
+          "total_connections": 18
+        },
+        {
+          "agent_id": 1,
+          "age": 3,
+          "age_group": "Youth",
+          "occupation": "Blue Collar",
+          "risk_perception": 0.2485580660782393,
+          "initial_mask_wearing": false,
+          "family_connections": 3,
+          "work_school_connections": 4,
+          "community_connections": 12,
+          "total_connections": 19
+        },
+        {
+          "agent_id": 2,
+          "age": 13,
+          "age_group": "Youth",
+          "occupation": "Student",
+          "risk_perception": 0.4159590873381714,
+          "initial_mask_wearing": true,
+          "family_connections": 4,
+          "work_school_connections": 5,
+          "community_connections": 13,
+          "total_connections": 22
+        },
+        {
+          "agent_id": 3,
+          "age": 38,
+          "age_group": "Young Adult",
+          "occupation": "Student",
+          "risk_perception": 0.1599675758099919,
+          "initial_mask_wearing": false,
+          "family_connections": 2,
+          "work_school_connections": 4,
+          "community_connections": 12,
+          "total_connections": 18
+        },
+        {
+          "agent_id": 4,
+          "age": 58,
+          "age_group": "Middle Age",
+          "occupation": "White Collar",
+          "risk_perception": 0.5502830780616322,
+          "initial_mask_wearing": false,
+          "family_connections": 5,
+          "work_school_connections": 4,
+          "community_connections": 11,
+          "total_connections": 20
+        },
+        {
+          "agent_id": 5,
+          "age": 19,
+          "age_group": "Young Adult",
+          "occupation": "Blue Collar",
+          "risk_perception": 0.110945287593398,
+          "initial_mask_wearing": false,
+          "family_connections": 3,
+          "work_school_connections": 4,
+          "community_connections": 18,
+          "total_connections": 25
+        },
+        {
+          "agent_id": 6,
+          "age": 27,
+          "age_group": "Young Adult",
+          "occupation": "Student",
+          "risk_perception": 0.5098966417920571,
+          "initial_mask_wearing": false,
+          "family_connections": 1,
+          "work_school_connections": 5,
+          "community_connections": 15,
+          "total_connections": 21
+        },
+        {
+          "agent_id": 7,
+          "age": 21,
+          "age_group": "Young Adult",
+          "occupation": "White Collar",
+          "risk_perception": 0.1772703794727445,
+          "initial_mask_wearing": false,
+          "family_connections": 2,
+          "work_school_connections": 4,
+          "community_connections": 13,
+          "total_connections": 19
+        },
+        {
+          "agent_id": 8,
+          "age": 27,
+          "age_group": "Young Adult",
+          "occupation": "Blue Collar",
+          "risk_perception": 0.1982904719133444,
+          "initial_mask_wearing": false,
+          "family_connections": 3,
+          "work_school_connections": 5,
+          "community_connections": 14,
+          "total_connections": 22
+        },
+        {
+          "agent_id": 9,
+          "age": 31,
+          "age_group": "Young Adult",
+          "occupation": "Student",
+          "risk_perception": 0.3762367882135499,
+          "initial_mask_wearing": false,
+          "family_connections": 2,
+          "work_school_connections": 4,
+          "community_connections": 18,
+          "total_connections": 24
+        }
+      ],
+      "dtypes": {
+        "agent_id": "int64",
+        "age": "int64",
+        "age_group": "object",
+        "occupation": "object",
+        "risk_perception": "float64",
+        "initial_mask_wearing": "bool",
+        "family_connections": "int64",
+        "work_school_connections": "int64",
+        "community_connections": "int64",
+        "total_connections": "int64"
+      },
+      "file_semantic_summary": "Semantic metadata summary for agent_attributes.csv\n\n- Overall structure/type:\n  - Flat CSV; one row per agent.\n  - Primary key: agent_id (integer).\n  - Field types: integers (age, connection counts), categorical strings (age_group, occupation), float in [0,1] (risk_perception), boolean (initial_mask_wearing).\n\n- Fields and meanings:\n  - Demographics: age, age_group, occupation.\n  - Behavior state: initial_mask_wearing (seed adoption state at t0).\n  - Psychometric: risk_perception (propensity to adopt; continuous).\n  - Social degree by layer: family_connections, work_school_connections, community_connections; total_connections (intended sum of the three).\n\n- Relationships/nested elements:\n  - No nested/relational structures present; data are agent-level attributes only.\n  - Implied multilayer social network via connection counts; total_connections should equal the sum of layer-specific counts (validate/recompute if needed).\n  - No explicit edges or neighbor identities; network topology must be generated from degree counts (e.g., configuration model) and optionally homophily (age_group, occupation).\n\n- How to inform simulation entities/interactions:\n  - Agent initialization:\n    - Set each agent\u2019s state: mask_wearing = initial_mask_wearing.\n    - Assign attributes: risk_perception, age_group, occupation for heterogeneity in thresholds/influence.\n  - Network construction:\n    - Build a multilayer graph with three layers: family, work/school, community.\n    - Use the per-layer degree counts as target degrees for stub-matching; ensure total degree consistency across agents per layer.\n    - Optionally bias edge wiring by homophily (same age_group/occupation) and enforce role constraints (e.g., Students receive work/school ties; retirees fewer).\n  - Interaction dynamics:\n    - Influence/update rules use:\n      - Neighbor mask-wearing fraction per layer with layer-specific weights (e.g., family > work > community).\n      - Agent risk_perception to modulate adoption probability/threshold.\n      - Demographics to adjust susceptibility/influence (e.g., Students higher work/school exposure).\n    - initial_mask_wearing seeds early adopters for diffusion.\n  - Metrics:\n    - Track adoption over time overall and by layer/demographic; degree distributions derived from connection counts."
+    },
+    "social_network.json": {
+      "file_type": "json",
+      "data_type": "object",
+      "length": 1000,
+      "sample_data": {
+        "0": {
+          "family": [
+            80,
+            500,
+            122
+          ],
+          "work_school": [
+            1,
+            998,
+            5,
+            994
+          ],
+          "community": [
+            879,
+            712,
+            900,
+            533,
+            624,
+            691,
+            69,
+            315,
+            379,
+            647,
+            847
+          ],
+          "all": [
+            80,
+            500,
+            122,
+            1,
+            998,
+            5,
+            994,
+            879,
+            712,
+            900,
+            533,
+            624,
+            691,
+            69,
+            315,
+            379,
+            647,
+            847
+          ]
+        },
+        "1": {
+          "family": [
+            534,
+            441,
+            760
+          ],
+          "work_school": [
+            0,
+            5,
+            8,
+            998
+          ],
+          "community": [
+            729,
+            55,
+            955,
+            975,
+            453,
+            68,
+            246,
+            281,
+            400,
+            606,
+            900,
+            910
+          ],
+          "all": [
+            534,
+            441,
+            760,
+            0,
+            5,
+            8,
+            998,
+            729,
+            55,
+            955,
+            975,
+            453,
+            68,
+            246,
+            281,
+            400,
+            606,
+            900,
+            910
+          ]
+        },
+        "2": {
+          "family": [
+            655,
+            771,
+            294,
+            206
+          ],
+          "work_school": [
+            15,
+            973,
+            49,
+            971,
+            951
+          ],
+          "community": [
+            995,
+            868,
+            780,
+            116,
+            111,
+            807,
+            630,
+            629,
+            76,
+            352,
+            430,
+            438,
+            846
+          ],
+          "all": [
+            655,
+            771,
+            294,
+            206,
+            15,
+            973,
+            49,
+            971,
+            951,
+            995,
+            868,
+            780,
+            116,
+            111,
+            807,
+            630,
+            629,
+            76,
+            352,
+            430,
+            438,
+            846
+          ]
+        },
+        "3": {
+          "family": [
+            277,
+            968
+          ],
+          "work_school": [
+            6,
+            999,
+            9,
+            993
+          ],
+          "community": [
+            847,
+            579,
+            45,
+            523,
+            110,
+            123,
+            261,
+            264,
+            394,
+            602,
+            790,
+            960
+          ],
+          "all": [
+            277,
+            968,
+            6,
+            999,
+            9,
+            993,
+            847,
+            579,
+            45,
+            523,
+            110,
+            123,
+            261,
+            264,
+            394,
+            602,
+            790,
+            960
+          ]
+        },
+        "4": {
+          "family": [
+            252,
+            320,
+            172,
+            438,
+            945
+          ],
+          "work_school": [
+            7,
+            997,
+            10,
+            996
+          ],
+          "community": [
+            652,
+            123,
+            898,
+            214,
+            939,
+            376,
+            76,
+            196,
+            231,
+            519,
+            566
+          ],
+          "all": [
+            252,
+            320,
+            172,
+            438,
+            945,
+            7,
+            997,
+            10,
+            996,
+            652,
+            123,
+            898,
+            214,
+            939,
+            376,
+            76,
+            196,
+            231,
+            519,
+            566
+          ]
+        },
+        "5": {
+          "family": [
+            586,
+            42,
+            126
+          ],
+          "work_school": [
+            0,
+            1,
+            8,
+            301
+          ],
+          "community": [
+            753,
+            306,
+            733,
+            459,
+            788,
+            525,
+            27,
+            95,
+            312,
+            356,
+            361,
+            542,
+            574,
+            825,
+            837,
+            857,
+            903,
+            941
+          ],
+          "all": [
+            586,
+            42,
+            126,
+            0,
+            1,
+            8,
+            301,
+            753,
+            306,
+            733,
+            459,
+            788,
+            525,
+            27,
+            95,
+            312,
+            356,
+            361,
+            542,
+            574,
+            825,
+            837,
+            857,
+            903,
+            941
+          ]
+        },
+        "6": {
+          "family": [
+            656
+          ],
+          "work_school": [
+            3,
+            9,
+            18,
+            999,
+            534
+          ],
+          "community": [
+            756,
+            897,
+            105,
+            161,
+            668,
+            376,
+            346,
+            844,
+            219,
+            246,
+            355,
+            624,
+            640,
+            646,
+            777
+          ],
+          "all": [
+            656,
+            3,
+            9,
+            18,
+            999,
+            534,
+            756,
+            897,
+            105,
+            161,
+            668,
+            376,
+            346,
+            844,
+            219,
+            246,
+            355,
+            624,
+            640,
+            646,
+            777
+          ]
+        },
+        "7": {
+          "family": [
+            641,
+            546
+          ],
+          "work_school": [
+            4,
+            10,
+            166,
+            407
+          ],
+          "community": [
+            128,
+            875,
+            210,
+            454,
+            999,
+            430,
+            86,
+            126,
+            175,
+            257,
+            358,
+            517,
+            922
+          ],
+          "all": [
+            641,
+            546,
+            4,
+            10,
+            166,
+            407,
+            128,
+            875,
+            210,
+            454,
+            999,
+            430,
+            86,
+            126,
+            175,
+            257,
+            358,
+            517,
+            922
+          ]
+        },
+        "8": {
+          "family": [
+            713,
+            923,
+            930
+          ],
+          "work_school": [
+            1,
+            5,
+            11,
+            14,
+            789
+          ],
+          "community": [
+            256,
+            861,
+            835,
+            490,
+            354,
+            81,
+            154,
+            346,
+            369,
+            483,
+            620,
+            786,
+            889,
+            971
+          ],
+          "all": [
+            713,
+            923,
+            930,
+            1,
+            5,
+            11,
+            14,
+            789,
+            256,
+            861,
+            835,
+            490,
+            354,
+            81,
+            154,
+            346,
+            369,
+            483,
+            620,
+            786,
+            889,
+            971
+          ]
+        },
+        "9": {
+          "family": [
+            340,
+            341
+          ],
+          "work_school": [
+            3,
+            6,
+            18,
+            19
+          ],
+          "community": [
+            524,
+            180,
+            92,
+            277,
+            388,
+            739,
+            779,
+            82,
+            255,
+            298,
+            335,
+            357,
+            395,
+            415,
+            557,
+            606,
+            658,
+            831
+          ],
+          "all": [
+            340,
+            341,
+            3,
+            6,
+            18,
+            19,
+            524,
+            180,
+            92,
+            277,
+            388,
+            739,
+            779,
+            82,
+            255,
+            298,
+            335,
+            357,
+            395,
+            415,
+            557,
+            606,
+            658,
+            831
+          ]
+        }
+      },
+      "value_structure": {
+        "type": "dict",
+        "sample_value": {
+          "family": [
+            80,
+            500,
+            122
+          ],
+          "work_school": [
+            1,
+            998,
+            5,
+            994
+          ],
+          "community": [
+            879,
+            712,
+            900,
+            533,
+            624,
+            691,
+            69,
+            315,
+            379,
+            647,
+            847
+          ],
+          "all": [
+            80,
+            500,
+            122,
+            1,
+            998,
+            5,
+            994,
+            879,
+            712,
+            900,
+            533,
+            624,
+            691,
+            69,
+            315,
+            379,
+            647,
+            847
+          ]
+        }
+      },
+      "file_semantic_summary": "Semantic metadata summary for social_network.json\n\nOverall data structure and type\n- JSON object (dictionary) keyed by agent IDs as strings (e.g., \"0\", \"1\"). IDs map to integer node IDs; range appears to be 0\u2013999.\n- Each value is an object containing four adjacency lists: family, work_school, community, and all. Elements are integer IDs of other agents.\n- The all list is the union of the three context-specific lists (may contain duplicates in source; treat as a set).\n\nRelationships or nested elements\n- Multiplex network: three explicit relationship layers (family, work/school, community) representing tie types/contexts.\n- Edges are stored as per-node adjacency lists; reciprocity (undirected symmetry) is not guaranteed and may need enforcement or acceptance as directed ties.\n- No edge weights or timestamps; tie strength is implied by context only.\n- Possible overlaps across layers (an alter could be both family and co-worker), though not evident in the sample; do not assume disjointness.\n- Variable degree per layer; community lists tend to be larger, family smaller.\n\nHow this data should inform simulation entities or interactions\n- Agents: one per node ID. State includes mask-wearing status (binary or probabilistic), susceptibility/threshold, and possibly context-specific behaviors.\n- Interaction topology: use the three layers to schedule contacts and influence. Weight contact frequency or influence strength by layer (e.g., family > work/school > community).\n- Dynamics:\n  - Use all for aggregate peer influence when context is not modeled explicitly; otherwise sample interactions per layer according to a daily/weekly schedule.\n  - Choose a diffusion model (e.g., independent cascade with context-specific transmission probabilities, or threshold model with layer-weighted neighbor adoption).\n- Preprocessing: convert keys to ints; de-duplicate neighbors; optionally enforce undirected edges; precompute neighbor sets per layer and degrees for efficiency.\n- Seeding and interventions: select initial adopters and apply context-targeted policies (e.g., workplace mandates) by altering layer-specific adoption probabilities or exposure schedules.\n- Metrics: track adoption over time overall and by layer/degree; examine cascade size and layer contributions."
+    },
+    "train_data.csv": {
+      "file_type": "csv",
+      "row_count": 30000,
+      "column_count": 4,
+      "columns": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 30000 entries, 0 to 29999\nData columns (total 4 columns):\n #   Column         Non-Null Count  Dtype\n---  ------         --------------  -----\n 0   day            30000 non-null  int64\n 1   agent_id       30000 non-null  int64\n 2   wearing_mask   30000 non-null  bool \n 3   received_info  30000 non-null  bool \ndtypes: bool(2), int64(2)\nmemory usage: 527.5 KB\n",
+      "sample_data": [
+        {
+          "day": 0,
+          "agent_id": 0,
+          "wearing_mask": false,
+          "received_info": false
+        },
+        {
+          "day": 1,
+          "agent_id": 0,
+          "wearing_mask": true,
+          "received_info": false
+        },
+        {
+          "day": 2,
+          "agent_id": 0,
+          "wearing_mask": true,
+          "received_info": false
+        },
+        {
+          "day": 3,
+          "agent_id": 0,
+          "wearing_mask": false,
+          "received_info": false
+        },
+        {
+          "day": 4,
+          "agent_id": 0,
+          "wearing_mask": false,
+          "received_info": false
+        },
+        {
+          "day": 5,
+          "agent_id": 0,
+          "wearing_mask": true,
+          "received_info": false
+        },
+        {
+          "day": 6,
+          "agent_id": 0,
+          "wearing_mask": false,
+          "received_info": false
+        },
+        {
+          "day": 7,
+          "agent_id": 0,
+          "wearing_mask": true,
+          "received_info": false
+        },
+        {
+          "day": 8,
+          "agent_id": 0,
+          "wearing_mask": false,
+          "received_info": false
+        },
+        {
+          "day": 9,
+          "agent_id": 0,
+          "wearing_mask": false,
+          "received_info": false
+        }
+      ],
+      "dtypes": {
+        "day": "int64",
+        "agent_id": "int64",
+        "wearing_mask": "bool",
+        "received_info": "bool"
+      },
+      "file_semantic_summary": "Semantic metadata summary for train_data.csv\n\nOverall data structure and type\n- Format: CSV (sample shown as JSON records for readability)\n- Granularity: panel/longitudinal time series at daily resolution\n- Schema:\n  - day: integer (time index)\n  - agent_id: integer (entity identifier)\n  - wearing_mask: boolean (agent behavioral state)\n  - received_info: boolean (agent information/exposure state)\n- One row per agent per day; no nested fields\n\nRelationships or nested elements\n- Flat schema with a composite key (agent_id, day)\n- Temporal dependency within agent trajectories (state at day t influences day t+1)\n- Two binary state variables per agent:\n  - received_info may act as a precursor/modulator for wearing_mask adoption\n  - wearing_mask can switch over time even without received_info (as in sample), indicating baseline adoption/abandonment dynamics\n- No explicit social network structure included; edges/contacts must be provided elsewhere or synthesized\n\nHow this data should inform simulation entities or interactions\n- Agents: nodes with two binary states: wearing_mask and received_info\n- Time step: daily updates\n- Initialization: set initial states from earliest day per agent\n- Dynamics/calibration:\n  - Estimate transition probabilities:\n    - P(received_info_t+1 | received_info_t, exogenous factors)\n    - P(wearing_mask_t+1 | wearing_mask_t, received_info_t, possibly neighbor influence)\n  - Capture baseline adoption/abandonment (when received_info = false) and the uplift when received_info = true\n- Interactions:\n  - Information diffusion process: received_info propagates over the social network (not in file; define/generate network and contagion rules)\n  - Behavioral contagion: wearing_mask adoption influenced by own prior state, info state, and neighbors\u2019 states\n- Validation: compare simulated panel outputs to observed trajectories (marginal rates over time, persistence, switching rates, and conditional effects of received_info)"
+    }
+  }
+}

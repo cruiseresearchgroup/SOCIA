@@ -1,0 +1,495 @@
+{
+  "model_type": "agent_based",
+  "description": "A multiplex networked agent-based model of mask-wearing behavior diffusion with social influence, information propagation, and policy enforcement. Calibrated on days 0-29 and used to predict days 30-39.",
+  "entities": [
+    {
+      "name": "Individual",
+      "attributes": [
+        "id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception (0-1)",
+        "trust_authority (0-1)",
+        "susceptibility_to_influence (0-1)",
+        "conformity_preference (0-1)",
+        "mask_state (0/1)",
+        "mask_attitude (0-1)",
+        "compliance_fatigue (0-1)",
+        "misinformation_belief (0-1)",
+        "daily_contact_mean",
+        "home_loc_id",
+        "work_school_loc_id",
+        "neighbor_ids_by_layer {family, work_school, community}"
+      ],
+      "behaviors": [
+        "decide_mask_wearing",
+        "interact_with_neighbors",
+        "update_risk_and_trust",
+        "receive_and_process_information",
+        "move_between_locations",
+        "respond_to_policy_and_enforcement",
+        "pay_fine_if_caught_noncompliant"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "source": "agent_attributes.csv and train_data.csv day 0 if present",
+          "fallback_mask_state": "agent_attributes.initial_mask_wearing if panel day 0 missing",
+          "impute_missing": "group_median for degrees; Beta-fit for risk_perception if missing",
+          "normalize_prefs": "clip all propensity fields to [0,1]"
+        }
+      }
+    },
+    {
+      "name": "Location",
+      "attributes": [
+        "id",
+        "type (home/work_school/public/transport/retail)",
+        "capacity",
+        "mask_policy (none/recommend/mandate)",
+        "enforcement_strength (0-1)",
+        "inspection_probability (0-1)",
+        "contact_multiplier (relative to home=1.0)",
+        "ventilation_factor (0-1)"
+      ],
+      "behaviors": [
+        "host_contacts",
+        "apply_mask_policy (remind/inspect/fine)"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "mix": {
+            "home": 0.4,
+            "work_school": 0.35,
+            "public": 0.25
+          },
+          "contact_multipliers": {
+            "home": 1.0,
+            "work_school": 1.5,
+            "public": 2.0
+          },
+          "ventilation_factor_public": 0.8,
+          "policy_defaults": "derived from parameters.policy"
+        }
+      }
+    },
+    {
+      "name": "Governance",
+      "attributes": [
+        "policy_level (none/recommend/mandate)",
+        "policy_start_day",
+        "enforcement_budget",
+        "fine_amount",
+        "awareness_strength (0-1)",
+        "targeting_strategy (by_location/by_group)"
+      ],
+      "behaviors": [
+        "publish_adjust_policy",
+        "allocate_enforcement_resources",
+        "conduct_public_information_campaigns"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "policy_level": "recommend",
+          "policy_start_day": 10,
+          "enforcement_budget": 10000,
+          "fine_amount": 50,
+          "awareness_strength": 0.5,
+          "targeting_strategy": "by_location"
+        }
+      }
+    },
+    {
+      "name": "MediaChannel",
+      "attributes": [
+        "reach (0-1)",
+        "bias (pro/neutral/anti)",
+        "misinformation_rate (0-1)",
+        "broadcast_frequency_per_day",
+        "effect_strength (info impact weight)"
+      ],
+      "behaviors": [
+        "broadcast_information",
+        "influence_beliefs_and_attitudes"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "pro_mask_reach": 0.7,
+          "pro_mask_effect_size": 0.1,
+          "misinformation_prevalence": 0.2,
+          "misinformation_effect_size": 0.08,
+          "broadcast_frequency_per_day": 1
+        }
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "decide_mask_wearing",
+      "description": "Stochastic adoption/cessation decision each day based on habit, social influence by layer, information receipt, risk/trust, policy, and fatigue.",
+      "applicable_to": [
+        "Individual"
+      ],
+      "parameters": {
+        "alpha0": "baseline log-odds intercept",
+        "phi": "habit persistence weight",
+        "gamma_risk": "risk_perception weight",
+        "beta_family": "neighbor masked fraction weight (family)",
+        "beta_work": "neighbor masked fraction weight (work_school)",
+        "beta_comm": "neighbor masked fraction weight (community)",
+        "psi_info": "info effect (with lag L)",
+        "policy_shift": "increment under mandate/recommend",
+        "innovation_rate": 0.001,
+        "de_adoption_rate": 0.0005,
+        "temperature": 0.1
+      },
+      "algorithm": "For agent i at day t: 1) Compute f_family, f_work, f_comm = masked_fraction among neighbors per layer. 2) Determine received_info flag using info algorithm (possibly lagged by L). 3) Compute logit z = alpha0 + phi*(wear_{t-1}) + gamma_risk*(risk_i - mean_risk) + beta_family*f_family + beta_work*f_work + beta_comm*f_comm + psi_info*received_info_{t-L} + policy_shift(t,i) - fatigue_penalty(i,t). 4) Convert to probability p = 1/(1+exp(-z)). 5) If wear_{t-1}=0, adopt with probability p + innovation_rate; if wear_{t-1}=1, continue with probability p*(1 - de_adoption_rate). Draw Bernoulli to set wear_t."
+    },
+    {
+      "name": "interact_with_neighbors",
+      "description": "Layer-weighted daily contacts producing visibility of norms and opportunities for information spread.",
+      "applicable_to": [
+        "Individual"
+      ],
+      "parameters": {
+        "layer_contact_frequency_weights": {
+          "family": 0.5,
+          "work_school": 0.35,
+          "community": 0.15
+        }
+      },
+      "algorithm": "Sample contacts per layer proportionally to layer_contact_frequency_weights times location contact_multipliers; observe neighbor mask states to compute masked fractions; pass exposures to info algorithm."
+    },
+    {
+      "name": "receive_and_process_information",
+      "description": "Convert social exposures and media/governance broadcasts into received_info events and update beliefs.",
+      "applicable_to": [
+        "Individual"
+      ],
+      "parameters": {
+        "kappa_info_conversion": "exposure-to-info scaling",
+        "exogenous_info_rate": "base info without network",
+        "media_effect_sizes": {
+          "pro_mask": 0.1,
+          "misinfo": 0.08
+        },
+        "lag_L": 0
+      },
+      "algorithm": "Compute exposure score s = sum_L w_L * f_L; p_network = 1 - exp(-kappa_info_conversion * s). Media/governance: p_media = pro_mask_reach*pro_mask_effect_size*(1 - misinformation_prevalence) adjusted by trust_authority; p_info = 1 - (1 - p_network)*(1 - exogenous_info_rate)*(1 - p_media). Draw Bernoulli received_info_t ~ Bernoulli(p_info). Update risk_perception and misinformation_belief accordingly."
+    },
+    {
+      "name": "update_risk_and_trust",
+      "description": "Belief dynamics influenced by external risk signal and authority/media messages.",
+      "applicable_to": [
+        "Individual"
+      ],
+      "parameters": {
+        "risk_perception_update_rate": 0.1,
+        "trust_update_rate": 0.05,
+        "external_risk_signal": {
+          "enabled": true,
+          "baseline": 0.3,
+          "volatility": 0.05
+        }
+      },
+      "algorithm": "external_risk_t follows mean-reverting random walk around baseline with volatility. risk_i(t) = risk_i(t-1) + risk_perception_update_rate*(external_risk_t - risk_i(t-1)) + trust_update_rate*trust_authority*(received_info_t - misinformation_belief_effect). Clip to [0,1]."
+    },
+    {
+      "name": "respond_to_policy_and_enforcement",
+      "description": "Mandates alter adoption propensity; inspections can trigger fines and future compliance.",
+      "applicable_to": [
+        "Individual",
+        "Location",
+        "Governance"
+      ],
+      "parameters": {
+        "policy_level": "recommend or mandate",
+        "enforcement_probability": 0.3,
+        "fine_amount": 50,
+        "enforcement_budget": 10000
+      },
+      "algorithm": "If policy active (t >= policy_start_day): policy_shift adds to adoption log-odds (recommend small, mandate larger). During time spent at mandated locations, if not wearing, detect with probability enforcement_probability * location.enforcement_strength, constrained by remaining enforcement_budget. If detected: record fine, set short-term compliance boost (e.g., increase phi or force wearing for remainder of day and next day), decrement budget."
+    },
+    {
+      "name": "move_between_locations",
+      "description": "Daily schedule across home/work_school/public determines contact context.",
+      "applicable_to": [
+        "Individual"
+      ],
+      "parameters": {
+        "mix": {
+          "home": 0.4,
+          "work_school": 0.35,
+          "public": 0.25
+        }
+      },
+      "algorithm": "Assign fractions of a day to location types using mix; modulate contacts by contact_multipliers; for non-working/non-student occupations, shift work_school time to public."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "social_influence",
+      "description": "Layer-specific normative and informational influence via masked neighbor fractions.",
+      "entities_involved": [
+        "Individual",
+        "Individual"
+      ],
+      "trigger": "time",
+      "effect": "Updates adoption propensity via beta_family/beta_work/beta_comm and contributes to info exposures."
+    },
+    {
+      "name": "location_contacts_and_norms",
+      "description": "Contacts within shared locations, with visible norms and immediate pressure.",
+      "entities_involved": [
+        "Individual",
+        "Location"
+      ],
+      "trigger": "time",
+      "effect": "Adjusts masked neighbor fractions and may temporarily boost compliance at high-policy-strength locations."
+    },
+    {
+      "name": "policy_compliance_and_enforcement",
+      "description": "Inspections and fines influence future compliance.",
+      "entities_involved": [
+        "Individual",
+        "Location",
+        "Governance"
+      ],
+      "trigger": "state and time",
+      "effect": "If non-compliant in mandated context, possible fine; increases short-run compliance probability."
+    },
+    {
+      "name": "information_broadcast",
+      "description": "Media and governance campaigns shift beliefs and info receipt.",
+      "entities_involved": [
+        "MediaChannel",
+        "Governance",
+        "Individual"
+      ],
+      "trigger": "time",
+      "effect": "Modifies received_info probability and updates risk/trust/misinformation beliefs."
+    },
+    {
+      "name": "innovation_and_dropout",
+      "description": "Spontaneous adoption and cessation at low rates.",
+      "entities_involved": [
+        "Individual"
+      ],
+      "trigger": "time",
+      "effect": "With small probabilities, agents adopt or stop wearing independent of social signals."
+    }
+  ],
+  "environment": {
+    "type": "network_multiplex",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "parameters": {
+    "population_size": 1000,
+    "time_horizon_days": 120,
+    "time_step_days": 1,
+    "random_seed": 42,
+    "network_topology": "small_world",
+    "average_degree": 8,
+    "seed_selection": "random",
+    "initial_adoption_rate": 0.1,
+    "innovation_rate": 0.001,
+    "de_adoption_rate": 0.0005,
+    "social_influence_strength": 1.2,
+    "adoption_threshold": 0.3,
+    "normative_influence_weight": 0.5,
+    "informational_influence_weight": 0.5,
+    "risk_perception_update_rate": 0.1,
+    "trust_update_rate": 0.05,
+    "policy": {
+      "default_level": "recommend",
+      "start_day": 10,
+      "enforcement_probability": 0.3,
+      "fine_amount": 50,
+      "enforcement_budget": 10000
+    },
+    "media": {
+      "pro_mask_reach": 0.7,
+      "pro_mask_effect_size": 0.1,
+      "misinformation_prevalence": 0.2,
+      "misinformation_effect_size": 0.08,
+      "broadcast_frequency_per_day": 1
+    },
+    "locations": {
+      "mix": {
+        "home": 0.4,
+        "work_school": 0.35,
+        "public": 0.25
+      },
+      "contact_multipliers": {
+        "home": 1.0,
+        "work_school": 1.5,
+        "public": 2.0
+      },
+      "ventilation_factor_public": 0.8
+    },
+    "external_risk_signal": {
+      "enabled": true,
+      "baseline": 0.3,
+      "volatility": 0.05
+    },
+    "observation_sampling_days": 7,
+    "behavior_model": {
+      "alpha0": "to_calibrate",
+      "phi": "to_calibrate",
+      "gamma_risk": "to_calibrate",
+      "beta_family": "to_calibrate",
+      "beta_work": "to_calibrate",
+      "beta_comm": "to_calibrate",
+      "psi_info": "to_calibrate",
+      "lag_L": "0_or_1_by_AIC",
+      "kappa_info_conversion": "to_calibrate",
+      "exogenous_info_rate": "to_calibrate",
+      "temperature": 0.1
+    },
+    "network_generation": {
+      "use_empirical_network": true,
+      "symmetrization": "undirected_if_either_direction",
+      "triadic_closure_probability": 0.1,
+      "assortativity_targets": {
+        "age_group": "match_empirical",
+        "occupation": "match_empirical"
+      }
+    }
+  },
+  "initialization": {
+    "population_size": "len(agent_attributes.csv)",
+    "random_seed": 42,
+    "network_build": "from social_network.json if present; else configuration model per layer using degree columns",
+    "symmetrize_rule": "OR (edge present if either direction exists); remove self-loops and duplicates",
+    "validate": [
+      "total_connections == sum of layer degrees",
+      "adoption rate at t0 matches data",
+      "network connectivity and clustering within expected ranges"
+    ],
+    "state_setup": "Set mask_state from train_data.csv day 0 if available; else from agent_attributes.initial_mask_wearing",
+    "belief_setup": "Initialize risk_perception/trust_authority from agent_attributes; if missing, draw from fitted Beta distributions"
+  },
+  "algorithms": {
+    "network_symmetrization": "For each agent, for each layer, add undirected edge between i and j if i lists j or j lists i. Remove self loops and duplicates. Validate all-layer union.",
+    "daily_schedule_and_contacts": "For each agent and day, allocate time to home/work_school/public by mix. Effective contacts per layer scale by contact_multipliers. Compute masked neighbor fractions f_L.",
+    "information_propagation": "Compute exposure score s = sum_L w_L * f_L; convert to info probability p_network = 1 - exp(-kappa*s). Combine with exogenous_info_rate and media/governance probabilities to get received_info_t.",
+    "adoption_update": "Logistic decision with parameters {alpha0, phi, gamma_risk, beta_L, psi_info, policy_shift} and innovation/de-adoption rates; draw Bernoulli to set mask_state.",
+    "policy_enforcement": "If mandate at active locations: for non-wearers, with probability enforcement_probability*location.enforcement_strength and budget available, issue fine and set compliance_boost for next d days; update enforcement counters.",
+    "risk_trust_update": "External risk follows bounded random walk around baseline with volatility. Update individual risk via convex combination with external_risk and info signals; update trust slowly via governance/media exposure.",
+    "calibration": "Two-stage: (1) Build/symmetrize network. (2) Fit discrete-time logit/hazard on train_data days 0-29: wear_t ~ wear_{t-1} + risk + f_family + f_work + f_comm + received_info_{t-L} + controls(age_group, occupation). Choose L\u2208{0,1} by AIC. Tune kappa and layer weights via simulated method of moments to match macro adoption curve and time-to-50%.",
+    "prediction": "Initialize at day 30 with observed states from train_data if provided; else roll forward from day 29. Simulate behaviors days 30-39 using calibrated parameters and realized external risk/media/policy processes.",
+    "metrics_computation": "For days 30-39, compute population adoption rate per day. RMSE = sqrt(mean((predicted - actual)^2)). Peak Adoption Rate Error = abs(pred_peak - actual_peak). Time-to-Peak Error = abs(pred_peak_day - actual_peak_day)."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agent demographics, beliefs, and degree counts; set initial mask state if needed",
+      "fields_used": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "initial_mask_wearing",
+        "family_connections",
+        "work_school_connections",
+        "community_connections",
+        "total_connections"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Construct multiplex network layers and neighbor sets",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Fit behavior dynamics and initialize time series; provide ground truth for days 0-29 and possible day 30 initial states",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.yaml",
+        "description": "Configuration for parameters, policy schedule, and file paths"
+      },
+      {
+        "name": "data_loading.py",
+        "description": "Parse CSV/JSON, type validation, imputation, and preprocessing"
+      },
+      {
+        "name": "network_builder.py",
+        "description": "Build and symmetrize multiplex network from social_network.json or degrees"
+      },
+      {
+        "name": "agents.py",
+        "description": "Agent, Location, Governance, MediaChannel classes and state containers"
+      },
+      {
+        "name": "behaviors.py",
+        "description": "Implement decision rules: information, adoption, risk/trust update, enforcement"
+      },
+      {
+        "name": "simulation.py",
+        "description": "Main simulation loop, scheduling, layer contact computation, logging"
+      },
+      {
+        "name": "calibration.py",
+        "description": "Fit logit/hazard models, choose lag L, tune kappa and layer weights via SMM/ABC"
+      },
+      {
+        "name": "evaluation.py",
+        "description": "Compute RMSE, Peak Adoption Rate Error, Time-to-Peak Error over prediction window"
+      },
+      {
+        "name": "metrics.py",
+        "description": "Utility functions for time series metrics and aggregation"
+      },
+      {
+        "name": "run_experiment.py",
+        "description": "Command-line entry point to run calibration, simulation, and evaluation"
+      },
+      {
+        "name": "utils.py",
+        "description": "Random seeds, reproducibility, clipping, logistic helpers"
+      }
+    ],
+    "dependencies": [
+      "python>=3.10",
+      "pandas",
+      "numpy",
+      "networkx",
+      "scipy",
+      "statsmodels",
+      "scikit-learn",
+      "pyyaml",
+      "tqdm"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "Peak Adoption Rate Error",
+    "Time-to-Peak Error"
+  ]
+}

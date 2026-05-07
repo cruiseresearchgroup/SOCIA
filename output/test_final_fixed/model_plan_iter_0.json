@@ -1,0 +1,337 @@
+{
+  "model_type": "agent_based",
+  "description": "Multiplex network agent-based simulation of mask-wearing behavior with endogenous information diffusion and government intervention. Calibrated on days 0\u201329; predicts days 30\u201339.",
+  "entities": [
+    {
+      "name": "Agent",
+      "attributes": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "degree_family",
+        "degree_work_school",
+        "degree_community",
+        "neighbors_family",
+        "neighbors_work_school",
+        "neighbors_community",
+        "mask_state",
+        "received_info_today",
+        "received_info_yesterday"
+      ],
+      "behaviors": [
+        "update_info_state",
+        "compute_peer_exposure",
+        "adopt_mask",
+        "drop_mask"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "seed_mask_from": "train_data_day0_if_available_else_agent_attributes.initial_mask_wearing",
+          "risk_perception_source": "agent_attributes.csv",
+          "network_source": "social_network.json",
+          "symmetrize_mode": "undirected"
+        }
+      }
+    },
+    {
+      "name": "Government",
+      "attributes": [
+        "intervention_day",
+        "lambda_multiplier",
+        "beta_info_multiplier",
+        "peer_weight_multiplier",
+        "p_drop_multiplier"
+      ],
+      "behaviors": [
+        "broadcast_guidance"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "intervention_day": 10,
+          "lambda_multiplier": 2.0,
+          "beta_info_multiplier": 1.0,
+          "peer_weight_multiplier": 1.1,
+          "p_drop_multiplier": 0.9
+        }
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "update_info_state",
+      "description": "Agents receive information from exogenous broadcast and from informed neighbors via independent cascade on each layer.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "lambda_external_base": "mean(received_info) from train_data (days 0\u201329)",
+        "tau_family": "to_calibrate (>= tau_work_school >= tau_community)",
+        "tau_work_school": "to_calibrate",
+        "tau_community": "to_calibrate",
+        "interaction_rates": {
+          "family": 0.8,
+          "work_school": 1.5,
+          "community": 1.0
+        },
+        "use_observed_info_during_training": true
+      },
+      "algorithm": "For day t: if training and t <= 29 and use_observed_info_during_training, set received_info_today from train_data. Else: 1) Exogenous info: Bernoulli(lambda_t) where lambda_t = lambda_external_base * (lambda_multiplier if t >= intervention_day else 1). 2) Peer info: For each layer L, compute probability of receiving info from informed neighbors: p_peer_L = 1 - \u03a0_{k in neighbors_L with info}(1 - tau_L). Optionally scale tau_L by interaction_rates[L]. Agent is informed today if Bernoulli(1 - (1 - p_exog) * \u03a0_L (1 - p_peer_L)) = 1. Set received_info_yesterday = received_info_today at end of day."
+    },
+    {
+      "name": "compute_peer_exposure",
+      "description": "Compute weighted share of masked neighbors across layers.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "layer_weights": {
+          "family": 1.0,
+          "work_school": 0.6,
+          "community": 0.3
+        },
+        "symmetrize_mode": "undirected | out | in"
+      },
+      "algorithm": "For each layer L in {family, work_school, community}, compute masked_share_L = (# masked neighbors in L) / max(1, degree_L). Exposure E = \u03a3_L w_L * masked_share_L. If t >= intervention_day, optionally multiply w_L by peer_weight_multiplier."
+    },
+    {
+      "name": "adopt_mask",
+      "description": "Previously unmasked agents adopt based on info, peer exposure, risk, and baseline hazard.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "alpha0": "baseline intercept calibrated so that adoption without info and peers matches p_on_noinfo",
+        "beta_info": "derived from transitions: log(OR_info) using p_on_info vs p_on_noinfo",
+        "beta_peer": "to_calibrate",
+        "beta_risk": "risk_susceptibility_scaler (alpha_risk) to_calibrate; start 1.0",
+        "center_risk_at_mean": true
+      },
+      "algorithm": "If mask_state_{t-1} = 0: compute E via compute_peer_exposure. Let r = risk_perception - mean_risk. Compute logit p_on = alpha0 + beta_info * (received_info_today) + beta_peer * E + beta_risk * r. If t >= intervention_day, multiply beta_info by beta_info_multiplier. Adopt with Bernoulli(sigmoid(p_on))."
+    },
+    {
+      "name": "drop_mask",
+      "description": "Previously masked agents may stop masking with probability p_drop (optionally reduced by info or peer exposure).",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "p_drop_base": "P(Mt=0 | Mt-1=1) from train_data",
+        "eta_info": 0.0,
+        "eta_peer": 0.0
+      },
+      "algorithm": "If mask_state_{t-1} = 1: compute p_off = p_drop_base * (p_drop_multiplier if t >= intervention_day else 1). Optionally set p_off = p_off * exp(-eta_info * received_info_today - eta_peer * E). Drop with Bernoulli(p_off)."
+    },
+    {
+      "name": "broadcast_guidance",
+      "description": "Government modifies information environment and behavioral responsiveness starting on intervention_day.",
+      "applicable_to": [
+        "Government"
+      ],
+      "parameters": {
+        "intervention_day": 10,
+        "lambda_multiplier": 2.0,
+        "beta_info_multiplier": 1.0,
+        "peer_weight_multiplier": 1.1,
+        "p_drop_multiplier": 0.9
+      },
+      "algorithm": "For t >= intervention_day, set global multipliers for lambda_external, layer_weights, beta_info, and p_drop applied in the respective behaviors."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "SocialInfluence",
+      "description": "Neighbor mask states increase adoption hazard for unmasked agents via weighted exposure.",
+      "entities_involved": [
+        "Agent",
+        "Agent"
+      ],
+      "trigger": "time",
+      "effect": "Increase in log-odds of adoption proportional to beta_peer * exposure."
+    },
+    {
+      "name": "InfoTransmission",
+      "description": "Informed agents transmit information to neighbors with per-layer probabilities.",
+      "entities_involved": [
+        "Agent",
+        "Agent"
+      ],
+      "trigger": "time",
+      "effect": "Receiver\u2019s received_info_today toggled with probability derived from tau_L and number of informed neighbors."
+    },
+    {
+      "name": "GovernmentBroadcast",
+      "description": "Exogenous increase in information and/or adherence after intervention.",
+      "entities_involved": [
+        "Government",
+        "Agent"
+      ],
+      "trigger": "time",
+      "effect": "Adjust global multipliers affecting info arrival rate, peer weight, and drop probability."
+    }
+  ],
+  "environment": {
+    "type": "network_multiplex",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "parameters": {
+    "symmetrize_mode": "undirected",
+    "exogenous_noise_flip": 0.005,
+    "alpha0": "calibrated",
+    "beta_info": "derived_from_transitions",
+    "beta_peer": "to_calibrate",
+    "beta_risk": 1.0,
+    "p_on_noinfo": "from_train_data",
+    "p_on_info": "from_train_data",
+    "p_drop_base": "from_train_data",
+    "lambda_external_base": "from_train_data",
+    "tau_per_layer": {
+      "family": "to_calibrate",
+      "work_school": "to_calibrate",
+      "community": "to_calibrate"
+    },
+    "interaction_rates": {
+      "family": 0.8,
+      "work_school": 1.5,
+      "community": 1.0
+    },
+    "layer_weights": {
+      "family": 1.0,
+      "work_school": 0.6,
+      "community": 0.3
+    },
+    "intervention": {
+      "intervention_day": 10,
+      "lambda_multiplier": 2.0,
+      "beta_info_multiplier": 1.0,
+      "peer_weight_multiplier": 1.1,
+      "p_drop_multiplier": 0.9
+    },
+    "use_observed_info_during_training": true,
+    "use_directed_influence": false
+  },
+  "initialization": {
+    "population_size": 1000,
+    "random_seed": 42,
+    "data_alignment": "restrict to intersection of agent_ids across all files",
+    "mask_state_at_day0": "from train_data day 0 if available else agent_attributes.initial_mask_wearing",
+    "risk_distribution_fit": "Beta(a,b) from agent_attributes",
+    "network_build": "load social_network.json; validate all equals union of layers; apply symmetrize_mode",
+    "warmup_days": 0
+  },
+  "algorithms": {
+    "daily_scheduler": "Synchronous update per day: 1) Government broadcast multipliers (if t>=intervention_day). 2) Update info state for all agents (using observed info if training). 3) Compute peer exposure E for all agents. 4) Update mask states: adopt or drop. 5) Apply exogenous_noise_flip to randomly flip states with small probability. 6) Log outcomes.",
+    "parameter_estimation_step1": "Direct-from-data: compute p_on_noinfo, p_on_info, p_drop, lambda_external_base from train_data (days 0\u201329). Derive beta_info = log(OR_info).",
+    "parameter_estimation_step2": "Logistic regression on train_data (joined to attributes): logit(P(Mt=1 | Mt-1=0)) ~ received_info_t + risk + demographics to refine alpha0 and beta_risk; persistence handled via conditioning on Mt-1.",
+    "simulation_calibration": "Bayesian optimization or ABC-SMC over {beta_peer, tau_per_layer, layer_weights (bounded), beta_risk, exogenous_noise_flip} to minimize weighted objective: RMSE of prevalence + Peak Adoption Rate Error + Time-to-Peak Error on a validation slice within days 0\u201329.",
+    "forecasting": "Run model without observed received_info for days 30\u201339 using endogenous info dynamics and intervention multipliers."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Initialize agent demographics, risk, initial mask states (if train day 0 not used), and degree targets for QC.",
+      "fields_used": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "initial_mask_wearing",
+        "family_connections",
+        "work_school_connections",
+        "community_connections",
+        "total_connections"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Define multiplex adjacency lists (family, work_school, community) for influence and info transmission.",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Calibrate transition probabilities and info rates on days 0\u201329; validate prevalence trajectory; seed states on day 0.",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.yaml",
+        "description": "Holds tunable parameters, intervention settings, symmetrization choice, and file paths."
+      },
+      {
+        "name": "data_loader.py",
+        "description": "Loads CSV/JSON, aligns agent IDs, validates network layers, and constructs per-layer neighbor lists (directed/undirected)."
+      },
+      {
+        "name": "network_utils.py",
+        "description": "Computes degrees, clustering, reciprocity, and mixing matrices; provides exposure computation helpers."
+      },
+      {
+        "name": "model.py",
+        "description": "Defines Agent and Government classes and the core Simulator with daily scheduler."
+      },
+      {
+        "name": "behaviors.py",
+        "description": "Implements update_info_state, compute_peer_exposure, adopt_mask, drop_mask behaviors."
+      },
+      {
+        "name": "calibration.py",
+        "description": "Estimates direct-from-data parameters; runs Bayesian optimization/ABC-SMC for peer and info transmission parameters."
+      },
+      {
+        "name": "evaluation.py",
+        "description": "Computes RMSE, Peak Adoption Rate Error, Time-to-Peak Error; additional diagnostics."
+      },
+      {
+        "name": "run_train.py",
+        "description": "Entry point for calibration and in-sample validation on days 0\u201329."
+      },
+      {
+        "name": "run_forecast.py",
+        "description": "Runs the trained model to predict days 30\u201339 and outputs daily prevalence and agent-level states."
+      },
+      {
+        "name": "utils.py",
+        "description": "Common utilities: random seeds, logging, reproducibility, parameter serialization."
+      }
+    ],
+    "dependencies": [
+      "python>=3.10",
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "scikit-learn",
+      "pyyaml",
+      "tqdm",
+      "joblib",
+      "matplotlib"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "Peak Adoption Rate Error",
+    "Time-to-Peak Error"
+  ]
+}

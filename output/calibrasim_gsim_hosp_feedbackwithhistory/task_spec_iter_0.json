@@ -1,0 +1,930 @@
+{
+  "title": "Simulation Task",
+  "description": "Design a simulator to generate hospital state trajectories for a Three-disease Hospital Environment. A trajectory is an ordered sequence of state dictionaries over time: {state[0], state[1], ..., state[T]} where each state contains hospital bed occupancy and the current in-hospital patient list.",
+  "simulation_focus": "Goal: generate state transition sequences from initial conditions using a parameterized SimulatorStep class.\nKey components:\n(1) Define hospital flow parameters (arrivals, triage/bed assignment, LOS distributions, discharge dynamics) as model parameters.\n(2) Implement step(state[t], rng) that computes state[t+1] from state[t] using stochastic hospital dynamics. There is NO direct external action; each day proceeds as:\n    1) New patients arrive\n    2) The environment attempts to allocate each new arrival to an ICU or Standard bed under capacity/rules\n    3) If no suitable bed is available, the patient is not admitted\n(3) Parameters are optimized via Simulation-Based Inference (SBI) using NPE to fit observed training trajectories.\n(4) The simulator must enforce bed capacity constraints and keep occupancy consistent with the patient list.\n(5) The observed training dataset has very few samples; the model must generalize to unseen trajectories (validation/test).\n\nImplementation note (matches the provided HOSP SBI pipeline): the SBI observation and simulator outputs are NOT the raw patient list; instead they use a fixed 7-D per-time-step summary produced by trajectories_to_numpy().",
+  "data_folder": "data_fitting/calibrasim_hosp/",
+  "data_files": {
+    "train_seed_10_n_100.csv": "Hospital environment training trajectories (100 independent trajectories). CSV columns: trajectory_id (0-99), time_step (0-60), day (0-60; duplicates time_step), icu_occupancy (int), standard_occupancy (int), patients (JSON string of a list). Each patient dict has keys: disease_id in {0,1,2}, bed_type in {\"ICU\",\"Standard\"}, los_remaining (int), is_alive (bool), day_in_hospital (int). IMPORTANT: For SBI training, ONLY use the first trajectory (train_states[0], trajectory_id=0) as observation x_o and as the rollout starting point inside the SBI simulator wrapper. Final evaluation uses ALL trajectories from train/val/test.",
+    "val_seed_10_n_100.csv": "Hospital environment validation trajectories. Same schema/columns as training. Used for validation loss reporting and per-dimension MSE (7 dimensions).",
+    "test_seed_10_n_100.csv": "Hospital environment test trajectories. Same schema/columns as training. Used ONLY for final evaluation after all training/selection."
+  },
+  "evaluation_metrics": {
+    "mse": {
+      "description": "Mean Squared Error between generated and ground-truth trajectories computed over the 7-D per-time-step summary produced by trajectories_to_numpy(). The 7 dimensions are:\n[day, icu_occupancy, standard_occupancy, disease0_alive, disease1_alive, disease2_alive, total_alive].\nMSE is averaged over all time steps and trajectories in a dataset split. Lower is better."
+    },
+    "mse_per_dimension": {
+      "description": "Per-dimension MSE computed separately for each of the 7 dimensions from trajectories_to_numpy(). Returns a dictionary keyed by these dimensions (or an ordered list mapped to them):\n{\"day\": mse_day, \"icu_occupancy\": mse_icu, \"standard_occupancy\": mse_std, \"d0_alive\": mse_d0, \"d1_alive\": mse_d1, \"d2_alive\": mse_d2, \"total_alive\": mse_total}.\nLower is better for each dimension."
+    },
+    "train_loss": {
+      "description": "Loss metrics (overall MSE, and optional distributional metrics if enabled) computed on training trajectories (ALL 100 trajectories), using \u03b8_optimized inferred from SBI on train_states[0]."
+    },
+    "val_loss": {
+      "description": "Loss metrics (overall MSE, per-dimension MSE, and optional MMD/Wasserstein if enabled) computed on validation trajectories (ALL 100 trajectories), using \u03b8_optimized inferred from SBI on train_states[0]."
+    },
+    "test_loss": {
+      "description": "Loss metrics (overall MSE, and optional distributional metrics if enabled) computed on test trajectories (ALL 100 trajectories), using \u03b8_optimized inferred from SBI on train_states[0]. Used ONLY for final performance assessment."
+    }
+  },
+  "data_analysis_result": {
+    "overall_simulation_design": {
+      "objective": "Generate realistic hospital state trajectories for a three-disease environment as an ordered sequence of state dictionaries over time, where each state contains ICU/Standard bed occupancy and the current in-hospital patient list (with disease_id, bed_type, los_remaining, is_alive, day_in_hospital). IMPORTANT: In the current HOSP SBI + evaluation pipeline, model fitting and reported losses are computed on a fixed 7-D per-time-step summary produced by trajectories_to_numpy(), not on identity-aligned individual patients.",
+      "initialization": {
+        "description": "Initialize each simulated rollout from the provided initial state at time_step=0 (the first row of the selected trajectory). In the current SBI pipeline, the simulator MUST start from train_states[0][0] (trajectory_id=0, time_step=0) when generating simulated observations for NPE training. If other trajectories are simulated for evaluation, each rollout starts from its own time_step=0 row. Do not assume zero occupancy unless it is read from the data.",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "trajectory_id",
+            "time_step",
+            "day",
+            "icu_occupancy",
+            "standard_occupancy",
+            "patients"
+          ],
+          "derivation": "For each trajectory, read row with time_step==0 to set initial state; in samples, these rows have zero occupancies and patients == '[]', but the simulator must rely on the data row rather than hard-coding zeros."
+        }
+      },
+      "execution": "Execution is a discrete-time (daily) stochastic patient-flow simulator with NO external action. At each day: (1) progress existing patients (decrement los_remaining, increment day_in_hospital), (2) discharge/remove patients whose los_remaining reaches 0; optional mortality/early-exit is disabled by default unless strongly supported by data, (3) generate new arrivals by disease via calibrated arrival processes, (4) assign each admitted patient a bed_type via calibrated probabilities, (5) assign initial los_remaining via calibrated LOS distributions conditional on disease_id and bed_type, (6) recompute occupancies from the roster.\n\nCALIBRATION IS SBI (NPE) AND MUST MATCH THE CURRENT HOSP PIPELINE:\n(1) Load train/val/test into train_states/val_states/test_states as lists of trajectories (each trajectory is a list of state dicts ordered by time_step).\n(2) Observation x_o (single-trajectory): use ONLY train_states[0] (trajectory_id=0) as the observation. Convert it to observed_trajectory_np = trajectories_to_numpy(train_states[0]) with shape (T+1, 7). Then flatten: x_o = torch.tensor(observed_trajectory_np).float().reshape(1, -1).\n    The 7 features per time step are EXACTLY:\n      [day, icu_occupancy, standard_occupancy, disease0_alive, disease1_alive, disease2_alive, total_alive]\n    where disease*_alive and total_alive are computed by iterating st['patients'] and counting only patients with is_alive==True.\n(3) Simulator wrapper for NPE training: for each sampled parameter vector \u03b8_i from a BoxUniform prior (constructed from Model().get_parameters_uniform_prior_min_max()), set Model parameters via set_parameters(\u03b8_i), rollout predicted trajectory starting from train_states[0][0] for horizon T, then convert predicted trajectory to predicted_trajectory_np = trajectories_to_numpy(predicted_trajectory) with shape (T+1, 7), and flatten to x_i = predicted_trajectory_np.reshape(1, -1). Collect pairs (\u03b8_i, x_i).\n(4) Train NPE posterior p(\u03b8|x) on the simulated pairs; then condition on x_o, sample posterior, and take posterior mean as optimized_parameters.\n(5) Evaluation: using optimized_parameters, evaluate on ALL trajectories from train/val/test via the existing evaluation functions that create predicted trajectories and compute losses on trajectories_to_numpy outputs (overall MSE on each split; per-dimension MSE on validation; optional MMD/Wasserstein if enabled by config).\n\nIMPORTANT ALIGNMENT NOTE:\n- The simulator still must output full patient lists in states, but fitting/evaluation is driven by the 7-D summary induced by trajectories_to_numpy(). Ensure the patient roster/occupancies are internally consistent so the induced 7-D features match the data.",
+      "outputs": [
+        "optimized_parameters",
+        "calibration_artifacts",
+        "metrics"
+      ]
+    },
+    "scale_granularity": {
+      "time_step": {
+        "value": "days",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "day",
+            "time_step"
+          ],
+          "derivation": "day appears aligned 1:1 with time_step; patient los_remaining and day_in_hospital change by ~1 per step."
+        }
+      },
+      "spatial_resolution": {
+        "value": "non-spatial",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "icu_occupancy",
+            "standard_occupancy",
+            "patients"
+          ],
+          "derivation": "No location fields exist; state is aggregated for a single hospital."
+        }
+      },
+      "population_size": {
+        "value": "Variable number of in-hospital patient agents per day; equals len(patients) per state and varies by trajectory and time_step.",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "patients",
+            "icu_occupancy",
+            "standard_occupancy"
+          ],
+          "derivation": "Parse patients JSON; occupancy fields are counts by bed_type and should match patient list counts."
+        }
+      },
+      "rationale": "The data is an episode-based daily log; micro-level patient objects evolve daily, and the system state is fully described by non-spatial bed occupancies and the inpatient roster. The current SBI/evaluation pipeline summarizes each state into a 7-D vector for fitting and scoring."
+    },
+    "agent_archetypes": {
+      "unit": "simulated_entity",
+      "roles": [
+        {
+          "name": "HospitalSystem",
+          "static_attributes": [
+            {
+              "name": "disease_set",
+              "type": "vector",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "patients.disease_id"
+                ],
+                "derivation": "Unique disease_id values observed in parsed patients list; expected {0,1,2}."
+              }
+            },
+            {
+              "name": "bed_types",
+              "type": "vector",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "patients.bed_type"
+                ],
+                "derivation": "Unique bed_type values observed in parsed patients list; expected {'ICU','Standard'}."
+              }
+            },
+            {
+              "name": "icu_capacity",
+              "type": "int",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "standard_capacity",
+              "type": "int",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "capacity_policy_toggle",
+              "type": "bool",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "dynamic_states": [
+            {
+              "name": "time_step",
+              "type": "int",
+              "update_rule": "Increment by 1 each simulation step.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "time_step"
+                ],
+                "derivation": "Simulator time_step corresponds to the dataset index within each trajectory."
+              }
+            },
+            {
+              "name": "day",
+              "type": "int",
+              "update_rule": "Set day = time_step (or increment by 1 each step).",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "day",
+                  "time_step"
+                ],
+                "derivation": "In samples, day mirrors time_step."
+              }
+            },
+            {
+              "name": "patient_roster",
+              "type": "other",
+              "update_rule": "Maintain list of Patient agents currently in hospital; update via admissions and removals; update patients daily via patient progression.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "patients"
+                ],
+                "derivation": "patients field is the ground-truth roster representation; simulator emits the same structure."
+              }
+            },
+            {
+              "name": "icu_occupancy",
+              "type": "int",
+              "update_rule": "Recompute as count of patient_roster where bed_type=='ICU' after daily updates.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "icu_occupancy",
+                  "patients.bed_type"
+                ],
+                "derivation": "Occupancy equals count of ICU patients; stored also as explicit state field."
+              }
+            },
+            {
+              "name": "standard_occupancy",
+              "type": "int",
+              "update_rule": "Recompute as count of patient_roster where bed_type=='Standard' after daily updates.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "standard_occupancy",
+                  "patients.bed_type"
+                ],
+                "derivation": "Occupancy equals count of Standard patients; stored also as explicit state field."
+              }
+            },
+            {
+              "name": "rejected_or_diverted_admissions",
+              "type": "int",
+              "update_rule": "If capacity_policy_toggle==True, count admissions not placed due to full capacity; else always 0.",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "construction_from_data": "disease_set and bed_types are derived by parsing the patients JSON list across training data. Capacities are not present in files and should be designed. Default recommendation for fitting: set capacities very large (effectively unconstrained) and capacity_policy_toggle=False unless data shows clear saturation/plateaus that require capacity effects.",
+          "update_from_data": "time_step/day advance deterministically. Occupancies are derived summaries of patient_roster. patient_roster changes through patient progression and admissions generated by calibrated processes."
+        },
+        {
+          "name": "Patient",
+          "static_attributes": [
+            {
+              "name": "disease_id",
+              "type": "int",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "patients.disease_id"
+                ],
+                "derivation": "Directly stored in each patient dict."
+              }
+            },
+            {
+              "name": "bed_type",
+              "type": "enum",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "patients.bed_type"
+                ],
+                "derivation": "Directly stored in each patient dict at each snapshot; for simulation treat as assigned at admission and fixed unless adding transfers (not in data)."
+              }
+            }
+          ],
+          "dynamic_states": [
+            {
+              "name": "los_remaining",
+              "type": "int",
+              "update_rule": "Each day: los_remaining := max(los_remaining - 1, 0). If reaches 0 then patient exits at end of step.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "patients.los_remaining"
+                ],
+                "derivation": "Consecutive snapshots show los_remaining decreasing approximately by 1 per time_step for continuing patients."
+              }
+            },
+            {
+              "name": "day_in_hospital",
+              "type": "int",
+              "update_rule": "Each day: day_in_hospital := day_in_hospital + 1 for continuing patients; initialize to 1 for new admissions.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "patients.day_in_hospital"
+                ],
+                "derivation": "New admissions appear with day_in_hospital==1; continuing patients increment by 1 per step."
+              }
+            },
+            {
+              "name": "is_alive",
+              "type": "bool",
+              "update_rule": "Default: remains true. Optional mortality hazard can be added only if the dataset contains evidence beyond LOS-based removal; otherwise keep all patients alive to reduce unnecessary stochasticity and match observed samples.",
+              "source_type": "mixed",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "patients.is_alive"
+                ],
+                "derivation": "Field exists but samples show all true; mortality is optional and should be disabled by default."
+              }
+            }
+          ],
+          "construction_from_data": "For replay/calibration, admissions are detected as patient entries with day_in_hospital==1 at time t. For simulation, disease_id is drawn from calibrated arrival mixture; bed_type is drawn from calibrated P(bed_type|disease_id); los_remaining is sampled from calibrated LOS distribution conditional on (disease_id, bed_type).",
+          "update_from_data": "Progression rules follow observed deterministic increments/decrements; optional mortality/early-exit is only weakly supported by data and should be treated as optional/off by default."
+        }
+      ]
+    },
+    "interaction_topology": {
+      "topology": "platform-level",
+      "layers": [
+        {
+          "name": "admission_layer",
+          "from_role": "HospitalSystem",
+          "to_role": "Patient",
+          "edge_rule": "At each day, sample new admissions per disease and create new Patient agents; initialize their states (day_in_hospital=1, los_remaining sampled, is_alive=true) and bed_type sampled; append to roster; enforce capacity policy only if enabled; update occupancies accordingly.",
+          "source_type": "mixed",
+          "data_reference": {
+            "file": "train_seed_10_n_100.csv",
+            "fields": [
+              "trajectory_id",
+              "time_step",
+              "patients"
+            ],
+            "derivation": "Infer admissions counts by parsing patients at consecutive time steps and counting entries with day_in_hospital==1; fit arrival distribution per disease and optionally by day/time_step."
+          }
+        },
+        {
+          "name": "care_progression_layer",
+          "from_role": "HospitalSystem",
+          "to_role": "Patient",
+          "edge_rule": "Broadcast daily tick: all current patients update los_remaining/day_in_hospital; discharge when los_remaining==0; mortality hazard is optional and disabled by default.",
+          "source_type": "data_derived",
+          "data_reference": {
+            "file": "train_seed_10_n_100.csv",
+            "fields": [
+              "patients.los_remaining",
+              "patients.day_in_hospital"
+            ],
+            "derivation": "Continuing patients show los_remaining-1 and day_in_hospital+1 between consecutive rows."
+          }
+        }
+      ],
+      "protocol": "For each simulated day t->t+1: (1) progress existing patients, (2) remove discharged (and optional death removals), (3) sample admissions and add new patients, (4) recompute occupancies from roster, (5) emit state snapshot."
+    },
+    "information_propagation": {
+      "exists": false,
+      "topology": "none",
+      "mechanism": "No explicit inter-patient communication or diffusion processes are represented in the data; all dynamics are mediated by the HospitalSystem's centralized updates.",
+      "source_type": "data_derived",
+      "data_reference": {
+        "file": "train_seed_10_n_100.csv",
+        "fields": [
+          "patients"
+        ],
+        "derivation": "No fields indicate contacts, transfers, or messages; only roster snapshots."
+      }
+    },
+    "exogenous_signals": [
+      {
+        "name": "day_index",
+        "effect_on_agents": "Used as a covariate for arrival rates and/or mixture weights by disease; allows non-stationary arrival processes by day/time_step if supported by data.",
+        "bounds": "Nonnegative integer within trajectory length.",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "day",
+            "time_step"
+          ],
+          "derivation": "Use day (or time_step) directly as the time covariate."
+        }
+      },
+      {
+        "name": "capacity_policy_toggle",
+        "effect_on_agents": "If enabled, constrains admissions when ICU/Standard capacity is reached; affects acceptance/diversion counts and indirectly occupancy trajectories. Default off unless needed.",
+        "bounds": "0/1 toggle; capacities are nonnegative ints.",
+        "source_type": "designed",
+        "data_reference": null
+      }
+    ],
+    "action_decision_policy": {
+      "by_role": [
+        {
+          "role": "HospitalSystem",
+          "inputs": [
+            {
+              "name": "current_icu_occupancy",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "icu_occupancy"
+                ],
+                "derivation": "State variable per row; in simulation recomputed from roster."
+              }
+            },
+            {
+              "name": "current_standard_occupancy",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "standard_occupancy"
+                ],
+                "derivation": "State variable per row; in simulation recomputed from roster."
+              }
+            },
+            {
+              "name": "day_or_time_step",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "day",
+                  "time_step"
+                ],
+                "derivation": "Time index used as covariate for arrivals (optional)."
+              }
+            }
+          ],
+          "policy_form": "Stochastic generative policy: sample new admissions per disease from calibrated arrival distributions (e.g., Poisson/NegBin); for each admission sample bed_type from calibrated categorical distribution P(bed_type|disease_id); sample initial LOS from calibrated discrete distribution by (disease_id, bed_type). Apply deterministic patient progression and discharge. Capacity constraints are optional and disabled by default; if enabled, truncate/divert admissions when full.",
+          "parameters": [
+            "arrival_rate_params",
+            "arrival_overdispersion_params",
+            "bed_type_probs_by_disease",
+            "los_distribution_params_by_disease_bed",
+            "mortality_hazard_params_optional",
+            "capacity_values_optional",
+            "capacity_overflow_policy_params_optional"
+          ]
+        },
+        {
+          "role": "Patient",
+          "inputs": [
+            {
+              "name": "daily_tick",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "policy_form": "Deterministic internal update on daily tick: decrement los_remaining by 1; increment day_in_hospital by 1; if los_remaining hits 0 then exit; mortality hazard is optional/off by default.",
+          "parameters": [
+            "mortality_hazard_params_optional"
+          ]
+        }
+      ]
+    },
+    "holdout_plan": {
+      "method": "predefined_files",
+      "time_ordering": {
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "trajectory_id",
+            "time_step"
+          ],
+          "derivation": "Within each trajectory_id, order states by increasing time_step (used for rollouts and alignment only)."
+        }
+      },
+      "train_range": "Use the full train_seed_10_n_100.csv (all trajectories, all time steps) for evaluation reporting. For SBI observation construction, use ONLY train_states[0] (trajectory_id=0) to build x_o.",
+      "validation_range": "Use the full val_seed_10_n_100.csv (all trajectories, all time steps) for validation evaluation (overall MSE + per-dimension MSE; optional MMD/Wasserstein if enabled). Do not introduce additional within-trajectory splits.",
+      "test_range": "Use the full test_seed_10_n_100.csv (all trajectories, all time steps) for final test evaluation reporting.",
+      "notes": "No temporal holdout within a file is required. The only special-case is that SBI uses train_states[0] as the single observation x_o and as the rollout starting point inside the SBI simulator wrapper."
+    },
+    "simulation_evaluation": {
+      "metrics": [
+        {
+          "name": "train_loss",
+          "definition": "Overall mean squared error between simulated and ground-truth trajectories on the training split, computed on the 7-D summary produced by trajectories_to_numpy(). Lower is better.",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "train_seed_10_n_100.csv",
+              "fields": [
+                "trajectory_id",
+                "time_step",
+                "day",
+                "icu_occupancy",
+                "standard_occupancy",
+                "patients"
+              ],
+              "derivation": "Compute true_trajectory_np via trajectories_to_numpy(true_states) producing shape (num_traj, T+1, 7); compare with predicted_trajectory_np aligned by (trajectory_id, time_step)."
+            }
+          }
+        },
+        {
+          "name": "val_loss",
+          "definition": "Overall mean squared error between simulated and ground-truth trajectories on the validation split, computed on the 7-D summary produced by trajectories_to_numpy(). Lower is better.",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "val_seed_10_n_100.csv",
+              "fields": [
+                "trajectory_id",
+                "time_step",
+                "day",
+                "icu_occupancy",
+                "standard_occupancy",
+                "patients"
+              ],
+              "derivation": "Compute true_trajectory_np via trajectories_to_numpy(true_states) producing shape (num_traj, T+1, 7); compare with predicted_trajectory_np aligned by (trajectory_id, time_step)."
+            }
+          }
+        },
+        {
+          "name": "test_loss",
+          "definition": "Overall mean squared error between simulated and ground-truth trajectories on the test split, computed on the 7-D summary produced by trajectories_to_numpy(). Lower is better.",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "test_seed_10_n_100.csv",
+              "fields": [
+                "trajectory_id",
+                "time_step",
+                "day",
+                "icu_occupancy",
+                "standard_occupancy",
+                "patients"
+              ],
+              "derivation": "Compute true_trajectory_np via trajectories_to_numpy(true_states) producing shape (num_traj, T+1, 7); compare with predicted_trajectory_np aligned by (trajectory_id, time_step)."
+            }
+          }
+        },
+        {
+          "name": "mse_per_dimension",
+          "definition": "Per-dimension MSE on validation over the 7 dimensions from trajectories_to_numpy(): [day, icu_occupancy, standard_occupancy, d0_alive, d1_alive, d2_alive, total_alive]. Lower is better for each dimension.",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "val_seed_10_n_100.csv",
+              "fields": [
+                "day",
+                "icu_occupancy",
+                "standard_occupancy",
+                "patients.is_alive",
+                "patients.disease_id"
+              ],
+              "derivation": "The last 4 dimensions are computed by counting alive patients per disease and total alive within each state."
+            }
+          }
+        },
+        {
+          "name": "state_consistency_rate",
+          "definition": "Fraction of simulated states where icu_occupancy equals count of roster ICU patients and standard_occupancy equals count of roster Standard patients (invariant check). Should be 1.0 with correct implementation.",
+          "ground_truth": {
+            "source_type": "designed",
+            "data_reference": null,
+            "derivation": "Internal simulator invariant; not a direct ground-truth comparison."
+          }
+        }
+      ],
+      "comparison_method": "For any split, create predicted trajectories by rolling out the simulator from each trajectory's time_step=0 initial state for horizon T. Convert both predicted and true trajectories to numpy arrays using trajectories_to_numpy(), yielding shape (num_trajectories, T+1, 7), where the 7 dimensions are [day, icu_occupancy, standard_occupancy, d0_alive, d1_alive, d2_alive, total_alive]. Compute overall MSE on these tensors; compute per-dimension MSE on validation; compute optional MMD/Wasserstein if enabled by configuration. Align by (trajectory_id, time_step) implicitly via ordering within each trajectory list."
+    },
+    "calibratable_parameters": [
+      {
+        "name": "arrival_rate_lambda[disease_id, day_bucket_optional]",
+        "range_bounds": "[0.0, 50.0]",
+        "source": "constrained by data or modeling",
+        "notes": "Fit mean admissions per day per disease; optionally bucket day/time_step to capture non-stationarity."
+      },
+      {
+        "name": "arrival_overdispersion_k[disease_id]",
+        "range_bounds": "[0.1, 100.0]",
+        "source": "constrained by data or modeling",
+        "notes": "If using Negative Binomial; larger k approximates Poisson."
+      },
+      {
+        "name": "p_bedtype_ICU_given_disease[disease_id]",
+        "range_bounds": "[0.0, 1.0]",
+        "source": "constrained by data or modeling",
+        "notes": "Categorical probability; Standard prob is 1-p. Normalize inside step() if parameterized unconstrained."
+      },
+      {
+        "name": "los_dist_params[disease_id, bed_type]",
+        "range_bounds": "Discrete support inferred from observed los_remaining at admission; probabilities in [0,1] sum to 1 per group, or parametric mean in [1, 30] and dispersion in [0.1, 50].",
+        "source": "constrained by data or modeling",
+        "notes": "Prefer empirical discrete distribution over observed initial los_remaining (day_in_hospital==1) to match integer nature."
+      },
+      {
+        "name": "mortality_hazard[disease_id, bed_type, day_in_hospital_optional]",
+        "range_bounds": "[0.0, 0.2]",
+        "source": "constrained by data or modeling",
+        "notes": "Optional and OFF by default due to weak evidence in samples (patients.is_alive mostly true). Enable only if needed and supported by data."
+      },
+      {
+        "name": "icu_capacity",
+        "range_bounds": ">= max observed icu_occupancy in training (or set very large)",
+        "source": "constrained by data or modeling",
+        "notes": "Designed; recommended to set very large and disable capacity_policy_toggle for fitting unless data indicates saturation."
+      },
+      {
+        "name": "standard_capacity",
+        "range_bounds": ">= max observed standard_occupancy in training (or set very large)",
+        "source": "constrained by data or modeling",
+        "notes": "Designed; recommended to set very large and disable capacity_policy_toggle for fitting unless data indicates saturation."
+      },
+      {
+        "name": "capacity_overflow_policy",
+        "range_bounds": "one_of:['allow_queue','divert','truncate_admissions']",
+        "source": "constrained by data or modeling",
+        "notes": "Designed; no diversion/queue fields exist in current data. Use only if capacity_policy_toggle is enabled; otherwise keep unused."
+      }
+    ]
+  },
+  "file_summaries": [
+    {
+      "file_name": "train_seed_10_n_100.csv",
+      "file_type": "csv",
+      "semantic_summary": "## Concise semantic metadata summary (for hospital trajectory simulation)\n\n### Overall data structure and type\n- **File type:** CSV (tabular event log) representing **multiple stochastic trajectories** of a hospital system.\n- **Row granularity:** One row = **one state snapshot** at a specific `time_step` within a specific `trajectory_id`.\n- **Primary keys / indexing:**\n  - (`trajectory_id`, `time_step`) uniquely identifies a state.\n  - `day` mirrors time in calendar units (appears aligned 1:1 with `time_step` in the sample).\n\n### Relationships and nested elements\n- **Trajectory grouping:** Rows with the same `trajectory_id` form an **ordered sequence** of states: `state[0] ... state[T]` sorted by `time_step`.\n- **Nested patient list:** Column `patients` is a **string-encoded JSON array** of patient objects (variable-length, can be empty `\"[]\"`).\n  - Each patient object contains:\n    - `disease_id` (categorical int: {0,1,2} in this environment)\n    - `bed_type` (categorical: `\"ICU\"` or `\"Standard\"`)\n    - `los_remaining` (int, remaining length-of-stay in days/steps)\n    - `is_alive` (bool; patients appear to be represented only while alive/in-hospital, but field allows death modeling)\n    - `day_in_hospital` (int, time since admission)\n- **Occupancy consistency:** `icu_occupancy` and `standard_occupancy` are **aggregate counts** that should equal the number of patients in `patients` with the corresponding `bed_type` (acts as a cross-check and as a fast state feature).\n\n### How this informs simulation entities or interactions\n- **Core simulation entities:**\n  - **Hospital state:** bed occupancies + in-hospital patient roster.\n  - **Patient entity:** attributes above; evolves over time (LOS countdown, day_in_hospital increment, potential death/discharge).\n  - **Disease process:** `disease_id` drives arrival patterns, bed-type needs, LOS distribution, and outcomes.\n- **State transition dynamics implied by consecutive rows:**\n  - Existing patients typically **persist** with:\n    - `los_remaining` decreasing by ~1 per step\n    - `day_in_hospital` increasing by ~1 per step\n  - **Admissions** appear as new patient objects with `day_in_hospital = 1` and initial `los_remaining`.\n  - **Discharges/removals** occur when patients disappear from the next state (likely when `los_remaining` reaches 0, or via death if modeled).\n- **Simulator calibration/use:**\n  - Learn/fit **arrival rates** per day and per `disease_id` (and possibly conditional on current occupancy).\n  - Learn/fit **bed assignment probabilities** (ICU vs Standard) by disease.\n  - Learn/fit **LOS distributions** per (disease_id, bed_type) using initial `los_remaining` at admission and decrement patterns.\n  - Optionally fit **mortality/exit hazards** if `is_alive` ever becomes false or if removals occur before `los_remaining` would hit 0.\n- **Trajectory generation target format:**\n  - Emit an ordered list of dictionaries per `trajectory_id` with the same fields, ensuring internal consistency between patient roster and occupancy totals."
+    },
+    {
+      "file_name": "val_seed_10_n_100.csv",
+      "file_type": "csv",
+      "semantic_summary": "## Concise semantic metadata summary (val_seed_10_n_100.csv)\n\n### Overall data structure and type\n- **File type:** CSV where each row represents a **single hospital state snapshot** at a discrete **time step** within a **trajectory**.\n- **Primary keys / identifiers:**\n  - `trajectory_id` (int): groups rows into one trajectory (episode).\n  - `time_step` (int): index within the trajectory (ordered sequence position).\n  - `day` (int): calendar-like day counter; appears aligned with `time_step` in the sample (day = time_step).\n- **State variables (per row):**\n  - `icu_occupancy` (int): number of occupied ICU beds at that time.\n  - `standard_occupancy` (int): number of occupied Standard beds at that time.\n  - `patients` (string-encoded JSON array): the in-hospital patient list at that time.\n\n### Relationships or nested elements\n- **Trajectory structure:**  \n  Rows with the same `trajectory_id` form an ordered sequence by `time_step` \u2192 `{state[0], state[1], \u2026, state[T]}`.\n- **Nested patient list:**  \n  `patients` parses into a JSON list of patient dictionaries; each patient entry contains:\n  - `disease_id` (int): disease category (0,1,2) for the three-disease environment.\n  - `bed_type` (string): `\"ICU\"` or `\"Standard\"`.\n  - `los_remaining` (int): remaining length-of-stay in days/time steps.\n  - `is_alive` (bool): alive status (in sample, all `true`).\n  - `day_in_hospital` (int): how long they have been admitted so far.\n- **Consistency relationship:**  \n  `icu_occupancy` should equal the count of patients with `bed_type == \"ICU\"`, and `standard_occupancy` should equal the count with `bed_type == \"Standard\"` (acts as an aggregate derived from the patient list).\n\n### How this data should inform simulation entities or interactions\n- **Simulation entities:**\n  - **Hospital state** per step: bed occupancies + explicit roster of current inpatients.\n  - **Patient objects** with attributes: disease class, assigned bed type, remaining LOS, survival flag, and time-since-admission.\n- **Core dynamics implied between consecutive states:**\n  - **Progression:** existing patients\u2019 `los_remaining` generally decreases by 1 per step; `day_in_hospital` increases by 1.\n  - **Arrivals/admissions:** new patient records appear at later time steps with `day_in_hospital = 1` and initial `los_remaining`, increasing occupancy.\n  - **Departures (discharge/death):** patients disappear from the list when LOS completes and/or `is_alive` becomes false (not shown in sample but encoded).\n  - **Bed accounting / capacity interaction:** occupancy variables summarize bed usage and can be used to validate/drive admission constraints or policies (e.g., reject/divert when full, allocate ICU vs Standard).\n- **Use in a simulator design:**\n  - Treat each row as a **ground-truth state** for replay/validation, or as empirical guidance for **arrival rates**, **LOS distributions by disease and bed type**, and **bed-type assignment patterns**.\n  - The patient list enables modeling **micro-level transitions** (per-patient LOS countdown), while occupancy supports **macro-level controls** (bed capacity constraints and utilization metrics)."
+    },
+    {
+      "file_name": "test_seed_10_n_100.csv",
+      "file_type": "csv",
+      "semantic_summary": "### Semantic metadata summary (test_seed_10_n_100.csv)\n\n**Overall data structure and type**\n- **File type:** CSV (tabular event/state log).\n- **Granularity:** Each row represents a **single hospital state snapshot** at a discrete **time_step** (daily cadence via `day`).\n- **Grouping:** Rows are grouped by `trajectory_id`, forming a **trajectory**: an ordered sequence of states `{state[0], \u2026, state[T]}`.\n- **Core state fields:**\n  - `trajectory_id` (int): trajectory identifier.\n  - `time_step` (int): monotonically increasing index within a trajectory.\n  - `day` (int): calendar-like day index (appears aligned with time_step).\n  - `icu_occupancy` (int): number of ICU beds occupied at that state.\n  - `standard_occupancy` (int): number of Standard beds occupied at that state.\n  - `patients` (string-encoded JSON array): list of current in-hospital patients at that state.\n\n**Relationships / nested elements**\n- `patients` is a **nested list** encoded as a JSON string; each element is a **patient record** (dictionary) with:\n  - `disease_id` (int): categorical disease label in `{0,1,2}` (three-disease environment).\n  - `bed_type` (str): `\"ICU\"` or `\"Standard\"` indicating current bed assignment.\n  - `los_remaining` (int): remaining length-of-stay (countdown days).\n  - `is_alive` (bool): patient alive status (in sample all `true`).\n  - `day_in_hospital` (int): elapsed days since admission.\n- **Consistency relationship:** `icu_occupancy` should equal the count of patients with `bed_type == \"ICU\"`, and `standard_occupancy` should equal the count with `bed_type == \"Standard\"` at the same row (these are redundant/derived summaries of `patients`).\n\n**How this should inform simulation entities / interactions**\n- **Simulation entities**\n  - **Hospital state:** `(icu_occupancy, standard_occupancy, patient_list)` at each time step.\n  - **Patient entity:** attributes map directly from patient dict fields; `disease_id` determines disease-specific dynamics (arrival rates, LOS distributions, mortality, ICU vs Standard propensity, etc.).\n- **State transition mechanics suggested by the data**\n  - Daily progression: for each existing patient, increment `day_in_hospital` by 1 and decrement `los_remaining` by 1.\n  - Discharge/removal event: when `los_remaining` reaches 0 (and/or `is_alive` becomes false), patient exits the patient_list, reducing occupancy in their bed type.\n  - Admissions: new patient dicts appear between consecutive days, increasing occupancy; their initial `day_in_hospital` is 1 and `los_remaining` is initialized per disease/bed-type.\n  - Bed assignment interaction: `bed_type` is the realized resource usage; the simulator should generate/assign bed type per incoming patient (possibly disease-dependent) and enforce capacity rules if capacities exist (not present in file).\n- **Trajectory usage**\n  - Treat each `trajectory_id` as one independent simulated run; use `time_step` ordering to reconstruct trajectories and calibrate/validate transition rules (admissions, LOS countdown, ICU/Standard mix by disease)."
+    }
+  ],
+  "schemas": {
+    "train_seed_10_n_100.csv": {
+      "file_type": "csv",
+      "row_count": 6100,
+      "column_count": 6,
+      "columns": [
+        "trajectory_id",
+        "time_step",
+        "day",
+        "icu_occupancy",
+        "standard_occupancy",
+        "patients"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 6100 entries, 0 to 6099\nData columns (total 6 columns):\n #   Column              Non-Null Count  Dtype \n---  ------              --------------  ----- \n 0   trajectory_id       6100 non-null   int64 \n 1   time_step           6100 non-null   int64 \n 2   day                 6100 non-null   int64 \n 3   icu_occupancy       6100 non-null   int64 \n 4   standard_occupancy  6100 non-null   int64 \n 5   patients            6100 non-null   object\ndtypes: int64(5), object(1)\nmemory usage: 286.1+ KB\n",
+      "sample_data": [
+        {
+          "trajectory_id": 0,
+          "time_step": 0,
+          "day": 0,
+          "icu_occupancy": 0,
+          "standard_occupancy": 0,
+          "patients": "[]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 1,
+          "day": 1,
+          "icu_occupancy": 4,
+          "standard_occupancy": 0,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 7, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 7, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 2,
+          "day": 2,
+          "icu_occupancy": 5,
+          "standard_occupancy": 4,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 3,
+          "day": 3,
+          "icu_occupancy": 5,
+          "standard_occupancy": 9,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 4,
+          "day": 4,
+          "icu_occupancy": 5,
+          "standard_occupancy": 12,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 8, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 5,
+          "day": 5,
+          "icu_occupancy": 5,
+          "standard_occupancy": 11,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 7, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 6,
+          "day": 6,
+          "icu_occupancy": 5,
+          "standard_occupancy": 11,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 7,
+          "day": 7,
+          "icu_occupancy": 5,
+          "standard_occupancy": 16,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 7}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 7}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 8,
+          "day": 8,
+          "icu_occupancy": 5,
+          "standard_occupancy": 20,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 7, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 9,
+          "day": 9,
+          "icu_occupancy": 5,
+          "standard_occupancy": 20,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        }
+      ],
+      "dtypes": {
+        "trajectory_id": "int64",
+        "time_step": "int64",
+        "day": "int64",
+        "icu_occupancy": "int64",
+        "standard_occupancy": "int64",
+        "patients": "object"
+      },
+      "file_semantic_summary": "## Concise semantic metadata summary (for hospital trajectory simulation)\n\n### Overall data structure and type\n- **File type:** CSV (tabular event log) representing **multiple stochastic trajectories** of a hospital system.\n- **Row granularity:** One row = **one state snapshot** at a specific `time_step` within a specific `trajectory_id`.\n- **Primary keys / indexing:**\n  - (`trajectory_id`, `time_step`) uniquely identifies a state.\n  - `day` mirrors time in calendar units (appears aligned 1:1 with `time_step` in the sample).\n\n### Relationships and nested elements\n- **Trajectory grouping:** Rows with the same `trajectory_id` form an **ordered sequence** of states: `state[0] ... state[T]` sorted by `time_step`.\n- **Nested patient list:** Column `patients` is a **string-encoded JSON array** of patient objects (variable-length, can be empty `\"[]\"`).\n  - Each patient object contains:\n    - `disease_id` (categorical int: {0,1,2} in this environment)\n    - `bed_type` (categorical: `\"ICU\"` or `\"Standard\"`)\n    - `los_remaining` (int, remaining length-of-stay in days/steps)\n    - `is_alive` (bool; patients appear to be represented only while alive/in-hospital, but field allows death modeling)\n    - `day_in_hospital` (int, time since admission)\n- **Occupancy consistency:** `icu_occupancy` and `standard_occupancy` are **aggregate counts** that should equal the number of patients in `patients` with the corresponding `bed_type` (acts as a cross-check and as a fast state feature).\n\n### How this informs simulation entities or interactions\n- **Core simulation entities:**\n  - **Hospital state:** bed occupancies + in-hospital patient roster.\n  - **Patient entity:** attributes above; evolves over time (LOS countdown, day_in_hospital increment, potential death/discharge).\n  - **Disease process:** `disease_id` drives arrival patterns, bed-type needs, LOS distribution, and outcomes.\n- **State transition dynamics implied by consecutive rows:**\n  - Existing patients typically **persist** with:\n    - `los_remaining` decreasing by ~1 per step\n    - `day_in_hospital` increasing by ~1 per step\n  - **Admissions** appear as new patient objects with `day_in_hospital = 1` and initial `los_remaining`.\n  - **Discharges/removals** occur when patients disappear from the next state (likely when `los_remaining` reaches 0, or via death if modeled).\n- **Simulator calibration/use:**\n  - Learn/fit **arrival rates** per day and per `disease_id` (and possibly conditional on current occupancy).\n  - Learn/fit **bed assignment probabilities** (ICU vs Standard) by disease.\n  - Learn/fit **LOS distributions** per (disease_id, bed_type) using initial `los_remaining` at admission and decrement patterns.\n  - Optionally fit **mortality/exit hazards** if `is_alive` ever becomes false or if removals occur before `los_remaining` would hit 0.\n- **Trajectory generation target format:**\n  - Emit an ordered list of dictionaries per `trajectory_id` with the same fields, ensuring internal consistency between patient roster and occupancy totals."
+    },
+    "val_seed_10_n_100.csv": {
+      "file_type": "csv",
+      "row_count": 6100,
+      "column_count": 6,
+      "columns": [
+        "trajectory_id",
+        "time_step",
+        "day",
+        "icu_occupancy",
+        "standard_occupancy",
+        "patients"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 6100 entries, 0 to 6099\nData columns (total 6 columns):\n #   Column              Non-Null Count  Dtype \n---  ------              --------------  ----- \n 0   trajectory_id       6100 non-null   int64 \n 1   time_step           6100 non-null   int64 \n 2   day                 6100 non-null   int64 \n 3   icu_occupancy       6100 non-null   int64 \n 4   standard_occupancy  6100 non-null   int64 \n 5   patients            6100 non-null   object\ndtypes: int64(5), object(1)\nmemory usage: 286.1+ KB\n",
+      "sample_data": [
+        {
+          "trajectory_id": 0,
+          "time_step": 0,
+          "day": 0,
+          "icu_occupancy": 0,
+          "standard_occupancy": 0,
+          "patients": "[]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 1,
+          "day": 1,
+          "icu_occupancy": 5,
+          "standard_occupancy": 4,
+          "patients": "[{\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 2,
+          "day": 2,
+          "icu_occupancy": 5,
+          "standard_occupancy": 7,
+          "patients": "[{\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 3,
+          "day": 3,
+          "icu_occupancy": 5,
+          "standard_occupancy": 14,
+          "patients": "[{\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 4,
+          "day": 4,
+          "icu_occupancy": 4,
+          "standard_occupancy": 12,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 5,
+          "day": 5,
+          "icu_occupancy": 5,
+          "standard_occupancy": 13,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 6,
+          "day": 6,
+          "icu_occupancy": 5,
+          "standard_occupancy": 12,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 7,
+          "day": 7,
+          "icu_occupancy": 5,
+          "standard_occupancy": 11,
+          "patients": "[{\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 8, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 8,
+          "day": 8,
+          "icu_occupancy": 5,
+          "standard_occupancy": 12,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 7, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 9,
+          "day": 9,
+          "icu_occupancy": 5,
+          "standard_occupancy": 11,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        }
+      ],
+      "dtypes": {
+        "trajectory_id": "int64",
+        "time_step": "int64",
+        "day": "int64",
+        "icu_occupancy": "int64",
+        "standard_occupancy": "int64",
+        "patients": "object"
+      },
+      "file_semantic_summary": "## Concise semantic metadata summary (val_seed_10_n_100.csv)\n\n### Overall data structure and type\n- **File type:** CSV where each row represents a **single hospital state snapshot** at a discrete **time step** within a **trajectory**.\n- **Primary keys / identifiers:**\n  - `trajectory_id` (int): groups rows into one trajectory (episode).\n  - `time_step` (int): index within the trajectory (ordered sequence position).\n  - `day` (int): calendar-like day counter; appears aligned with `time_step` in the sample (day = time_step).\n- **State variables (per row):**\n  - `icu_occupancy` (int): number of occupied ICU beds at that time.\n  - `standard_occupancy` (int): number of occupied Standard beds at that time.\n  - `patients` (string-encoded JSON array): the in-hospital patient list at that time.\n\n### Relationships or nested elements\n- **Trajectory structure:**  \n  Rows with the same `trajectory_id` form an ordered sequence by `time_step` \u2192 `{state[0], state[1], \u2026, state[T]}`.\n- **Nested patient list:**  \n  `patients` parses into a JSON list of patient dictionaries; each patient entry contains:\n  - `disease_id` (int): disease category (0,1,2) for the three-disease environment.\n  - `bed_type` (string): `\"ICU\"` or `\"Standard\"`.\n  - `los_remaining` (int): remaining length-of-stay in days/time steps.\n  - `is_alive` (bool): alive status (in sample, all `true`).\n  - `day_in_hospital` (int): how long they have been admitted so far.\n- **Consistency relationship:**  \n  `icu_occupancy` should equal the count of patients with `bed_type == \"ICU\"`, and `standard_occupancy` should equal the count with `bed_type == \"Standard\"` (acts as an aggregate derived from the patient list).\n\n### How this data should inform simulation entities or interactions\n- **Simulation entities:**\n  - **Hospital state** per step: bed occupancies + explicit roster of current inpatients.\n  - **Patient objects** with attributes: disease class, assigned bed type, remaining LOS, survival flag, and time-since-admission.\n- **Core dynamics implied between consecutive states:**\n  - **Progression:** existing patients\u2019 `los_remaining` generally decreases by 1 per step; `day_in_hospital` increases by 1.\n  - **Arrivals/admissions:** new patient records appear at later time steps with `day_in_hospital = 1` and initial `los_remaining`, increasing occupancy.\n  - **Departures (discharge/death):** patients disappear from the list when LOS completes and/or `is_alive` becomes false (not shown in sample but encoded).\n  - **Bed accounting / capacity interaction:** occupancy variables summarize bed usage and can be used to validate/drive admission constraints or policies (e.g., reject/divert when full, allocate ICU vs Standard).\n- **Use in a simulator design:**\n  - Treat each row as a **ground-truth state** for replay/validation, or as empirical guidance for **arrival rates**, **LOS distributions by disease and bed type**, and **bed-type assignment patterns**.\n  - The patient list enables modeling **micro-level transitions** (per-patient LOS countdown), while occupancy supports **macro-level controls** (bed capacity constraints and utilization metrics)."
+    },
+    "test_seed_10_n_100.csv": {
+      "file_type": "csv",
+      "row_count": 6100,
+      "column_count": 6,
+      "columns": [
+        "trajectory_id",
+        "time_step",
+        "day",
+        "icu_occupancy",
+        "standard_occupancy",
+        "patients"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 6100 entries, 0 to 6099\nData columns (total 6 columns):\n #   Column              Non-Null Count  Dtype \n---  ------              --------------  ----- \n 0   trajectory_id       6100 non-null   int64 \n 1   time_step           6100 non-null   int64 \n 2   day                 6100 non-null   int64 \n 3   icu_occupancy       6100 non-null   int64 \n 4   standard_occupancy  6100 non-null   int64 \n 5   patients            6100 non-null   object\ndtypes: int64(5), object(1)\nmemory usage: 286.1+ KB\n",
+      "sample_data": [
+        {
+          "trajectory_id": 0,
+          "time_step": 0,
+          "day": 0,
+          "icu_occupancy": 0,
+          "standard_occupancy": 0,
+          "patients": "[]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 1,
+          "day": 1,
+          "icu_occupancy": 3,
+          "standard_occupancy": 0,
+          "patients": "[{\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 2,
+          "day": 2,
+          "icu_occupancy": 5,
+          "standard_occupancy": 5,
+          "patients": "[{\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 7, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 3,
+          "day": 3,
+          "icu_occupancy": 5,
+          "standard_occupancy": 12,
+          "patients": "[{\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 4,
+          "day": 4,
+          "icu_occupancy": 5,
+          "standard_occupancy": 18,
+          "patients": "[{\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 5,
+          "day": 5,
+          "icu_occupancy": 5,
+          "standard_occupancy": 16,
+          "patients": "[{\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 6,
+          "day": 6,
+          "icu_occupancy": 5,
+          "standard_occupancy": 17,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 7,
+          "day": 7,
+          "icu_occupancy": 4,
+          "standard_occupancy": 14,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 8,
+          "day": 8,
+          "icu_occupancy": 5,
+          "standard_occupancy": 15,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 7}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 9,
+          "day": 9,
+          "icu_occupancy": 5,
+          "standard_occupancy": 15,
+          "patients": "[{\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 6}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 5}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 4}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 3}, {\"disease_id\": 0, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 1, \"bed_type\": \"ICU\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 2, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 3, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 1, \"is_alive\": true, \"day_in_hospital\": 2}, {\"disease_id\": 0, \"bed_type\": \"Standard\", \"los_remaining\": 7, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 5, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 1, \"bed_type\": \"Standard\", \"los_remaining\": 6, \"is_alive\": true, \"day_in_hospital\": 1}, {\"disease_id\": 2, \"bed_type\": \"Standard\", \"los_remaining\": 4, \"is_alive\": true, \"day_in_hospital\": 1}]"
+        }
+      ],
+      "dtypes": {
+        "trajectory_id": "int64",
+        "time_step": "int64",
+        "day": "int64",
+        "icu_occupancy": "int64",
+        "standard_occupancy": "int64",
+        "patients": "object"
+      },
+      "file_semantic_summary": "### Semantic metadata summary (test_seed_10_n_100.csv)\n\n**Overall data structure and type**\n- **File type:** CSV (tabular event/state log).\n- **Granularity:** Each row represents a **single hospital state snapshot** at a discrete **time_step** (daily cadence via `day`).\n- **Grouping:** Rows are grouped by `trajectory_id`, forming a **trajectory**: an ordered sequence of states `{state[0], \u2026, state[T]}`.\n- **Core state fields:**\n  - `trajectory_id` (int): trajectory identifier.\n  - `time_step` (int): monotonically increasing index within a trajectory.\n  - `day` (int): calendar-like day index (appears aligned with time_step).\n  - `icu_occupancy` (int): number of ICU beds occupied at that state.\n  - `standard_occupancy` (int): number of Standard beds occupied at that state.\n  - `patients` (string-encoded JSON array): list of current in-hospital patients at that state.\n\n**Relationships / nested elements**\n- `patients` is a **nested list** encoded as a JSON string; each element is a **patient record** (dictionary) with:\n  - `disease_id` (int): categorical disease label in `{0,1,2}` (three-disease environment).\n  - `bed_type` (str): `\"ICU\"` or `\"Standard\"` indicating current bed assignment.\n  - `los_remaining` (int): remaining length-of-stay (countdown days).\n  - `is_alive` (bool): patient alive status (in sample all `true`).\n  - `day_in_hospital` (int): elapsed days since admission.\n- **Consistency relationship:** `icu_occupancy` should equal the count of patients with `bed_type == \"ICU\"`, and `standard_occupancy` should equal the count with `bed_type == \"Standard\"` at the same row (these are redundant/derived summaries of `patients`).\n\n**How this should inform simulation entities / interactions**\n- **Simulation entities**\n  - **Hospital state:** `(icu_occupancy, standard_occupancy, patient_list)` at each time step.\n  - **Patient entity:** attributes map directly from patient dict fields; `disease_id` determines disease-specific dynamics (arrival rates, LOS distributions, mortality, ICU vs Standard propensity, etc.).\n- **State transition mechanics suggested by the data**\n  - Daily progression: for each existing patient, increment `day_in_hospital` by 1 and decrement `los_remaining` by 1.\n  - Discharge/removal event: when `los_remaining` reaches 0 (and/or `is_alive` becomes false), patient exits the patient_list, reducing occupancy in their bed type.\n  - Admissions: new patient dicts appear between consecutive days, increasing occupancy; their initial `day_in_hospital` is 1 and `los_remaining` is initialized per disease/bed-type.\n  - Bed assignment interaction: `bed_type` is the realized resource usage; the simulator should generate/assign bed type per incoming patient (possibly disease-dependent) and enforce capacity rules if capacities exist (not present in file).\n- **Trajectory usage**\n  - Treat each `trajectory_id` as one independent simulated run; use `time_step` ordering to reconstruct trajectories and calibrate/validate transition rules (admissions, LOS countdown, ICU/Standard mix by disease)."
+    }
+  }
+}

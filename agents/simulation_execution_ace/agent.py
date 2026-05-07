@@ -277,7 +277,8 @@ class SimulationExecutionAgent(BaseAgent):
                 data_path,
                 output_file=output_file,
                 project_root=project_root,
-                openai_api_key=openai_api_key
+                openai_api_key=openai_api_key,
+                task_spec=task_spec
             )
             if execution_result:
                 return execution_result
@@ -346,7 +347,8 @@ class SimulationExecutionAgent(BaseAgent):
         data_path: Optional[str] = None,
         output_file: Optional[str] = None,
         project_root: Optional[str] = None,
-        openai_api_key: Optional[str] = None
+        openai_api_key: Optional[str] = None,
+        task_spec: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Execute Python script using subprocess for lite/ace/alpha mode.
@@ -357,6 +359,7 @@ class SimulationExecutionAgent(BaseAgent):
             output_file: Output file path for simulation results (optional, will be passed as --output argument)
             project_root: PROJECT_ROOT environment variable value (optional)
             openai_api_key: OPENAI_API_KEY environment variable value (optional)
+            task_spec: Task specification dictionary (optional, used for task-specific result extraction)
         
         Returns:
             Dictionary containing execution results or None if execution failed
@@ -447,6 +450,14 @@ class SimulationExecutionAgent(BaseAgent):
                     self.logger.info(f"Output path is a directory, reading multiple JSON files from: {output_file}")
                     simulation_output = {}
                     
+                    # Detect task type from task_spec for task-specific result extraction
+                    is_mask_wearing = False
+                    if task_spec:
+                        task_description = task_spec.get("description", "").lower()
+                        is_mask_wearing = "mask-wearing behavior" in task_description
+                        if is_mask_wearing:
+                            self.logger.info("Mask-wearing behavior task detected: will read results.json and apply special mapping")
+                    
                     # Try to read each expected file (skip large files like simulated_trajectories)
                     expected_files = {
                         "calibrated_parameters": "calibrated_parameters.json",
@@ -454,6 +465,13 @@ class SimulationExecutionAgent(BaseAgent):
                         "evaluation_results_on_validation": "evaluation_results_on_validation.json",
                         # Skip simulated_trajectories_validation.json as it's large and not needed for metrics
                     }
+                    
+                    if is_mask_wearing:
+                        # Preferred newer output format
+                        expected_files["results"] = "results.json"
+                        # Fallback format used by some mask-wearing scripts (no results.json)
+                        expected_files["metrics_file"] = "metrics.json"
+                        expected_files["calibrated_params_file"] = "calibrated_params.json"
                     
                     files_found = 0
                     for key, filename in expected_files.items():
@@ -473,8 +491,54 @@ class SimulationExecutionAgent(BaseAgent):
                         # Transform directory format to match single-file format structure
                         transformed_output = {}
                         
-                        # Transform calibrated_parameters
-                        if "calibrated_parameters" in simulation_output:
+                        # Special handling for mask-wearing behavior tasks: map results.json fields
+                        if is_mask_wearing and "results" in simulation_output:
+                            results_data = simulation_output["results"]
+                            self.logger.info("Applying mask-wearing behavior mapping from results.json")
+                            
+                            if "metrics" in results_data:
+                                execution_result["simulation_metrics"] = results_data["metrics"]
+                                self.logger.debug(f"Mapped metrics to simulation_metrics: {len(results_data['metrics'])} fields")
+                            
+                            # Optional: keep validation metrics if present
+                            if "val_metrics" in results_data and isinstance(results_data["val_metrics"], dict):
+                                execution_result["val_metrics"] = results_data["val_metrics"]
+                                self.logger.debug(
+                                    f"Mapped val_metrics: {len(results_data['val_metrics'])} fields"
+                                )
+
+                            if "parameters" in results_data:
+                                execution_result["calibrated_parameters"] = results_data["parameters"]
+                                transformed_output["calibrated_parameters"] = results_data["parameters"]
+                                self.logger.debug("Mapped parameters to calibrated_parameters")
+                            
+                            transformed_output["results"] = results_data
+                        elif is_mask_wearing and "results" not in simulation_output:
+                            # Fallback mapping for mask-wearing behavior tasks when results.json is absent:
+                            # - metrics.json["metrics"] -> execution_result["simulation_metrics"]
+                            # - metrics.json["val_metrics"] -> execution_result["val_metrics"]
+                            # - calibrated_params.json -> execution_result["calibrated_parameters"]
+                            if "metrics_file" in simulation_output and isinstance(simulation_output["metrics_file"], dict):
+                                metrics_payload = simulation_output["metrics_file"]
+                                if "metrics" in metrics_payload and isinstance(metrics_payload["metrics"], dict):
+                                    execution_result["simulation_metrics"] = metrics_payload["metrics"]
+                                    self.logger.debug(
+                                        f"Mapped metrics.json.metrics to simulation_metrics: {len(metrics_payload['metrics'])} fields"
+                                    )
+                                if "val_metrics" in metrics_payload and isinstance(metrics_payload["val_metrics"], dict):
+                                    execution_result["val_metrics"] = metrics_payload["val_metrics"]
+                                    self.logger.debug(
+                                        f"Mapped metrics.json.val_metrics to val_metrics: {len(metrics_payload['val_metrics'])} fields"
+                                    )
+                                transformed_output["metrics"] = metrics_payload
+
+                            if "calibrated_params_file" in simulation_output and isinstance(simulation_output["calibrated_params_file"], dict):
+                                execution_result["calibrated_parameters"] = simulation_output["calibrated_params_file"]
+                                transformed_output["calibrated_parameters"] = simulation_output["calibrated_params_file"]
+                                self.logger.debug("Mapped calibrated_params.json to calibrated_parameters")
+                        
+                        # Transform calibrated_parameters (only if not already set by task-specific mapping)
+                        if "calibrated_parameters" not in execution_result and "calibrated_parameters" in simulation_output:
                             calib_params = simulation_output["calibrated_parameters"]
                             # Convert from directory format to single-file format
                             transformed_calib = {

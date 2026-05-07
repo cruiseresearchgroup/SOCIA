@@ -1,0 +1,110 @@
+{
+  "strategies": {
+    "poi-recall-low-due-to-no-personal-poi-memory-in-2021-context": {
+      "reflection": {
+        "blueprint_refs": [
+          "Blueprint: \"Online OOD context window rule: ... construct a 7-day context window ...\"",
+          "Blueprint: POI choice should blend personal preference and distance decay."
+        ],
+        "code_refs": [
+          {
+            "symbol": "MobilitySimulator._context_last_poi"
+          },
+          {
+            "symbol": "Resident.simulate_day"
+          }
+        ],
+        "evidence": {
+          "metrics": "topk_poi_recall=0.0873 (low)."
+        },
+        "error_identification": "POI overlap with ground truth is very low (recall@5 ~ 0.09), indicating the simulator rarely hits the user’s true POIs on a given day.",
+        "root_cause_analysis": "The context mechanism only uses the last POI from prior days as a starting point (_context_last_poi), but does not condition the day’s POI candidates on the 7-day context window beyond that. In Resident.simulate_day(), candidates are mostly (a) top historical POIs from 2019–2020 by supercat and (b) global popular POIs; this can miss 2021-specific recurring POIs that appear in recent 2021 context (e.g., new home/work or changed routines), which the blueprint explicitly allows using earlier 2021 days in the context window.",
+        "correct_approach": "Extend _context_last_poi into a context feature extractor that returns recent POIs and/or per-supercat POI counts from the preceding 7 days (strictly earlier than target date). In Resident.simulate_day(), inject these context POIs into the candidate set with a strong prior (e.g., additional additive weight or separate mixture component). Ensure strict no-leakage (exclude target day).",
+        "metric_links": [
+          {
+            "name": "topk_poi_recall",
+          }
+        ]
+      }
+    },
+    "stop-count-error-high-missing-daylength-and-dwell-structure": {
+      "reflection": {
+        "blueprint_refs": [
+          "Blueprint: baseline_stop_count_dist (per-user) and abnormal shift via theta_stop_count_multiplier",
+          "Blueprint: daily plan uses start_time, stop_count, and inter-event gaps with feasibility constraints"
+        ],
+        "code_refs": [
+          {
+            "symbol": "Resident.simulate_day"
+          },
+          {
+            "symbol": "Resident._tilt_count_pmf_to_target_mean"
+          }
+        ],
+        "evidence": {
+          "metrics": "stop_count_abs_mean_error=2.0101 (high); stop_count_kl=0.1165 (moderate)."
+        },
+        "error_identification": "The simulator’s per-day number of visits is off by ~2 on average, despite matching the average visits/day reasonably closely in diagnostics.",
+        "root_cause_analysis": "Stop count is sampled from a tilted baseline PMF, but there is no coupling between sampled stop_count and feasible time budget beyond a minimal `end_min - (stop_count-1)` guard. Because gaps are sampled from an empirical gap list without conditioning on stop_count or time-of-day, the model can produce unrealistic dense late-day chains or compress chains to fit, which destabilizes effective stop realization vs the intended distribution and yields high MAE.",
+        "correct_approach": "Condition gap sampling on remaining time budget: when stop_count is high, sample smaller gaps (or rescale sampled gaps) to maintain feasibility without truncation artifacts; when stop_count is low, allow larger gaps. Alternatively, model an explicit end time distribution and sample stop_count consistent with (end-start)/expected_gap. Keep the existing PMF tilt but add a second-stage feasibility-consistent adjustment rather than silent clipping.",
+        "metric_links": [
+          {
+            "name": "stop_count_abs_mean_error"
+          },
+          {
+            "name": "stop_count_kl"
+          }
+        ]
+      }
+    },
+    "time-distribution-mismatch-from-coarse-within-bin-sampling-and-start-time-shift": {
+      "reflection": {
+        "blueprint_refs": [
+          "Blueprint: time_of_day_emd on minute-of-day distribution; simulator can operate in minute granularity with HH:MM:SS output"
+        ],
+        "code_refs": [
+          {
+            "symbol": "Resident.simulate_day"
+          }
+        ],
+        "evidence": {
+          "metrics": "tod_jsd_avg=0.1054 (noticeable mismatch)."
+        },
+        "error_identification": "Time-of-day distribution mismatch remains moderate (JSD ~ 0.105), indicating simulated visit times are shifted/spread differently than ground truth.",
+        "root_cause_analysis": "Start times are sampled from a binned histogram (15-minute bins) and then uniformly within-bin, then shifted by theta_start_time_shift_minutes. Subsequent times are driven by gap sampling that is not conditioned on time-of-day; additionally, the code retries start time up to 8 times to force an “active window” (04:00–23:30), which can reshape the distribution in a way not present in the baseline data.",
+        "correct_approach": "Fit and sample start times at minute resolution (or use 5-minute bins) without the hard active-window rejection loop; if you need constraints, incorporate them into the learned baseline (e.g., truncated distribution) so sampling matches data. Condition gaps on time-of-day bins or remaining minutes to avoid piling events near midnight.",
+        "metric_links": [
+          {
+            "name": "tod_jsd_avg"
+          }
+        ]
+      }
+    },
+    "poi-choice-mixture-capped-too-high-limits-distance-signal": {
+      "reflection": {
+        "blueprint_refs": [
+          "Blueprint parameter: theta_preference_vs_distance_mixture in [0.0, 1.0]"
+        ],
+        "code_refs": [
+          {
+            "symbol": "Resident.simulate_day"
+          }
+        ],
+        "evidence": {
+          "metrics": "trip_distance_wasserstein=0.9993 and topk_poi_recall=0.0873; code clamps w_pref to <=0.9."
+        },
+        "error_identification": "The calibrated preference-vs-distance mixture cannot reach the blueprint’s full [0,1] range, which can limit calibration’s ability to trade off personalization vs spatial plausibility.",
+        "root_cause_analysis": "Resident.simulate_day() clamps w_pref with `min(0.9, w_pref)` even though the blueprint allows up to 1.0. This prevents “pure preference” regimes that may be needed to improve POI recall for users with strong habitual POIs, especially when category modeling is coarse.",
+        "correct_approach": "Clamp theta_preference_vs_distance_mixture to [0.0, 1.0] exactly as specified. If numerical issues motivated the cap, address them by adding a small floor to distance weights or preference weights (already done) rather than changing the parameter domain.",
+        "metric_links": [
+          {
+            "name": "trip_distance_wasserstein"
+          },
+          {
+            "name": "topk_poi_recall"
+          }
+        ]
+      }
+    }
+  }
+}

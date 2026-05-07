@@ -1,0 +1,351 @@
+{
+  "model_type": "agent_based_network",
+  "description": "A multiplex agent-based simulation on a network with family, work/school, and community layers. Agents adopt or abandon mask-wearing based on personal risk perception, social exposure by layer, received information, demographic modifiers, and a government intervention beginning on Day 10. Parameters are calibrated on days 0\u201329, then used to predict days 30\u201339.",
+  "entities": [
+    {
+      "name": "Agent",
+      "attributes": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "state_t (0/1, wearing_mask)",
+        "received_info_t (0/1)",
+        "neighbors.family (list[int])",
+        "neighbors.work_school (list[int])",
+        "neighbors.community (list[int])",
+        "degree.family",
+        "degree.work_school",
+        "degree.community"
+      ],
+      "behaviors": [
+        "compute_layer_exposure",
+        "receive_information",
+        "adopt_mask",
+        "drop_mask"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "attributes_source": "agent_attributes.csv",
+          "initial_state_source": "train_data.csv day==0 or initial_mask_wearing if day 0 missing",
+          "network_source": "social_network.json (symmetrized, deduplicated)"
+        }
+      }
+    },
+    {
+      "name": "Government",
+      "attributes": [
+        "intervention_day",
+        "broadcast_intensity",
+        "policy_effect_on_info",
+        "policy_effect_on_adoption",
+        "policy_effect_on_abandonment"
+      ],
+      "behaviors": [
+        "broadcast_information_policy",
+        "modify_behavior_parameters_after_intervention"
+      ],
+      "initialization": {
+        "method": "specified",
+        "parameters": {
+          "intervention_day": 10,
+          "broadcast_intensity": 1.0
+        }
+      }
+    },
+    {
+      "name": "MultiplexNetwork",
+      "attributes": [
+        "nodes",
+        "edges.family",
+        "edges.work_school",
+        "edges.community",
+        "assortativity.age_group",
+        "assortativity.occupation",
+        "clustering.family"
+      ],
+      "behaviors": [
+        "symmetrize_edges",
+        "compute_network_statistics"
+      ],
+      "initialization": {
+        "method": "data_driven",
+        "parameters": {
+          "network_source": "social_network.json",
+          "edge_symmetry": "undirected",
+          "remove_self_loops": true,
+          "deduplicate": true
+        }
+      }
+    }
+  ],
+  "behaviors": [
+    {
+      "name": "compute_layer_exposure",
+      "description": "Compute fraction of masked neighbors per layer using previous day states and aggregate to a weighted exposure score.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "layer_influence_weights": {
+          "family": 0.5,
+          "work_school": 0.3,
+          "community": 0.2
+        },
+        "exposure_effect_by_layer": {
+          "family": 1.0,
+          "work_school": 0.6,
+          "community": 0.3
+        }
+      },
+      "algorithm": "For each layer L in {family, work_school, community}, compute f_L = mean(state_{t-1} of neighbors in layer L). Exposure_L = exposure_effect_by_layer[L] * f_L. WeightedExposure = sum_L layer_influence_weights[L] * Exposure_L."
+    },
+    {
+      "name": "receive_information",
+      "description": "Generate or replay received_info for each agent-day.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "mode": "replay_train_then_model",
+        "theta0_info": -3.5,
+        "theta_peer_info": 1.0,
+        "theta_policy_info": 1.5
+      },
+      "algorithm": "If day <= 29: received_info_t = observed from train_data.csv. Else: compute p_info = sigmoid(theta0_info + theta_peer_info * WeightedExposure + theta_policy_info * 1[day >= intervention_day] * broadcast_intensity). Sample received_info_t ~ Bernoulli(p_info)."
+    },
+    {
+      "name": "adopt_mask",
+      "description": "Non-wearers may adopt based on risk perception, social exposure, received info, demographics, and policy.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "beta0_adopt": -3.0,
+        "beta_risk": 1.2,
+        "beta_social": 2.0,
+        "beta_info": 1.0986,
+        "beta_policy_adopt": 0.5,
+        "group_offsets.age_group": "estimated",
+        "group_offsets.occupation": "estimated"
+      },
+      "algorithm": "For agents with state_{t-1} = 0, compute logit(p_adopt) = beta0_adopt + beta_risk * risk_perception + beta_social * WeightedExposure + beta_info * received_info_t + beta_policy_adopt * 1[day >= intervention_day] + offset(age_group, occupation). Sample adopt_t ~ Bernoulli(p_adopt). If adopt_t=1 then set state_t=1."
+    },
+    {
+      "name": "drop_mask",
+      "description": "Wearers may abandon mask wearing, with risk reduced by exposure and information; policy can reduce drops.",
+      "applicable_to": [
+        "Agent"
+      ],
+      "parameters": {
+        "p_drop0": 0.01,
+        "gamma_exposure": 2.0,
+        "gamma_info": 0.5,
+        "gamma_policy": 0.5
+      },
+      "algorithm": "For agents with state_{t-1} = 1, compute p_drop = min(1, p_drop0 * exp(-gamma_exposure * WeightedExposure) * exp(-gamma_info * received_info_t) * exp(-gamma_policy * 1[day >= intervention_day])). Sample drop_t ~ Bernoulli(p_drop). If drop_t=1 then set state_t=0 else state_t=1."
+    },
+    {
+      "name": "broadcast_information_policy",
+      "description": "Government increases information probability and nudges adoption after intervention day.",
+      "applicable_to": [
+        "Government"
+      ],
+      "parameters": {
+        "intervention_day": 10,
+        "broadcast_intensity": 1.0,
+        "policy_effect_on_info": 1.5,
+        "policy_effect_on_adoption": 0.5,
+        "policy_effect_on_abandonment": 0.5
+      },
+      "algorithm": "For day >= intervention_day, set broadcast_intensity=policy_effect_on_info; add policy term beta_policy_adopt=policy_effect_on_adoption in adoption logit; include gamma_policy=policy_effect_on_abandonment in drop calculation."
+    }
+  ],
+  "interactions": [
+    {
+      "name": "PeerInfluence",
+      "description": "Neighbors\u2019 mask states influence an agent\u2019s adoption and abandonment probabilities via layer-weighted exposure.",
+      "entities_involved": [
+        "Agent",
+        "Agent"
+      ],
+      "trigger": "time",
+      "effect": "Higher exposure increases adoption probability and decreases drop probability; layer effects differ."
+    },
+    {
+      "name": "InformationBroadcast",
+      "description": "Exogenous and peer-coupled information events that increase adoption odds.",
+      "entities_involved": [
+        "Government",
+        "Agent"
+      ],
+      "trigger": "time and policy (day >= intervention_day)",
+      "effect": "Increases probability of received_info and thus adoption, decreases abandonment."
+    }
+  ],
+  "environment": {
+    "type": "network_multiplex",
+    "dimensions": null,
+    "time_step": 1,
+    "time_unit": "days"
+  },
+  "parameters": {
+    "layer_influence_weights": {
+      "family": 0.5,
+      "work_school": 0.3,
+      "community": 0.2
+    },
+    "exposure_effect_by_layer": {
+      "family": 1.0,
+      "work_school": 0.6,
+      "community": 0.3
+    },
+    "beta0_adopt": -3.0,
+    "beta_risk": 1.2,
+    "beta_social": 2.0,
+    "beta_info": 1.0986,
+    "beta_policy_adopt": 0.5,
+    "p_drop0": 0.01,
+    "gamma_exposure": 2.0,
+    "gamma_info": 0.5,
+    "gamma_policy": 0.5,
+    "theta0_info": -3.5,
+    "theta_peer_info": 1.0,
+    "theta_policy_info": 1.5,
+    "homophily_coefficients": {
+      "age_group": 0.3,
+      "occupation": 0.5
+    },
+    "family_clustering_target": 0.6,
+    "intervention_day": 10,
+    "info_schedule_mode": "replay_train_then_model",
+    "synchronous_updates": true,
+    "simulation_horizon_days": 40
+  },
+  "initialization": {
+    "population_size": "infer from agent_attributes.csv or social_network.json",
+    "random_seed": 42,
+    "steps": [
+      "Load agent_attributes.csv; validate degrees and convert booleans.",
+      "Load social_network.json; deduplicate, symmetrize per layer; validate node IDs.",
+      "Join attributes to nodes; set initial state from train_data.csv day 0 when available, else initial_mask_wearing.",
+      "Prepare panel features from train_data.csv days 0\u201329 for calibration: lagged states, received_info, compute per-layer exposures using network and previous day states.",
+      "Estimate behavior parameters (Stage 2) using logistic models; map to beta/gamma/theta.",
+      "Optionally compute network statistics (Stage 1) for validation: per-layer degree, clustering, assortativity.",
+      "Set government intervention parameters (intervention_day=10)."
+    ]
+  },
+  "algorithms": {
+    "NetworkConstruction": "Use provided social_network.json; symmetrize edges (add reciprocals where missing), remove self-loops, ensure sets per layer. If JSON missing, generate per-layer configuration model respecting degree sequences, homophily, and family clustering via triadic closure.",
+    "ExposureComputation": "For each agent and layer, compute masked neighbor fraction using states at t-1; aggregate with layer weights and layer-specific effects.",
+    "InfoGenerationModel": "Discrete-time logit: p_info = sigmoid(theta0_info + theta_peer_info * WeightedExposure + theta_policy_info * 1[day>=intervention_day] * broadcast_intensity). Replay observed for days 0\u201329; simulate for 30\u201339.",
+    "AdoptionProbability": "For non-wearers, logit(p_adopt) = beta0_adopt + beta_risk*risk + beta_social*WeightedExposure + beta_info*info + beta_policy_adopt*1[day>=intervention_day] + group offsets (age_group, occupation).",
+    "AbandonmentProbability": "For wearers, p_drop = p_drop0 * exp(-gamma_exposure*WeightedExposure) * exp(-gamma_info*info) * exp(-gamma_policy*1[day>=intervention_day]).",
+    "SynchronousUpdateLoop": "For day t from 1..T: compute exposures from states at t-1; generate info_t; for each agent sample adoption or drop based on prior state; update states simultaneously; record outputs.",
+    "CalibrationStage1_NetworkStats": "Compute per-layer degree distributions, clustering (especially family), and assortativity by age_group and occupation; compare to targets.",
+    "CalibrationStage2_BehaviorEstimation": "Fit logistic regressions on train days 0\u201329: (i) adoption among non-wearers, (ii) drop among wearers. Features: risk, exposure by layer (or weighted exposure), received_info, policy indicator, age_group and occupation fixed effects. Map coefficients to model parameters.",
+    "Evaluation": "After simulating days 0\u201339 with calibrated parameters, compute RMSE over days 30\u201339 vs actual; compute Peak Adoption Rate Error and Time-to-Peak Error for the intervention window."
+  },
+  "data_sources": [
+    {
+      "name": "agent_attributes.csv",
+      "purpose": "Agent attributes and per-layer degree targets; initial_mask_wearing fallback.",
+      "fields_used": [
+        "agent_id",
+        "age",
+        "age_group",
+        "occupation",
+        "risk_perception",
+        "initial_mask_wearing",
+        "family_connections",
+        "work_school_connections",
+        "community_connections",
+        "total_connections"
+      ]
+    },
+    {
+      "name": "social_network.json",
+      "purpose": "Multiplex network topology for family, work/school, and community layers.",
+      "fields_used": [
+        "family",
+        "work_school",
+        "community",
+        "all"
+      ]
+    },
+    {
+      "name": "train_data.csv",
+      "purpose": "Time series for calibration (days 0\u201329), including daily wearing_mask and received_info; initialize day 0 states.",
+      "fields_used": [
+        "day",
+        "agent_id",
+        "wearing_mask",
+        "received_info"
+      ]
+    }
+  ],
+  "code_structure": {
+    "files": [
+      {
+        "name": "config.py",
+        "description": "Global configuration parameters, paths, and defaults."
+      },
+      {
+        "name": "data_loading.py",
+        "description": "Load and validate CSV/JSON; join attributes; preprocess booleans and categories."
+      },
+      {
+        "name": "network.py",
+        "description": "Build/symmetrize multiplex network; compute network statistics."
+      },
+      {
+        "name": "agents.py",
+        "description": "Agent and Government classes with behaviors; exposure computation helpers."
+      },
+      {
+        "name": "dynamics.py",
+        "description": "Core update rules for info generation, adoption, and abandonment; synchronous loop."
+      },
+      {
+        "name": "calibration.py",
+        "description": "Fit logistic models, compute group offsets, map coefficients to parameters; save/load calibrated params."
+      },
+      {
+        "name": "simulation.py",
+        "description": "Orchestrate initialization, run training-period replay, predictive simulation, and output collection."
+      },
+      {
+        "name": "evaluation.py",
+        "description": "Compute RMSE, Peak Adoption Rate Error, and Time-to-Peak Error; plotting utilities if needed."
+      },
+      {
+        "name": "metrics.py",
+        "description": "Utility functions to compute daily prevalence, event rates, and exposure distributions."
+      },
+      {
+        "name": "main.py",
+        "description": "Entry point; parse CLI args, run calibration, simulation, and evaluation for days 30\u201339."
+      }
+    ],
+    "dependencies": [
+      "numpy",
+      "pandas",
+      "networkx",
+      "scipy",
+      "scikit-learn",
+      "statsmodels",
+      "pyyaml"
+    ]
+  },
+  "prediction_period": {
+    "start_day": 30,
+    "end_day": 39
+  },
+  "evaluation_metrics": [
+    "RMSE",
+    "Peak Adoption Rate Error",
+    "Time-to-Peak Error"
+  ]
+}

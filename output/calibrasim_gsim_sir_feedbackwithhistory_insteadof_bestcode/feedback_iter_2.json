@@ -1,0 +1,151 @@
+{
+  "blueprint-io-metric-key-mismatch": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "io_contract.results_json.metrics_schema: train_mse_overall/val_mse_overall/test_mse_overall",
+      "simulation_evaluation.metrics names: train_loss/val_loss/test_loss (Blueprint earlier section)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "Evaluator.compute_metrics",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "save_results",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Code outputs metrics keys train_loss/val_loss/test_loss, while io_contract.metrics_schema expects train_mse_overall/val_mse_overall/test_mse_overall."
+    },
+    "metric_links": [],
+    "error_identification": "Results JSON metric key naming is inconsistent with the IO contract schema, risking downstream evaluation/parsing errors even if numeric values are correct.",
+    "root_cause_analysis": "Evaluator.compute_metrics and save_results serialize metric keys that follow earlier blueprint metric names (train_loss/val_loss/test_loss), but io_contract.results_json.metrics_schema specifies *_mse_overall keys. This is a spec mismatch within the blueprint that the code does not resolve.",
+    "correct_approach": "In save_results (or Evaluator.compute_metrics), include both sets of keys to be robust: keep current keys (train_loss/val_loss/test_loss) and also add aliases train_mse_overall/val_mse_overall/test_mse_overall mapped to the same floats; similarly alias val_mse_S/I/R and conservation_violation_rate if required by the io_contract schema naming.",
+    "key_insight": "When the spec contains inconsistent naming across sections, emit backward-compatible aliases in the output schema rather than picking one and breaking evaluators."
+  },
+  "x_o_shape-not-183": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Flatten the full trajectory (61\u00d73) into a 1\u00d7183 vector",
+      "SBI training uses flattened full (T+1)x3 trajectory as x"
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "calibration_artifacts.x_o_shape=[190] indicates extra appended summary features beyond flattened (T+1)*3=183."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "The observation vector used for NPE is length 190 instead of the required 183, meaning calibration conditions on a different representation than specified.",
+    "root_cause_analysis": "SBINPECalibrator.fit concatenates summary features to the flattened normalized trajectory (flatten_states(obs_frac) + _summary_features), violating the blueprint\u2019s explicit x_o construction and simulated x construction.",
+    "correct_approach": "Remove the appended summary feature block and train NPE strictly on the flattened (T+1)*3 trajectory vector as specified (still allow normalization/z-scoring, but do not change dimensionality). If identifiability needs help, handle it by changing the simulator/likelihood assumptions (not by changing x dimensionality) unless the spec is updated.",
+    "key_insight": "For SBI, the conditioning statistic x is part of the model specification; changing its dimensionality is a spec change and can invalidate comparisons even if it helps training."
+  },
+  "generalization-gap-single-trajectory-calibration": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "infer parameters from a single observed trajectory (train trajectory_id=0 only), then evaluate ... on full train/val/test sets"
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "DiscreteTimeSIRSimulator.rollout",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "train_loss=207.70 vs val_loss=310.13 vs test_loss=273.61; val_loss_per_dim shows high S and R errors (S=378.69, R=423.96) relative to I=127.74."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.25
+      },
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.15
+      }
+    ],
+    "error_identification": "Validation and test losses remain substantially higher than training, indicating limited generalization from parameters inferred on a single trajectory; errors concentrate in S and R (final sizes/attack rate).",
+    "root_cause_analysis": "Even with correct SBI, a single noisy stochastic trajectory provides weak identification of (beta,gamma) for heterogeneous initial conditions across many trajectories. The current evaluation uses a single global (beta,gamma) for all trajectories; if the dataset contains per-trajectory variation or process noise beyond binomial sampling, the model class cannot fit all trajectories, and validation loss will not approach 1e-6.",
+    "correct_approach": "Add minimal structure to reduce mismatch without inventing new parameters: (1) ensure NPE trains on the exact flattened count trajectory (no extra features) and consider using raw counts (not normalized-by-N) in x for better scale matching across trajectories; (2) increase K in evaluation adaptively for high-variance trajectories (e.g., larger I0 or smaller N) to reduce Monte Carlo error in mean predictions; (3) add a diagnostic in calibration_artifacts to report posterior variance (e.g., std of posterior_samples) to detect non-identifiability\u2014then, if posterior is broad, switch to using posterior predictive mean by integrating over posterior samples when evaluating (simulate with multiple theta samples, then average), which often generalizes better than posterior mean point estimate.",
+    "key_insight": "When calibration is forced to one trajectory, prefer posterior predictive averaging over a point estimate to improve out-of-trajectory generalization and reduce sensitivity to stochastic idiosyncrasies."
+  },
+  "posterior-mean-point-estimate-suboptimal": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "optimized_parameters: Set to posterior mean ...",
+      "evaluation: simulate K rollouts per trajectory and output mean predicted trajectory"
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "main",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Persistent gap: val_loss=310.13 with single theta point estimate; val_peak_I_error.peak_time_mae=5.67 suggests timing mismatch."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "val_peak_I_error",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      }
+    ],
+    "error_identification": "Using only the posterior mean as a single parameter setting can yield biased dynamics (especially peak timing) compared to averaging over plausible parameters, worsening validation fit.",
+    "root_cause_analysis": "main evaluates only at optimized_params (posterior mean). For nonlinear simulators, E[trajectory|theta] at theta=E[theta|x] generally differs from E_theta[E[trajectory|theta]] (posterior predictive). This can shift peak timing/magnitude.",
+    "correct_approach": "Keep optimized_parameters as posterior mean for contract compliance, but change evaluation to compute posterior-predictive mean trajectories: sample M thetas from posterior conditioned on x_o_z, for each theta run K rollouts per trajectory, then average across both theta and rollout. Store M and K in calibration_artifacts for reproducibility.",
+    "key_insight": "For nonlinear stochastic simulators, posterior predictive averaging usually outperforms plug-in posterior mean parameters on out-of-sample trajectories."
+  }
+}

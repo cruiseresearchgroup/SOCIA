@@ -1,0 +1,124 @@
+{
+  "missing-neighbor-mask-share-calculation": {
+    "issue_type": "CODE_BUG",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Each day, an agent receives information with probability: 1 - exp(-(phi_family * share_family - weighted by mask-wearing neighbors - + phi_work * share_work + phi_community * share_community + lambda_broadcast)), capped at [0,1].",
+      "Compute per-agent neighbor mask share per layer; generate received_info via peer and exogenous channels; compute mask adoption probability using a calibrated logistic decision rule with inertia and demographics."
+    ],
+    "code_refs": [
+      {
+        "symbol": "Simulator.rollout",
+        "lines": "L142-L170"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "RMSE_aggregate: 0.7426, MAE_aggregate: 0.5514, Brier: 0.5514, TransitionFit: 0.5514 \u2014 all extremely high, indicating systematic prediction error."
+    },
+    "metric_links": [
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.33
+      },
+      {
+        "name": "MAE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.33
+      },
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.34
+      }
+    ],
+    "error_identification": "Simulated mask-wearing rates are highly inaccurate (RMSE > 0.74) due to neighbor mask share being computed from current-day simulated states instead of previous-day states, violating temporal causality in the decision rule.",
+    "root_cause_analysis": "In Simulator.rollout, neighbor mask share is computed using agent_states_by_day[prev_day], but the code incorrectly uses the current agent's initial state (from agent_attributes) for prev_mask_state and does not update agent_states_by_day correctly per day. This causes the model to use outdated or incorrect neighbor influence, leading to misestimated adoption probabilities.",
+    "correct_approach": "Modify Simulator.rollout to ensure neighbor mask share is computed only from agent_states_by_day[prev_day] for all layers, and update agent_states_by_day[day][agent_id] after computing the new state for that agent on the current day. Ensure prev_mask_state is pulled from agent_states_by_day[prev_day][agent_id], not from agents dataframe.",
+    "key_insight": "In sequential social simulations, neighbor influence must be computed from the previous timestep's simulated state, never from initial or current-state values \u2014 temporal consistency is non-negotiable for causal validity."
+  },
+  "beta-parameters-zeroed-out": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "beta_f, beta_w, beta_c (peer influence slopes per layer)",
+      "phi_family, phi_work, phi_community (map neighbor mask share to info receipt probability)",
+      "Estimate from observed received_info (if present) and mask transitions via joint likelihood."
+    ],
+    "code_refs": [
+      {
+        "symbol": "Calibrator._fit_logistic_baseline",
+        "lines": "L108-L114"
+      },
+      {
+        "symbol": "Calibrator.fit",
+        "lines": "L143-L145"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "Calibrated parameters show beta_f=beta_w=beta_c=0.0 and phi_family=phi_work=phi_community=0.0 \u2014 peer influence completely suppressed, contradicting blueprint requirement that peer influence drives adoption."
+    },
+    "metric_links": [
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      },
+      {
+        "name": "MAE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      },
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Peer influence coefficients (beta_f, beta_w, beta_c) and their corresponding info propagation weights (phi_*) are calibrated to zero, eliminating social influence \u2014 yet observed data and blueprint require peer effects to be primary drivers of behavior change.",
+    "root_cause_analysis": "Calibrator._fit_logistic_baseline initializes beta_* from logistic regression on training data, but then Calibrator.fit overrides them by setting phi_* = beta_* and optimizing only alpha, beta_r, beta_i, lambda_broadcast \u2014 excluding beta_f, beta_w, beta_c from optimization. This forces peer influence to zero during calibration, violating the blueprint's core mechanism.",
+    "correct_approach": "Include beta_f, beta_w, beta_c in the calib_param_names list during optimization in Calibrator.fit, and remove the forced synchronization phi_* = beta_* during optimization. Instead, treat phi_* and beta_* as independent parameters to be jointly optimized, as both are distinct components in the decision and diffusion rules per blueprint.",
+    "key_insight": "Never constrain model parameters to be equal during optimization unless explicitly required by theory \u2014 independent calibration of influence (beta) and diffusion (phi) coefficients is essential for accurate behavioral modeling."
+  },
+  "received-info-computation-error": {
+    "issue_type": "CODE_BUG",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Each day, an agent receives information with probability: 1 - exp(-(phi_family * share_family + phi_work * share_work + phi_community * share_community + lambda_broadcast)), capped at [0,1]."
+    ],
+    "code_refs": [
+      {
+        "symbol": "Simulator.rollout",
+        "lines": "L171-L172"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "Brier score = 0.5514 (near random guessing), TransitionFit = 0.5514 \u2014 indicates predicted received_info is not bounded [0,1] and likely inflated, causing adoption probability to saturate."
+    },
+    "metric_links": [
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      }
+    ],
+    "error_identification": "Received information is computed as a raw sum (phi * share + lambda_broadcast), not transformed by the logistic formula 1 - exp(-sum), resulting in values far exceeding [0,1], which distorts adoption probability and causes probabilistic calibration failure.",
+    "root_cause_analysis": "In Simulator.rollout, received_info is computed as a linear sum of phi_* * share_* + lambda_broadcast, but the blueprint specifies it must be computed as 1 - exp(-sum). This linear sum can exceed 1 (e.g., 0.5*0.8 + 0.5*0.7 + 0.1 = 1.0), and when used in sigmoid, it produces extreme probabilities.",
+    "correct_approach": "Replace received_info = phi_family * share_family + ... + lambda_broadcast with received_info = 1 - np.exp(-(phi_family * neighbor_mask_share_family + phi_work * neighbor_mask_share_work + phi_community * neighbor_mask_share_community + lambda_broadcast)), and clamp to [0,1] to ensure validity.",
+    "key_insight": "Information receipt probability must always be computed using the exponential decay form (1 - exp(-weighted_sum)) to ensure bounded [0,1] outputs \u2014 direct summation of weights is a fundamental error in diffusion modeling."
+  }
+}

@@ -1,0 +1,837 @@
+{
+  "title": "Simulation Task",
+  "description": "Design a simulator to generate supply-chain state trajectories for a single-stage Beer Game (SUPPLY) environment. A trajectory is an ordered sequence of state dictionaries over time: {state[0], state[1], ..., state[T]} where each state contains inventory, backlog, pipeline shipments, and the current time step.",
+  "simulation_focus": "Goal: generate state transition sequences from initial conditions using a parameterized SimulatorStep class.\nKey components:\n(1) Define supply-chain dynamics parameters as model parameters (e.g., demand process, lead time distribution, fulfillment logic).\n(2) Implement step(state[t], action[t], rng) that computes state[t+1] from state[t] given an order action.\n(3) Parameters are optimized via Simulation-Based Inference (SBI) using Neural Posterior Estimation (NPE), following the same calibration skeleton as SIR/HOSP.\n(4) The simulator must update inventory/backlog with interpretable accounting and pipeline shipping progression, while remaining stable under optimization and generalizing beyond very few observed trajectories.",
+  "data_folder": "data_fitting/calibrasim_supply/",
+  "data_files": {
+    "train_seed_10_n_100.csv": "SUPPLY training trajectories with 100 independent trajectories. Format: CSV with columns 'trajectory_id' (0-99), 'time_step' (0-60), 'inventory' (on-hand units), 'backlog' (unfilled demand), 'pipeline' (string-encoded list of (quantity, time_remaining)), and 't' (current time step; usually equals time_step). Each trajectory represents a 61-day supply-chain evolution. IMPORTANT: For SBI training, ONLY use the first trajectory (trajectory_id=0) as the observation data x_o; final evaluation uses ALL trajectories from train/val/test.",
+    "val_seed_10_n_100.csv": "SUPPLY validation trajectories. Same format as train_seed_10_n_100.csv. Used to compute validation MSE and per-dimension validation losses.",
+    "test_seed_10_n_100.csv": "SUPPLY test trajectories. Same format as train_seed_10_n_100.csv. Used ONLY for final generalization assessment after calibration."
+  },
+  "evaluation_metrics": {
+    "train_mse": {
+      "description": "Training MSE: mean((true - pred)^2) computed over all training trajectories and all time steps, after simulator parameters are optimized. Scalar. Lower is better."
+    },
+    "val_mse": {
+      "description": "Validation MSE: mean((true - pred)^2) computed over all validation trajectories and all time steps, after simulator parameters are optimized. Scalar. Lower is better."
+    },
+    "test_mse": {
+      "description": "Test MSE: mean((true - pred)^2) computed over all test trajectories and all time steps, after simulator parameters are optimized. Scalar. Lower is better."
+    },
+    "val_loss_per_dim": {
+      "description": "Per-dimension validation MSE returned as a 4D vector [inventory_mse, backlog_mse, pipeline_len_mse, t_mse]. Lower is better for each dimension.",
+      "definition": "val_loss_per_dim = np.array([inventory_mse, backlog_mse, pipeline_len_mse, t_mse])"
+    }
+  },
+  "data_analysis_result": {
+    "overall_simulation_design": {
+      "objective": "Generate realistic state trajectories for a single-stage Beer Game (SUPPLY) environment as ordered sequences of state dictionaries over discrete time, matching the empirical dynamics of inventory, backlog, and the number of in-transit shipments (pipeline length). Automatically calibrate simulator parameters via SBI using a single observed training trajectory (train_states[0]) and evaluate generalization on full validation/test sets.",
+      "initialization": {
+        "description": "For evaluation and supervised rollout matching, initialize each simulated trajectory from the corresponding ground-truth initial state at t=0 for that trajectory (per-trajectory initialization). For optional generative sampling (not used in official evaluation), initial states may be sampled from the empirical distribution of t=0 states in training trajectories.",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "trajectory_id",
+            "time_step",
+            "t",
+            "inventory",
+            "backlog",
+            "pipeline"
+          ],
+          "derivation": "Extract rows where time_step==0 (or t==0) per trajectory_id to obtain initial states. Official evaluation uses each target trajectory's own initial state; empirical sampling is optional for free-generation mode."
+        }
+      },
+      "execution": "Run discrete-time simulation for T steps. At each step: (1) process pipeline lead-time countdown and arrivals, (2) realize exogenous customer demand, (3) fulfill backlog + current demand using available inventory and update backlog, (4) inject a replenishment order into the pipeline using the provided action input (action-first), sampling lead time from a calibrated discrete distribution, then increment time t. Calibrate unknown parameters (demand process parameters, lead time distribution parameters, update convention and noise scales) by minimizing trajectory-level discrepancy induced in the official encoded feature space (inventory, backlog, pipeline_len, t) between simulated and observed trajectories.",
+      "outputs": [
+        "calibrated_parameters",
+        "train_loss",
+        "val_loss",
+        "test_loss",
+        "loss_per_dim_dict"
+      ]
+    },
+    "scale_granularity": {
+      "time_step": {
+        "value": "discrete_step",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "time_step",
+            "t"
+          ],
+          "derivation": "Observed state records indexed by integer time_step/t increments of 1 over 61 states (0..60)."
+        }
+      },
+      "spatial_resolution": {
+        "value": "non_spatial",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "trajectory_id"
+          ],
+          "derivation": "Single-stage node per trajectory; no spatial/network fields present."
+        }
+      },
+      "population_size": {
+        "value": "1 supply-chain node per trajectory; 100 independent trajectories per split",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "trajectory_id"
+          ],
+          "derivation": "Each trajectory_id represents one rollout of a single-stage environment."
+        }
+      },
+      "rationale": "Data are single-node, discrete-time rollouts; simulator should match per-step state transitions and generalize across trajectories."
+    },
+    "agent_archetypes": {
+      "unit": "simulated_entity",
+      "roles": [
+        {
+          "name": "supply_stage_node",
+          "static_attributes": [
+            {
+              "name": "pipeline_tuple_semantics",
+              "type": "enum",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "pipeline"
+                ],
+                "derivation": "Parse pipeline string as list of tuples; interpret tuple as (quantity, remaining_lead_time) consistent with observed countdown patterns (e.g., (4,2)->(4,1)). Note: official loss encodes only pipeline length, not tuple details."
+              }
+            },
+            {
+              "name": "update_convention",
+              "type": "enum",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "dynamic_states": [
+            {
+              "name": "t",
+              "type": "int",
+              "update_rule": "t <- t + 1 each step.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "t",
+                  "time_step"
+                ],
+                "derivation": "t is the canonical time index; time_step is redundant."
+              }
+            },
+            {
+              "name": "inventory",
+              "type": "int",
+              "update_rule": "inventory <- inventory + arrivals_from_pipeline - shipped_to_customers; shipped_to_customers = min(inventory_after_arrivals, backlog + demand).",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "inventory"
+                ],
+                "derivation": "Inventory is directly observed per time step; dynamics are mechanistic and calibrated."
+              }
+            },
+            {
+              "name": "backlog",
+              "type": "int",
+              "update_rule": "unfilled = max(0, backlog + demand - inventory_after_arrivals); backlog <- unfilled.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "backlog"
+                ],
+                "derivation": "Backlog is directly observed per time step; dynamics are mechanistic and calibrated."
+              }
+            },
+            {
+              "name": "pipeline",
+              "type": "vector",
+              "update_rule": "Each step: decrement remaining_lead_time for all tuples by 1; tuples reaching 0 deliver quantity into inventory and are removed; then append new order as (order_qty=action, lead_time_init ~ LeadTimeDist) per step.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "pipeline"
+                ],
+                "derivation": "Pipeline list is directly observed; simulator maintains tuple structure, but official observation encoding uses pipeline_len = len(pipeline)."
+              }
+            }
+          ],
+          "construction_from_data": "Create one supply_stage_node per rollout. For official evaluation, initialize from the target trajectory's t=0 state (inventory, backlog, pipeline parsed). update_convention is a calibratable discrete choice controlling within-step event order.",
+          "update_from_data": "Update rules are Beer-Game-style accounting rules. Calibration tunes demand/lead-time/noise and update_convention so that the induced encoded trajectories (inventory, backlog, pipeline_len, t) match observed data."
+        },
+        {
+          "name": "customer_demand_source",
+          "static_attributes": [
+            {
+              "name": "demand_model_type",
+              "type": "enum",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "dynamic_states": [
+            {
+              "name": "demand_t",
+              "type": "int",
+              "update_rule": "Sample demand_t each step from a calibrated distribution/process; optionally condition on time t.",
+              "source_type": "unknown",
+              "data_reference": null
+            }
+          ],
+          "construction_from_data": "No direct demand observations exist in files; demand process is latent and inferred via calibration from observed inventory/backlog transitions.",
+          "update_from_data": "Fit a parametric demand process whose induced trajectories best match observed state evolution under the official loss."
+        },
+        {
+          "name": "upstream_replenishment_provider",
+          "static_attributes": [
+            {
+              "name": "lead_time_model_type",
+              "type": "enum",
+              "source_type": "mixed",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "pipeline"
+                ],
+                "derivation": "Observed remaining lead times take small integer values (often 1-2), constraining plausible lead_time_init; exact distribution selected via calibration."
+              }
+            }
+          ],
+          "dynamic_states": [
+            {
+              "name": "deliveries_issued_t",
+              "type": "int",
+              "update_rule": "When an order is placed, schedule a shipment (qty=action) with lead_time_init; the node.pipeline stores (qty, remaining_lead_time) until arrival.",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "construction_from_data": "Provider is implicit; its effect is represented by pipeline tuples. Lead-time parameters are calibrated.",
+          "update_from_data": "Pipeline evolution and arrivals influence inventory/backlog; calibration selects lead-time parameters that best match the observed encoded trajectories."
+        }
+      ]
+    },
+    "interaction_topology": {
+      "topology": "single_stage_with_exogenous_and_upstream",
+      "layers": [
+        {
+          "name": "demand_layer",
+          "from_role": "customer_demand_source",
+          "to_role": "supply_stage_node",
+          "edge_rule": "At each time step, generate demand_t and apply it in the node's fulfillment/backlog update.",
+          "source_type": "designed",
+          "data_reference": null
+        },
+        {
+          "name": "action_order_layer",
+          "from_role": "external_controller_or_dataset",
+          "to_role": "supply_stage_node",
+          "edge_rule": "At each time step, an action (int order quantity) is provided to SimulatorStep.step(state, action, rng). The simulator must use this action to create a new pipeline entry (action-first).",
+          "source_type": "data_derived",
+          "data_reference": null
+        },
+        {
+          "name": "shipment_pipeline_layer",
+          "from_role": "upstream_replenishment_provider",
+          "to_role": "supply_stage_node",
+          "edge_rule": "Provider schedules shipments into node.pipeline as (qty=action, remaining_lead_time) with lead_time_init ~ LeadTimeDist; remaining_lead_time decrements each step; arrivals occur when it reaches 0.",
+          "source_type": "mixed",
+          "data_reference": {
+            "file": "train_seed_10_n_100.csv",
+            "fields": [
+              "pipeline"
+            ],
+            "derivation": "Tuple structure and countdown are data-derived; lead_time_init distribution is calibrated."
+          }
+        }
+      ],
+      "protocol": "Per time step: (A) decrement pipeline lead times and receive arrivals, (B) sample/realize demand_t, (C) fulfill backlog + demand from inventory and update backlog, (D) append new order from provided action with sampled lead time, (E) increment time t. update_convention selects between a small set of (A/B/C/D) orderings to best match data."
+    },
+    "information_propagation": {
+      "exists": true,
+      "topology": "event_channels",
+      "mechanism": "Synchronous per-step events rather than diffusion: demand_t is an exogenous signal; action is an exogenous control input; pipeline acts as a delayed commitment channel for upstream deliveries. No peer-to-peer information spreading exists in this single-stage setting.",
+      "source_type": "designed",
+      "data_reference": null
+    },
+    "exogenous_signals": [
+      {
+        "name": "customer_demand",
+        "effect_on_agents": "Enters supply_stage_node fulfillment calculation; can create/accumulate backlog when inventory is insufficient.",
+        "bounds": "nonnegative integer; range inferred during calibration from observed inventory/backlog dynamics.",
+        "source_type": "unknown",
+        "data_reference": null
+      },
+      {
+        "name": "replenishment_lead_time",
+        "effect_on_agents": "Determines remaining_lead_time initialization for new pipeline tuples and timing of arrivals into inventory.",
+        "bounds": "positive integer; candidate range [1,5], strongly constrained by observed remaining lead times (often 1-2).",
+        "source_type": "mixed",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "pipeline"
+          ],
+          "derivation": "Empirical remaining_lead_time values constrain plausible lead_time_init; final distribution selected via calibration."
+        }
+      }
+    ],
+    "action_decision_policy": {
+      "by_role": [
+        {
+          "role": "supply_stage_node",
+          "inputs": [
+            {
+              "name": "inventory",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "inventory"
+                ],
+                "derivation": "Observed."
+              }
+            },
+            {
+              "name": "backlog",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "backlog"
+                ],
+                "derivation": "Observed."
+              }
+            },
+            {
+              "name": "pipeline",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "pipeline"
+                ],
+                "derivation": "Observed as tuple-list string; official loss uses only len(pipeline)."
+              }
+            },
+            {
+              "name": "t",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "t",
+                  "time_step"
+                ],
+                "derivation": "Observed."
+              }
+            }
+          ],
+          "policy_form": "ACTION-FIRST: The simulator must take action[t] as the order quantity and append it to pipeline with a sampled lead time. OPTIONAL FALLBACK ONLY: if action is None or missing (not expected under official harness), a base-stock heuristic may generate a default action for free-generation mode.",
+          "parameters": [
+            "fallback_base_stock_level_S (optional, only if action missing)",
+            "fallback_order_smoothing_alpha (optional, only if action missing)"
+          ]
+        }
+      ]
+    },
+    "holdout_plan": {
+      "method": "file_level_split",
+      "splits": {
+        "train_file": "train_seed_10_n_100.csv",
+        "val_file": "val_seed_10_n_100.csv",
+        "test_file": "test_seed_10_n_100.csv"
+      },
+      "train_usage": "SBI training uses ONLY train_states[0] (trajectory_id=0) as the single observation x_o and as the rollout start state for simulation pairs (theta, x).",
+      "validation_usage": "After calibration, compute validation losses on ALL validation trajectories (all trajectory_id, all time steps) using the official feature encoding and MSE definitions.",
+      "test_usage": "Compute test losses on ALL test trajectories (all trajectory_id, all time steps) only for final reporting.",
+      "notes": "Do NOT apply within-trajectory temporal slicing in the main protocol; evaluation uses full horizons consistent with the existing harness."
+    },
+    "simulation_evaluation": {
+      "official_observation_encoding": {
+        "description": "Encode each time step state dict into a fixed 4D numeric vector consistent with trajectories_to_numpy in the SUPPLY harness.",
+        "per_step_features": [
+          "inventory (scalar int)",
+          "backlog (scalar int)",
+          "pipeline_len = len(pipeline) (scalar int)",
+          "t (scalar int)"
+        ],
+        "trajectory_vectorization": "For a trajectory of length 61 states (t=0..60), produce an array of shape (61, 4), then flatten into shape (1, 244) for SBI NPE (x_o and x_i).",
+        "note": "Pipeline tuple details (qty, remaining_lead_time) are maintained by the simulator for state transitions but are NOT part of the official SBI observation vector or official loss."
+      },
+      "metrics": [
+        {
+          "name": "train_loss",
+          "definition": "Mean squared error over all training trajectories and time steps between simulated and ground-truth encoded state features (inventory, backlog, pipeline_len, t).",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "train_seed_10_n_100.csv",
+              "fields": [
+                "inventory",
+                "backlog",
+                "pipeline",
+                "t"
+              ],
+              "derivation": "Parse pipeline then use its length; align by (trajectory_id, time_step)."
+            }
+          }
+        },
+        {
+          "name": "val_loss",
+          "definition": "Mean squared error over all validation trajectories and time steps between simulated and ground-truth encoded state features (inventory, backlog, pipeline_len, t).",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "val_seed_10_n_100.csv",
+              "fields": [
+                "inventory",
+                "backlog",
+                "pipeline",
+                "t"
+              ],
+              "derivation": "Parse pipeline then use its length; align by (trajectory_id, time_step)."
+            }
+          }
+        },
+        {
+          "name": "test_loss",
+          "definition": "Mean squared error over all test trajectories and time steps between simulated and ground-truth encoded state features (inventory, backlog, pipeline_len, t).",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "test_seed_10_n_100.csv",
+              "fields": [
+                "inventory",
+                "backlog",
+                "pipeline",
+                "t"
+              ],
+              "derivation": "Parse pipeline then use its length; align by (trajectory_id, time_step)."
+            }
+          }
+        },
+        {
+          "name": "val_loss_per_dim",
+          "definition": "Per-dimension MSE vector: [inventory_mse, backlog_mse, pipeline_len_mse, t_mse], computed on validation by default (and analogously available for train/test).",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "val_seed_10_n_100.csv",
+              "fields": [
+                "inventory",
+                "backlog",
+                "pipeline",
+                "t"
+              ],
+              "derivation": "pipeline_len derived as len(parsed_pipeline)."
+            }
+          }
+        }
+      ],
+      "comparison_method": "For each trajectory_id in a split: initialize simulation from its t=0 state, roll out for the horizon to t=60 using the provided action stream from the harness, encode simulated states into (61,4), compare to ground-truth encoded states aligned by time_step, then aggregate MSE across all trajectories/time steps."
+    },
+    "calibratable_parameters": [
+      {
+        "name": "demand_dist_type",
+        "range_bounds": "categorical:{poisson, negbin, empirical_discrete}",
+        "source": "modeling",
+        "notes": "Latent demand must be inferred from inventory/backlog transitions; choose the simplest model that fits."
+      },
+      {
+        "name": "demand_params",
+        "range_bounds": "[0, 50] (interpreted per chosen demand model)",
+        "source": "inferred",
+        "notes": "E.g., Poisson rate lambda; or NegBin mean/dispersion; calibrated via SBI."
+      },
+      {
+        "name": "lead_time_dist_type",
+        "range_bounds": "categorical:{fixed, categorical_discrete}",
+        "source": "mixed",
+        "notes": "Lead time is sampled when adding new pipeline entry. Use small integers; constrained by observed remaining lead times."
+      },
+      {
+        "name": "lead_time_params",
+        "range_bounds": "fixed_lead_time in [1,5] OR categorical_probs over {1..5}",
+        "source": "mixed",
+        "notes": "If categorical, probabilities must be normalized inside step()."
+      },
+      {
+        "name": "update_convention",
+        "range_bounds": "categorical:{arrivals_then_demand_then_order, demand_then_arrivals_then_order, arrivals_then_order_then_demand}",
+        "source": "modeling",
+        "notes": "Discrete choice of within-step ordering; selected by best validation loss."
+      },
+      {
+        "name": "shipment_quantity_noise_scale",
+        "range_bounds": "[0.0, 5.0]",
+        "source": "modeling",
+        "notes": "Optional stochasticity to model slight discrepancies; must preserve nonnegativity and interpretability."
+      },
+      {
+        "name": "demand_noise_scale",
+        "range_bounds": "[0.0, 10.0]",
+        "source": "modeling",
+        "notes": "Optional extra dispersion beyond the base demand model."
+      },
+      {
+        "name": "backlog_service_priority",
+        "range_bounds": "categorical:{serve_backlog_first, serve_current_demand_first}",
+        "source": "modeling",
+        "notes": "If included, must be clearly specified; affects how shipped_to_customers is allocated between backlog and current demand."
+      },
+      {
+        "name": "fallback_order_policy_params",
+        "range_bounds": "base_stock_level_S:[0,200], smoothing_alpha:[0,1]",
+        "source": "optional",
+        "notes": "ONLY used if action is missing (not expected in official harness). Do not override action when provided."
+      }
+    ]
+  },
+  "file_summaries": [
+    {
+      "file_name": "train_seed_10_n_100.csv",
+      "file_type": "csv",
+      "semantic_summary": "- **Overall data structure and type**\n  - A **tabular dataset (CSV)** where each row is a **time-indexed state record** from the SUPPLY (single-stage Beer Game) environment.\n  - Records are grouped by **`trajectory_id`**; within each group, rows ordered by **`time_step`/`t`** form one **state trajectory**: \\( \\{s_0, s_1, \\dots, s_T\\} \\).\n  - Core state variables per row: **`inventory` (int)**, **`backlog` (int)**, **`pipeline` (list encoded as string)**, and **time index** (`time_step` and `t`, seemingly redundant).\n\n- **Relationships or nested elements**\n  - **Trajectory-level relationship:** `trajectory_id` defines a sequence; `time_step` (and `t`) define ordering within that sequence.\n  - **Nested element:** `pipeline` is a **serialized list of tuples** like `[(4, 2), (4, 1)]`.\n    - Semantics: each tuple represents an **in-transit shipment/order** with:\n      - **quantity** (first element, e.g., `4`)\n      - **remaining lead time / steps until arrival** (second element, e.g., `2`, `1`)\n    - The pipeline is therefore a **multiset/queue of outstanding inbound shipments** that evolve over time as lead times decrement and arrivals are received.\n\n- **How this data should inform simulation entities or interactions**\n  - Each trajectory corresponds to a single simulated run of the single-stage node; each row is the node\u2019s **observable state at time t**.\n  - The simulator should model these interacting mechanisms to reproduce/fit trajectories:\n    - **Demand fulfillment:** inventory is used to satisfy demand; unmet demand accumulates as **backlog**.\n    - **Backlog dynamics:** backlog carries over and is reduced when inventory becomes available.\n    - **Pipeline dynamics:** shipments move closer each step (lead time countdown); when lead time reaches 0 they **arrive and increase inventory**, then are removed from the pipeline.\n    - **Time progression:** `time_step`/`t` increments by 1 per transition.\n  - Practically, the file provides **state transition traces** to:\n    - calibrate/validate the simulator\u2019s update rules (inventory/backlog/pipeline evolution),\n    - infer or constrain exogenous processes (e.g., demand and ordering policy) that are not explicitly stored but must be consistent with observed state changes."
+    },
+    {
+      "file_name": "val_seed_10_n_100.csv",
+      "file_type": "csv",
+      "semantic_summary": "- **Overall data structure and type**\n  - Tabular dataset (CSV) representing many **time-indexed state records** from simulated rollouts of a **single-stage Beer Game (SUPPLY)** environment.\n  - Each row is one **state snapshot** at a particular `time_step` for a given `trajectory_id`.\n  - Core state variables:\n    - `inventory` (integer, on-hand units)\n    - `backlog` (integer, unmet demand units carried over)\n    - `pipeline` (string-encoded list of tuples; in-transit replenishment orders/shipments)\n    - `t` (integer time; redundant with `time_step` in sample)\n\n- **Relationships or nested elements**\n  - Records are grouped by `trajectory_id`; ordering within each group is by `time_step`/`t` to form a **trajectory**: `{state[0], state[1], \u2026, state[T]}`.\n  - `pipeline` is a **nested structure serialized as text**; it encodes a list like `[(qty, remaining_lead_time), ...]` (based on sample patterns such as `(4, 2)` then `(4, 1)` as time advances).\n  - The pipeline list elements collectively represent the **multi-period delivery queue**, where remaining lead times decrement each step and items with zero remaining time should arrive into inventory.\n\n- **How this data should inform simulation entities or interactions**\n  - Each trajectory defines the evolution of a **single node\u2019s state** (one stage) under exogenous demand and ordering/replenishment dynamics.\n  - Simulation should reproduce the state transition logic implied by fields:\n    - **Demand fulfillment** reduces `inventory`; unmet demand increases `backlog`.\n    - **Arrivals** from `pipeline` increase `inventory` when lead time expires.\n    - **New orders/shipments** are appended to `pipeline` with an initial lead time.\n    - Time advances discretely (`t/time_step`), and pipeline lead times decrement each step.\n  - When generating new trajectories, the simulator should output per-step state dictionaries/rows with the same grouping (`trajectory_id`) and sequencing, and should parse/emit `pipeline` consistently as a list of in-transit shipments with quantities and remaining lead times."
+    },
+    {
+      "file_name": "test_seed_10_n_100.csv",
+      "file_type": "csv",
+      "semantic_summary": "- **Overall data structure and type**\n  - A **CSV file** representing a **collection of time-indexed state records** for a simulator.\n  - Each row corresponds to one environment state at a specific time step for a specific trajectory.\n  - Key fields: `trajectory_id` (int), `time_step`/`t` (int, redundant time index), `inventory` (int), `backlog` (int), `pipeline` (string-encoded list).\n\n- **Relationships or nested elements**\n  - Records are grouped by `trajectory_id` and ordered by `time_step` (or `t`) to form a **trajectory**:  \n    \\[{state[0], state[1], \u2026, state[T]}\\].\n  - `pipeline` is a **nested structure serialized as a string**, e.g. `\"[(4, 2)]\"`. Semantically it is a list of tuples like `(quantity, remaining_lead_time)` (or equivalent ordering), representing multiple in-transit shipments.\n  - `time_step` and `t` appear to encode the same concept (current simulation time), so one can be treated as canonical.\n\n- **How this data should inform simulation entities or interactions**\n  - Defines the **state variables** the SUPPLY (single-stage Beer Game) simulator must update each step:\n    - `inventory`: on-hand stock after receipts/fulfillment.\n    - `backlog`: unmet demand carried forward.\n    - `pipeline`: outstanding replenishment orders/shipments with lead times; each step decrements remaining lead time and moves arrivals into inventory when due.\n    - `t`/`time_step`: drives transition timing and ordering of updates.\n  - Implies core interactions per step: **demand fulfillment** (reducing inventory/increasing backlog), **arrival processing** (pipeline \u2192 inventory), and **replenishment placement** (adding new pipeline entries), producing the next state in the trajectory."
+    }
+  ],
+  "schemas": {
+    "train_seed_10_n_100.csv": {
+      "file_type": "csv",
+      "row_count": 6100,
+      "column_count": 6,
+      "columns": [
+        "trajectory_id",
+        "time_step",
+        "inventory",
+        "backlog",
+        "pipeline",
+        "t"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 6100 entries, 0 to 6099\nData columns (total 6 columns):\n #   Column         Non-Null Count  Dtype \n---  ------         --------------  ----- \n 0   trajectory_id  6100 non-null   int64 \n 1   time_step      6100 non-null   int64 \n 2   inventory      6100 non-null   int64 \n 3   backlog        6100 non-null   int64 \n 4   pipeline       6100 non-null   object\n 5   t              6100 non-null   int64 \ndtypes: int64(5), object(1)\nmemory usage: 286.1+ KB\n",
+      "sample_data": [
+        {
+          "trajectory_id": 0,
+          "time_step": 0,
+          "inventory": 24,
+          "backlog": 0,
+          "pipeline": "[]",
+          "t": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 1,
+          "inventory": 17,
+          "backlog": 0,
+          "pipeline": "[(4, 2)]",
+          "t": 1
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 2,
+          "inventory": 13,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 2
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 3,
+          "inventory": 16,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 3
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 4,
+          "inventory": 13,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 4
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 5,
+          "inventory": 11,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 5
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 6,
+          "inventory": 11,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 6
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 7,
+          "inventory": 13,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 7
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 8,
+          "inventory": 9,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 8
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 9,
+          "inventory": 8,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 9
+        }
+      ],
+      "dtypes": {
+        "trajectory_id": "int64",
+        "time_step": "int64",
+        "inventory": "int64",
+        "backlog": "int64",
+        "pipeline": "object",
+        "t": "int64"
+      },
+      "file_semantic_summary": "- **Overall data structure and type**\n  - A **tabular dataset (CSV)** where each row is a **time-indexed state record** from the SUPPLY (single-stage Beer Game) environment.\n  - Records are grouped by **`trajectory_id`**; within each group, rows ordered by **`time_step`/`t`** form one **state trajectory**: \\( \\{s_0, s_1, \\dots, s_T\\} \\).\n  - Core state variables per row: **`inventory` (int)**, **`backlog` (int)**, **`pipeline` (list encoded as string)**, and **time index** (`time_step` and `t`, seemingly redundant).\n\n- **Relationships or nested elements**\n  - **Trajectory-level relationship:** `trajectory_id` defines a sequence; `time_step` (and `t`) define ordering within that sequence.\n  - **Nested element:** `pipeline` is a **serialized list of tuples** like `[(4, 2), (4, 1)]`.\n    - Semantics: each tuple represents an **in-transit shipment/order** with:\n      - **quantity** (first element, e.g., `4`)\n      - **remaining lead time / steps until arrival** (second element, e.g., `2`, `1`)\n    - The pipeline is therefore a **multiset/queue of outstanding inbound shipments** that evolve over time as lead times decrement and arrivals are received.\n\n- **How this data should inform simulation entities or interactions**\n  - Each trajectory corresponds to a single simulated run of the single-stage node; each row is the node\u2019s **observable state at time t**.\n  - The simulator should model these interacting mechanisms to reproduce/fit trajectories:\n    - **Demand fulfillment:** inventory is used to satisfy demand; unmet demand accumulates as **backlog**.\n    - **Backlog dynamics:** backlog carries over and is reduced when inventory becomes available.\n    - **Pipeline dynamics:** shipments move closer each step (lead time countdown); when lead time reaches 0 they **arrive and increase inventory**, then are removed from the pipeline.\n    - **Time progression:** `time_step`/`t` increments by 1 per transition.\n  - Practically, the file provides **state transition traces** to:\n    - calibrate/validate the simulator\u2019s update rules (inventory/backlog/pipeline evolution),\n    - infer or constrain exogenous processes (e.g., demand and ordering policy) that are not explicitly stored but must be consistent with observed state changes."
+    },
+    "val_seed_10_n_100.csv": {
+      "file_type": "csv",
+      "row_count": 6100,
+      "column_count": 6,
+      "columns": [
+        "trajectory_id",
+        "time_step",
+        "inventory",
+        "backlog",
+        "pipeline",
+        "t"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 6100 entries, 0 to 6099\nData columns (total 6 columns):\n #   Column         Non-Null Count  Dtype \n---  ------         --------------  ----- \n 0   trajectory_id  6100 non-null   int64 \n 1   time_step      6100 non-null   int64 \n 2   inventory      6100 non-null   int64 \n 3   backlog        6100 non-null   int64 \n 4   pipeline       6100 non-null   object\n 5   t              6100 non-null   int64 \ndtypes: int64(5), object(1)\nmemory usage: 286.1+ KB\n",
+      "sample_data": [
+        {
+          "trajectory_id": 0,
+          "time_step": 0,
+          "inventory": 44,
+          "backlog": 0,
+          "pipeline": "[]",
+          "t": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 1,
+          "inventory": 41,
+          "backlog": 0,
+          "pipeline": "[(4, 2)]",
+          "t": 1
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 2,
+          "inventory": 35,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 2
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 3,
+          "inventory": 31,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 3
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 4,
+          "inventory": 33,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 4
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 5,
+          "inventory": 32,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 5
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 6,
+          "inventory": 31,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 6
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 7,
+          "inventory": 30,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 7
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 8,
+          "inventory": 29,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 8
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 9,
+          "inventory": 28,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 9
+        }
+      ],
+      "dtypes": {
+        "trajectory_id": "int64",
+        "time_step": "int64",
+        "inventory": "int64",
+        "backlog": "int64",
+        "pipeline": "object",
+        "t": "int64"
+      },
+      "file_semantic_summary": "- **Overall data structure and type**\n  - Tabular dataset (CSV) representing many **time-indexed state records** from simulated rollouts of a **single-stage Beer Game (SUPPLY)** environment.\n  - Each row is one **state snapshot** at a particular `time_step` for a given `trajectory_id`.\n  - Core state variables:\n    - `inventory` (integer, on-hand units)\n    - `backlog` (integer, unmet demand units carried over)\n    - `pipeline` (string-encoded list of tuples; in-transit replenishment orders/shipments)\n    - `t` (integer time; redundant with `time_step` in sample)\n\n- **Relationships or nested elements**\n  - Records are grouped by `trajectory_id`; ordering within each group is by `time_step`/`t` to form a **trajectory**: `{state[0], state[1], \u2026, state[T]}`.\n  - `pipeline` is a **nested structure serialized as text**; it encodes a list like `[(qty, remaining_lead_time), ...]` (based on sample patterns such as `(4, 2)` then `(4, 1)` as time advances).\n  - The pipeline list elements collectively represent the **multi-period delivery queue**, where remaining lead times decrement each step and items with zero remaining time should arrive into inventory.\n\n- **How this data should inform simulation entities or interactions**\n  - Each trajectory defines the evolution of a **single node\u2019s state** (one stage) under exogenous demand and ordering/replenishment dynamics.\n  - Simulation should reproduce the state transition logic implied by fields:\n    - **Demand fulfillment** reduces `inventory`; unmet demand increases `backlog`.\n    - **Arrivals** from `pipeline` increase `inventory` when lead time expires.\n    - **New orders/shipments** are appended to `pipeline` with an initial lead time.\n    - Time advances discretely (`t/time_step`), and pipeline lead times decrement each step.\n  - When generating new trajectories, the simulator should output per-step state dictionaries/rows with the same grouping (`trajectory_id`) and sequencing, and should parse/emit `pipeline` consistently as a list of in-transit shipments with quantities and remaining lead times."
+    },
+    "test_seed_10_n_100.csv": {
+      "file_type": "csv",
+      "row_count": 6100,
+      "column_count": 6,
+      "columns": [
+        "trajectory_id",
+        "time_step",
+        "inventory",
+        "backlog",
+        "pipeline",
+        "t"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 6100 entries, 0 to 6099\nData columns (total 6 columns):\n #   Column         Non-Null Count  Dtype \n---  ------         --------------  ----- \n 0   trajectory_id  6100 non-null   int64 \n 1   time_step      6100 non-null   int64 \n 2   inventory      6100 non-null   int64 \n 3   backlog        6100 non-null   int64 \n 4   pipeline       6100 non-null   object\n 5   t              6100 non-null   int64 \ndtypes: int64(5), object(1)\nmemory usage: 286.1+ KB\n",
+      "sample_data": [
+        {
+          "trajectory_id": 0,
+          "time_step": 0,
+          "inventory": 24,
+          "backlog": 0,
+          "pipeline": "[]",
+          "t": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 1,
+          "inventory": 20,
+          "backlog": 0,
+          "pipeline": "[(4, 2)]",
+          "t": 1
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 2,
+          "inventory": 16,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 2
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 3,
+          "inventory": 15,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 3
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 4,
+          "inventory": 16,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 4
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 5,
+          "inventory": 16,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 5
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 6,
+          "inventory": 17,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 6
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 7,
+          "inventory": 9,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 7
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 8,
+          "inventory": 8,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 8
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 9,
+          "inventory": 7,
+          "backlog": 0,
+          "pipeline": "[(4, 1), (4, 2)]",
+          "t": 9
+        }
+      ],
+      "dtypes": {
+        "trajectory_id": "int64",
+        "time_step": "int64",
+        "inventory": "int64",
+        "backlog": "int64",
+        "pipeline": "object",
+        "t": "int64"
+      },
+      "file_semantic_summary": "- **Overall data structure and type**\n  - A **CSV file** representing a **collection of time-indexed state records** for a simulator.\n  - Each row corresponds to one environment state at a specific time step for a specific trajectory.\n  - Key fields: `trajectory_id` (int), `time_step`/`t` (int, redundant time index), `inventory` (int), `backlog` (int), `pipeline` (string-encoded list).\n\n- **Relationships or nested elements**\n  - Records are grouped by `trajectory_id` and ordered by `time_step` (or `t`) to form a **trajectory**:  \n    \\[{state[0], state[1], \u2026, state[T]}\\].\n  - `pipeline` is a **nested structure serialized as a string**, e.g. `\"[(4, 2)]\"`. Semantically it is a list of tuples like `(quantity, remaining_lead_time)` (or equivalent ordering), representing multiple in-transit shipments.\n  - `time_step` and `t` appear to encode the same concept (current simulation time), so one can be treated as canonical.\n\n- **How this data should inform simulation entities or interactions**\n  - Defines the **state variables** the SUPPLY (single-stage Beer Game) simulator must update each step:\n    - `inventory`: on-hand stock after receipts/fulfillment.\n    - `backlog`: unmet demand carried forward.\n    - `pipeline`: outstanding replenishment orders/shipments with lead times; each step decrements remaining lead time and moves arrivals into inventory when due.\n    - `t`/`time_step`: drives transition timing and ordering of updates.\n  - Implies core interactions per step: **demand fulfillment** (reducing inventory/increasing backlog), **arrival processing** (pipeline \u2192 inventory), and **replenishment placement** (adding new pipeline entries), producing the next state in the trajectory."
+    }
+  }
+}

@@ -1,0 +1,189 @@
+{
+  "evaluation-metrics-stale-not-updated": {
+    "issue_type": "CODE_BUG",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Evaluation: using optimized_parameters, evaluate on ALL trajectories from train/val/test via the existing evaluation functions",
+      "SIMULATION RESULTS (CURRENT ITERATION) metrics identical to SIMULATION_METRICS (PRIOR ITERATIONS)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "main",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "save_results",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "Evaluator.compute_metrics",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Current metrics exactly match prior iteration: train_loss=150.5750, val_loss=154.0122, test_loss=147.1355, state_consistency_rate=1.0, identical val_loss_per_dim entries."
+    },
+    "metric_links": [],
+    "error_identification": "Reported metrics appear to be stale/reused rather than computed from the CURRENT CODE run, because they exactly match a previous iteration despite substantial code changes and a new calibration loss history.",
+    "root_cause_analysis": "The run pipeline likely reuses an existing outputs/results.json (or the evaluator output payload) without recomputing/overwriting, or the harness is reading the wrong artifact directory. In-code risk factors: main() always uses default output_dir='outputs' and does not clean it; save_results() overwrites results.json but external harness may read another path; there is no unique run id or explicit removal of prior artifacts.",
+    "correct_approach": "Make the run artifacts unambiguously tied to the current execution: (1) in main(), before save_results(), either delete existing results.json/metrics.json in output_dir or write into a uniquely named subdirectory (e.g., include seed/num_simulations). (2) Ensure save_results() writes all metric-bearing files and that the orchestrator reads from the same output_dir passed to the program. (3) Add a minimal integrity marker in results.json (e.g., a hash/length of optimized_theta and x_dim) so the evaluator can detect stale reads; only use existing fields already being written (e.g., add x_dim into metrics_dict or calibration_artifacts_dict rather than new top-level structures).",
+    "key_insight": "When tuning simulator structure for validation, guarantee evaluation artifacts are regenerated per run; otherwise you can\u2019t trust metric signals and will iterate blindly."
+  },
+  "missing-cross-trajectory-heterogeneity-model": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Evaluation: evaluate on ALL trajectories from train/val/test via rollouts from each trajectory's time_step=0 initial state",
+      "CALIBRATION uses ONLY train_states[0] as observation"
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel.rollout",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "NPEGaussianCalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss is very large (154.01 overall); per-dimension validation MSE is especially high for total_alive (527.77) and icu_occupancy (211.58)."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "Validation error is dominated by occupancy/alive-count mismatches, consistent with a model that fits one trajectory\u2019s patterns but cannot represent between-trajectory variability when evaluated across many trajectories.",
+    "root_cause_analysis": "The simulator is strictly stationary across trajectories (same arrival_lambdas and LOS means) and calibration conditions on a single observed trajectory (train_states[0]). With no mechanism to represent across-trajectory heterogeneity (and with arrival random effects disabled), the posterior mean parameters will overfit to trajectory 0\u2019s demand level/mix and generalize poorly to other trajectories in train/val/test evaluation.",
+    "correct_approach": "Introduce a trajectory-level latent offset that is inferred from each trajectory\u2019s own initial state (allowed by blueprint: each rollout starts from its own time_step=0 row) without using trajectory_id: (1) derive a per-trajectory multiplicative arrival_scale from init_state features already present (icu_occupancy, standard_occupancy, and/or initial patient counts by disease computed from init_state['patients']). (2) apply this scale inside rollout() to all disease arrival rates for that trajectory. (3) Keep the scale deterministic given init_state so evaluation is aligned and no hidden nuisance randomness is introduced. This preserves blueprint constraints while allowing cross-trajectory demand differences.",
+    "key_insight": "If calibration uses one trajectory but evaluation averages many, add deterministic per-trajectory covariate effects (from that trajectory\u2019s own initial state) instead of trajectory-id random effects."
+  },
+  "arrival-process-too-simple-stationary-poisson": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "arrival_overdispersion_k[disease_id] ... If using Negative Binomial; larger k approximates Poisson.",
+      "exogenous signals: day_index ... allows non-stationary arrival processes by day/time_step if supported by data"
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel.rollout",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel._arrival_lambda_for_day",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Large validation MSE suggests systematic mismatch in occupancy dynamics; Poisson arrivals often under-represent burstiness which drives occupancy variance and tail behavior."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.8
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Occupancy and total_alive errors remain very large, consistent with arrivals that are insufficiently variable and/or have the wrong temporal structure.",
+    "root_cause_analysis": "Arrivals are modeled as disease-specific Poisson with an optional day profile learned from train_states[0] only. This cannot capture overdispersion or day-to-day clustering present across trajectories. The blueprint explicitly allows Negative Binomial via arrival_overdispersion_k and day/time_step covariates; those mechanisms are missing.",
+    "correct_approach": "Extend the parameterization and sampling: (1) add per-disease overdispersion parameter k to ModelParameters/theta (update get_parameters_uniform_prior_min_max(), theta_to_parameters(), parameters_to_theta(), theta_to_named_parameters()). (2) In rollout(), sample arrivals via Negative Binomial with mean=lam and dispersion=k (fallback to Poisson when k is large). (3) Keep the day-profile scaling but compute it using training data aggregated across all training trajectories (not only train_states[0]) to avoid profile mismatch; use only admissions counts inferred from day_in_hospital==1 (already parsed).",
+    "key_insight": "When MSE is dominated by occupancy variance/tails, Poisson arrivals are often structurally insufficient; add an overdispersion knob before further tuning LOS/ICU fractions."
+  },
+  "los-distribution-shape-mismatch-mean-only-control": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Prefer empirical discrete distribution over observed initial los_remaining (day_in_hospital==1) to match integer nature.",
+      "los_dist_params ... probabilities ... or parametric mean/dispersion"
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel.ingest_training_statistics",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel._sample_los",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel._tilted_probs_on_support",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "High val_loss_per_dim for total_alive/occupancies indicates the service-time distribution may not match tails/hazards, affecting census persistence."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "Even with empirical LOS support, the simulator only controls LOS via a single target mean per (disease, bed_type), which can misfit discharge timing and persistence, inflating total_alive/occupancy MSE.",
+    "root_cause_analysis": "The LOS model tilts an empirical discrete support to match a target mean; if the true data requires different dispersion/hazard (e.g., heavier tail), mean-matching alone cannot reproduce census dynamics. The fallback to pooled-by-disease helps availability but not shape adequacy.",
+    "correct_approach": "Add a second LOS-shape parameter per (disease, bed_type) (e.g., a tilt-strength/temperature or dispersion control) within existing tilting framework: (1) extend theta/ModelParameters with los_tilt_strength[disease, bed] bounded (e.g., [0, 5]) and use it to scale the alpha search range in _tilted_probs_on_support or to mix base_probs with tilted_probs. (2) If empirical support is missing, prefer a discrete distribution constructed from pooled support with the same tilt mechanism rather than geometric, to keep integer realism while enabling tail control.",
+    "key_insight": "Census dynamics are sensitive to LOS tail/hazard, not just mean; add a shape/dispersion control before expecting very low validation loss."
+  },
+  "unrealistic-target-val-loss-1e-6": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "low",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Simulator is stochastic (Poisson/NB arrivals, LOS sampling); fitting/evaluation uses MSE on summaries."
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel.rollout",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss=154.01 with stochastic simulator; achieving \u22641e-6 on stochastic rollouts is generally not realistic unless dynamics are near-deterministic and perfectly specified."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "The requested validation loss target (\u2264 1e-6) is likely infeasible under a stochastic admission/LOS simulator scored by single-rollout MSE, even with correct structure.",
+    "root_cause_analysis": "Single simulated trajectory per evaluation trajectory introduces irreducible Monte Carlo variance; the data-generating process is also not guaranteed to match the model family exactly. This sets a practical floor on achievable MSE far above 1e-6.",
+    "correct_approach": "To reduce evaluation noise without changing the evaluation API: (1) make simulator partially deterministic where data supports it (e.g., disable mortality, already effectively off; consider deterministic admissions using rounded expected counts only if consistent with data). (2) Alternatively, reduce stochasticity by conditioning arrivals on day profile more strongly (learned from data) and narrowing dispersion parameters after adding NB/LOS-shape controls. If evaluation harness permits multiple rollouts averaged per trajectory, use that; otherwise accept a higher realistic target.",
+    "key_insight": "For stochastic simulators evaluated with single-trajectory MSE, focus on structural alignment and variance reduction; ultra-low MSE targets are usually unattainable."
+  }
+}

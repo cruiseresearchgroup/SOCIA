@@ -1,0 +1,193 @@
+{
+  "backlog-dominates-loss-latent-demand-unconditioned-on-actions": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Exogenous customer demand is latent and inferred via calibration from observed inventory/backlog transitions.",
+      "Calibrate unknown parameters ... by minimizing trajectory-level discrepancy ... between simulated and observed trajectories."
+    ],
+    "code_refs": [
+      {
+        "symbol": "BeerGameModel._sample_demand",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "BeerGameModel.step",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss=79.2185 with val_loss_per_dim backlog_mse=278.2649 dominating inventory_mse=34.7239 and pipeline_len_mse=3.8852"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.8
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Validation error is dominated by backlog mismatch (backlog_mse ~278), indicating the simulator\u2019s implied demand/backlog dynamics are not matching the dataset even after calibration.",
+    "root_cause_analysis": "Demand is sampled as an exogenous process driven only by (t, rng) with a global mean (softplus(demand_rate_raw)*10) and heuristic seasonality/dispersion tied to demand_noise_scale. This makes the latent demand effectively unidentifiable from a single observed trajectory under SBI and not responsive to state/action context, so backlog dynamics drift on validation trajectories. The calibrated demand_rate_raw is strongly negative (-1.78) while demand_noise_scale is moderately large (3.78), suggesting the model is compensating with dispersion instead of matching systematic backlog patterns.",
+    "correct_approach": "In BeerGameModel._sample_demand and/or BeerGameModel.step, make demand weakly state-dependent using only existing state variables (inventory, backlog, pipeline length, t) and existing parameters (no new fields/APIs). For example: (1) compute a demand mean adjustment as a bounded function of backlog (to allow bursts when backlog is high) and/or inventory (to reduce demand when inventory is depleted) using existing demand_noise_scale as the gain; (2) keep the Gamma-Poisson overdispersion but separate mean-control from dispersion-control by mapping demand_rate_raw to mean and demand_noise_scale primarily to dispersion; (3) remove or reduce heuristic seasonality if it harms cross-trajectory generalization, and instead allow mean to respond to state. Then re-run calibration; the goal is to reduce backlog_mse without inflating inventory_mse.",
+    "key_insight": "If the dominant validation error is backlog, purely time-driven exogenous demand is too weak; introduce minimal state-conditioning using existing state/parameters to avoid unidentifiable latent demand under single-trajectory calibration."
+  },
+  "pipeline-update-sorts-by-leadtime-breaks-order-sensitive-length-dynamics": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Pipeline update_rule: decrement remaining_lead_time for all tuples by 1; tuples reaching 0 deliver ... and are removed; then append new order ...",
+      "note: official loss encodes only pipeline length, not tuple details."
+    ],
+    "code_refs": [
+      {
+        "symbol": "BeerGameModel.step",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss_per_dim pipeline_len_mse=3.8852 indicates persistent pipeline length mismatch"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "Pipeline length MSE is non-trivial (~3.89), suggesting the simulator\u2019s pipeline entry survival/removal dynamics diverge from data.",
+    "root_cause_analysis": "BeerGameModel.step returns pipeline as `tuple(sorted(new_pipeline, key=lambda x: x[1]))`, reordering pipeline tuples each step. While the official metric uses only length, the ordering affects subsequent countdown processing because do_arrivals iterates over the current pipeline list. Sorting can change which entries are progressed vs arrived when there are multiple calls or mixed update conventions, and it breaks fidelity to data-derived pipeline tuple semantics.",
+    "correct_approach": "In BeerGameModel.step, preserve pipeline insertion order instead of sorting by remaining lead time. Maintain a stable list where countdown operates on the same sequence semantics as parsed from data and appended orders. If you want deterministic output, only normalize types (ints) and avoid any reordering transforms. Re-check that do_arrivals always processes the intended current pipeline list exactly once per step under each convention.",
+    "key_insight": "Never reorder a stateful queue-like structure (pipeline) unless the specification says it is order-invariant; reordering can silently change countdown/arrival behavior and harm even aggregate metrics like pipeline length."
+  },
+  "dummy-pipeline-zero-quantities-can-freeze-pipeline-length-and-distort-countdown": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Prefer parsing true pipeline tuples; interpret tuple as (quantity, remaining_lead_time) consistent with observed countdown patterns",
+      "official loss encodes only pipeline length"
+    ],
+    "code_refs": [
+      {
+        "symbol": "DataLoader._dummy_pipeline_from_len",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "DataLoader._parse_states",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss_per_dim pipeline_len_mse=3.8852; backlog_mse high may also be impacted by incorrect arrival timing when pipeline tuples are synthetic"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "Pipeline length mismatch persists and may be amplified when pipeline is not truly parsed, leading to inconsistent countdown/removal timing versus the dataset.",
+    "root_cause_analysis": "When only pipeline_len exists, the loader creates dummy tuples with alternating tau 1/2 and quantity 0. Even with q=0 (good for inventory), these dummy entries are still removed based on tau countdown, causing pipeline length to change due to arbitrary tau assignments unrelated to the true process. This can inject systematic pipeline_len errors. If the CSVs contain a real `pipeline` column (as per blueprint), this path should never be used; if it is used, the tau heuristic is likely wrong.",
+    "correct_approach": "First, confirm which columns exist in the provided CSVs. If `pipeline` exists in all splits, delete/disable the pipeline_len fallback path in DataLoader._parse_states to avoid accidental usage. If some splits truly lack `pipeline`, adjust the dummy pipeline so that it preserves length deterministically across steps (e.g., use very large tau that will not reach 0 within horizon, or keep tau constant and skip countdown/removal for zero-quantity dummies) to match the intent: preserve length without affecting dynamics. Ensure any dummy behavior is consistent with evaluation encoding and does not create arbitrary length churn.",
+    "key_insight": "If a feature is only used as an aggregate metric (pipeline_len), synthetic internal representations must not create their own dynamics; otherwise you optimize against artifacts, not the dataset."
+  },
+  "sbi-calibration-uses-single-trajectory-and-overfits-update-convention-via-argmax": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "SBI training uses ONLY train_states[0] as the single observation x_o",
+      "update_convention ... selected by best validation loss."
+    ],
+    "code_refs": [
+      {
+        "symbol": "BeerGameSimulator.rollout_trajectory",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "BeerGameModel._select_update_convention",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "train_loss=79.8880 and val_loss=79.2185 are similar; backlog_mse remains large, suggesting calibration is not resolving key dynamics and update convention selection may be too rigid"
+    },
+    "metric_links": [
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      }
+    ],
+    "error_identification": "Train and validation losses are similar but both remain high, indicating the current calibration/selection strategy isn\u2019t learning the right dynamics rather than simply overfitting.",
+    "root_cause_analysis": "Update convention is chosen deterministically via argmax once per trajectory (BeerGameSimulator.rollout_trajectory sets _fixed_update_convention using _select_update_convention_deterministic). With only one observed trajectory used for SBI, this hard selection can lock in a convention that fits trajectory 0 but is suboptimal across other trajectories, while offering no mechanism to capture heterogeneity across rollouts. The posterior logits show moderate spread, not an extreme separation, so hard argmax may be discarding useful uncertainty.",
+    "correct_approach": "During evaluation rollouts (not during SBI simulation generation), select update convention per-trajectory stochastically from the softmax probabilities derived from update logits, but do it with a fixed RNG seed per trajectory for determinism. Alternatively, select convention based on a simple observable heuristic derived from the initial state (e.g., pipeline characteristics) without new parameters. Keep the three conventions but stop collapsing them to a single deterministic argmax globally; this can reduce systematic mismatch on validation trajectories.",
+    "key_insight": "If a calibrated categorical mechanism is uncertain (non-peaked logits), collapsing to argmax can hurt generalization; sample deterministically-per-trajectory from the learned distribution to represent heterogeneity without adding parameters."
+  },
+  "validation-target-too-low-not-realistic-with-latent-demand-no-actions-in-encoder": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "low",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Latent demand must be inferred via calibration",
+      "Official observation encoding uses only inventory, backlog, pipeline_len, t"
+    ],
+    "code_refs": [
+      {
+        "symbol": "NPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "BeerGameModel._sample_demand",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss remains ~79.22 after multiple iterations; dominant backlog_mse suggests irreducible uncertainty from latent demand under current model/observation setup"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "Validation loss is far above the stated aspirational target (\u22641e-6), and improvements appear bounded by the latent-demand identifiability limits given only one training trajectory for SBI.",
+    "root_cause_analysis": "The system tries to infer a latent demand process from state-only observations, but the calibration is based on a single trajectory and the observation encoder excludes actions, making the inverse problem highly underdetermined. Even with mechanistic inventory/backlog updates, multiple demand sequences can produce similar state paths, so near-zero loss across unseen trajectories is not plausible without adding stronger structure (e.g., conditioning demand on observable state) or additional observations.",
+    "correct_approach": "Treat near-zero validation loss as unrealistic under current data constraints. Focus on structurally improving demand/state coupling (as above) and pipeline length fidelity. If allowed by the harness (verify before changing), consider including action sequence in the calibration input encoding to reduce posterior ambiguity; if not allowed, keep encoder as-is and prioritize mechanistic fixes that reduce systematic bias rather than stochastic variance.",
+    "key_insight": "When demand is latent and calibration uses a single trajectory, expect an error floor unless the model includes strong inductive bias (state-conditioned demand, correct pipeline semantics); don\u2019t chase vanishing loss via parameter tuning alone."
+  }
+}

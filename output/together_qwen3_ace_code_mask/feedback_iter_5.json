@@ -1,0 +1,124 @@
+{
+  "zero-peer-influence-parameters": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "peer-influence-scales-mismatch",
+      "action_decision_policy.by_role.resident.policy_form",
+      "calibratable_parameters.name: beta_f, beta_w, beta_c"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L135-L145"
+      },
+      {
+        "symbol": "Simulator._compute_adoption_probability",
+        "lines": "L275-L282"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "TransitionFit: 0.7 (high), Brier: 0.5067 (high), simulated daily rates (0.27-0.45) diverge from observed (0.63-0.73); calibrated beta_f, beta_w, beta_c, w_family, w_work, w_community all = 0.0"
+    },
+    "metric_links": [
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Simulated mask adoption rates are severely underestimated (0.27\u20130.45) vs observed (0.63\u20130.73) on validation, with high TransitionFit and Brier scores, indicating no social influence is driving adoption.",
+    "root_cause_analysis": "All peer influence parameters (beta_f, beta_w, beta_c, w_family, w_work, w_community) are calibrated to 0.0, despite the blueprint requiring them to be freely optimized to capture social sensitivity. The L2 penalty on weight differences and unconstrained optimization were implemented, but the optimization converged to zero due to lack of signal or misalignment with the info receipt mechanism.",
+    "correct_approach": "Remove the L2 penalty on w_* differences and reduce the regularization strength. Initialize beta_f, beta_w, beta_c to 1.0 and w_family, w_work, w_community to 0.5\u20131.0. Add a constraint that at least one w_* must be > 0.05 during optimization. Ensure phi_* values are non-zero and consistent with peer influence computation in _compute_info_receipt.",
+    "key_insight": "Peer influence parameters must be initialized away from zero and regularization must not suppress socially meaningful heterogeneity; always validate that influence terms contribute non-trivially to the logit before accepting calibration."
+  },
+  "info-decay-zero": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "information_propagation.mechanism",
+      "calibratable_parameters.name: rho_info_decay"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L130-L131"
+      },
+      {
+        "symbol": "Simulator.step",
+        "lines": "L255-L257"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "rho_info_decay = 0.05 (at lower bound), simulated memory_of_info decays too fast; TransitionFit high (0.7) due to abrupt state changes; Brier high (0.5067)"
+    },
+    "metric_links": [
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "Memory_of_info decays too rapidly (rho_info_decay=0.05), causing simulated transitions to be too abrupt and uncorrelated with observed persistence, leading to high TransitionFit and Brier scores.",
+    "root_cause_analysis": "rho_info_decay is initialized at 0.3 but calibrated to 0.05 (lower bound), violating the blueprint requirement that memory_of_info be continuous and persistent. The likelihood function in calibration uses continuous memory_of_info, but the optimization penalizes higher decay values without sufficient justification from data.",
+    "correct_approach": "Set lower bound of rho_info_decay to 0.15 and upper bound to 0.8. Add a prior penalty centered at 0.4 to encourage moderate persistence. Ensure the memory update in Simulator.step uses the calibrated value and does not clip to 0.0 if received_info is false.",
+    "key_insight": "Information memory decay must be constrained to values that preserve behavioral inertia; use a prior centered on empirically plausible persistence (0.3\u20130.5) and avoid hard lower bounds near zero unless justified by domain knowledge."
+  },
+  "exogenous-broadcast-overfit": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "exogenous_signals.name: received_info_broadcast.bounds",
+      "calibratable_parameters.name: lambda_broadcast"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L128-L129"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": [],
+      "metrics": "lambda_broadcast = 0.2 (upper bound), simulated aggregate rates are low despite high broadcast rate, indicating broadcast is compensating for broken peer influence"
+    },
+    "metric_links": [
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "MAE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "lambda_broadcast is pinned at its upper bound (0.2), suggesting it is being used as a crutch to explain adoption, but the simulated adoption rates remain too low \u2014 indicating the broadcast mechanism is misaligned with the decision rule or not sufficient alone.",
+    "root_cause_analysis": "The blueprint forbids using broadcast as a crutch for broken peer influence. The model has zero peer influence (beta_* and w_* = 0), so the optimizer maximizes lambda_broadcast to compensate, but the decision rule\u2019s dependence on info_prob is too weak (beta_i=0.44) to translate broadcast into adoption without peer signals.",
+    "correct_approach": "Reinforce peer influence by fixing beta_f, beta_w, beta_c and w_* to non-zero values. Reduce lambda_broadcast upper bound to 0.1 and add a strong L2 penalty centered at 0.05. Ensure beta_i is not suppressed by regularization \u2014 initialize it to 1.0 and use a tighter bound [0.1, 3.0].",
+    "key_insight": "Exogenous signals must not compensate for broken endogenous mechanisms; always calibrate peer influence first and constrain broadcast to a biologically plausible baseline (0.05\u20130.1) to avoid model misidentification."
+  }
+}

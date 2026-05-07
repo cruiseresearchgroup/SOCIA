@@ -1,0 +1,260 @@
+{
+  "no-colocation-layer-implemented": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "interaction_topology.layers[name='co_location_contact']",
+      "protocol: \"Optionally, at each time_bin, compute co-location contacts among residents currently at each place.\"",
+      "place.dynamic_states.current_occupancy"
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator.simulate_days",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "POI.current_occupancy",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "No outputs/metrics for co-location; POI.current_occupancy never changes in simulation."
+    },
+    "error_identification": "Blueprint requires/permits co-location contact and occupancy updates, but simulation generates only resident trajectories; occupancy/contact layer is absent, so any downstream social/contact analyses would be impossible.",
+    "root_cause_analysis": "MobilitySimulator.simulate_days appends Event objects but never increments/decrements POI.current_occupancy and never computes contact events; there is no time-bin loop or overlap logic.",
+    "correct_approach": "Add event windows by sampling dwell times (already sampled) and record (arrival, departure) per agent per POI. Update POI.current_occupancy on arrival/departure. If enabled, compute co-location contacts per time_bin (e.g., 10 minutes) by grouping agents present at each POI during each bin and emitting contact pairs; store separately from trajectories to avoid breaking output schema.",
+    "key_insight": "If blueprint defines an interaction layer (occupancy/contact), implement at least the state updates and a minimal event log; otherwise metrics and extensions tied to that layer cannot be validated."
+  },
+  "calibration-on-training-not-validation": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "execution: \"Optimize calibratable parameters ... by minimizing validation loss\"",
+      "outputs: evaluation_results_on_validation"
+    ],
+    "code_refs": [
+      {
+        "symbol": "main",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "RandomSearchCalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Calibration objective reported as best_objective_on_training; validation metrics remain mediocre (topk_poi_recall\u22480.184, stop_count_abs_mean_error\u22481.59)."
+    },
+    "error_identification": "The system calibrates parameters against training days rather than the blueprint-specified validation loss, which risks overfitting and mis-calibration for held-out dates.",
+    "root_cause_analysis": "In main(), RandomSearchCalibrator.fit is called with train_ground_truth_by_agent=train_by_agent and train_dates_by_agent=train_dates; it does not use val_by_agent/val_dates for objective scoring.",
+    "correct_approach": "Change calibrator.fit signature/usage to accept validation_ground_truth_by_agent and validation_dates_by_agent (from holdout_split). Use training only for fitting global/agent models; run simulation over validation dates for scoring. If compute cost is a concern, calibrate on a subset of validation dates and then evaluate on full validation.",
+    "key_insight": "Separate 'fit models' (training) from 'tune parameters' (validation); otherwise calibration optimizes the wrong target and validation metrics won\u2019t reflect intended objective."
+  },
+  "stop-count-distribution-mismatch-and-early-termination": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "simulation_evaluation.metrics[name='daily_stop_count_distribution_kl']",
+      "action_decision_policy: day_end_hazard_params",
+      "execution: \"number_of_stops_per_day by day-type\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator.simulate_days",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._sample_stop_count",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._end_day_hazard",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "stop_count_abs_mean_error\u22481.59, stop_count_kl\u22480.50 on validation."
+    },
+    "error_identification": "Simulated days have notably different numbers of stops than validation (average error ~1.6 stops/day; KL divergence ~0.50).",
+    "root_cause_analysis": "simulate_days samples n_stops but then applies an independent end-day hazard at every step, effectively shrinking the realized stop count below the sampled target. The hazard is not conditioned on remaining planned stops or time budget; it can double-count \u201cend day\u201d mechanisms.",
+    "correct_approach": "Make stop count coherent with ending: either (a) remove hazard and force exactly n_stops (except when time runs out), or (b) treat n_stops as a prior and use hazard to generate the stop count directly (stop when hazard triggers), not both. If keeping both, gate hazard so it only applies after reaching at least a minimum fraction of n_stops or after a late-day threshold.",
+    "key_insight": "Don\u2019t sample a target count and also apply an unconditional stopping hazard; align the generative story so one mechanism determines stop count."
+  },
+  "poi-choice-too-random-high-temperature-and-large-candidate-set": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "calibratable_parameters.softmax_temperature",
+      "calibratable_parameters.candidate_set_topk_from_transition_graph",
+      "simulation_evaluation.metrics[name='topk_poi_recall']"
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator._candidate_pois",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._choose_poi",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "RandomSearchCalibrator._sample_params",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "topk_poi_recall\u22480.184 on validation; calibrated softmax_temperature\u22484.99 (near max) and candidate_set_topk_from_transition_graph=180 (very large)."
+    },
+    "error_identification": "The simulator fails to reproduce agents\u2019 commonly visited POIs (recall@10 ~0.18), while calibrated parameters indicate near-uniform sampling pressure.",
+    "root_cause_analysis": "With high softmax_temperature, utility differences from affinity/popularity/distance have limited effect, and _candidate_pois adds many random POIs (up to ~50 extras) after including up to topk transition neighbors, increasing exploration. This combination dilutes selection of anchor POIs, hurting top-k recall.",
+    "correct_approach": "Constrain calibration/search to avoid degenerate high-temperature solutions (e.g., use log-uniform prior favoring lower temperatures, or cap temperature to ~2 unless justified). Reduce random extra candidates or weight candidates (e.g., sample extras proportional to popularity/affinity rather than uniform). Add a recency/anchor bonus: explicitly include agent\u2019s top-N affinity POIs in candidate list for matching recall metric.",
+    "key_insight": "If a metric rewards repeating known locations, avoid parameter regimes that make choice close to uniform; candidate generation and temperature jointly control memorization vs exploration."
+  },
+  "distance-penalty-linear-in-km-dominates-and-miscalibrates-trips": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "exogenous_signals.travel_cost_distance: \"distance-based penalty ... penalty strength is calibratable\"",
+      "action_decision_policy: \"distance decay\"",
+      "simulation_evaluation.metrics[name='trip_distance_distribution_wasserstein']"
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator._choose_poi",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "trip_distance_wasserstein\u22481.10 km; w_distance_decay is applied as u -= w * dist (linear)."
+    },
+    "error_identification": "Trip distance distribution remains meaningfully different from validation (Wasserstein ~1.1 km), suggesting the distance model is not matching empirical decay.",
+    "root_cause_analysis": "Blueprint implies a distance-decay utility term; current implementation uses a linear penalty in raw km. Many mobility models use log-distance, power-law, or exponential decay; linear km can be too strong at long distances and too weak at short distances depending on scale, and it ignores agent-specific mobility_radius_preference_km.",
+    "correct_approach": "Replace linear penalty with a calibrated decay form consistent with training: e.g., u -= w * (dist / (profile.mobility_radius_preference_km+eps)) or u -= w * log(1+dist). Optionally fit a global/agent radius parameter from training (already computed) and use it in utility.",
+    "key_insight": "Distance features should be scale-normalized (global or per-agent) and use a decay form that matches empirical distance distributions; raw linear km is rarely robust."
+  },
+  "dwell-time-estimated-from-inter-event-gaps-without-travel-decomposition": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "calibratable_parameters.dwell_time_params_by_coarse_category",
+      "action_decision_policy: \"next event time = current_time + travel_time(distance) + dwell_time\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "estimate_models_from_training",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._sample_dwell_minutes",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Calibration drives travel_time_speed_kmph high (~70.6 km/h), suggesting timing components may be mis-attributed."
+    },
+    "error_identification": "Timing model likely mis-specified: dwell-time distribution is learned from raw time gaps between consecutive events, but simulation adds both travel time and dwell time, risking double-counting and forcing calibration to compensate (e.g., unrealistically high speed).",
+    "root_cause_analysis": "In estimate_models_from_training(), dwell_gap_by_category uses gap = nxt.time - cur.time directly as a dwell sample. In simulation, inter-event gap becomes travel_time(distance)+dwell_time, so learned dwell already includes travel, biasing dwell upward and distorting travel speed calibration.",
+    "correct_approach": "When fitting dwell parameters, subtract an estimated travel time component from gaps (using an initial speed guess or distances where available). Alternatively, fit a joint model: treat observed gap as dwell+travel and estimate dwell parameters by regressing out travel distance or using EM-like updates during calibration.",
+    "key_insight": "If training provides only timestamps, inter-event gaps are composites; don\u2019t reuse them as dwell directly if the simulator separately models travel time."
+  },
+  "transition-model-ignores-poi-level-personal-transitions": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "action_decision_policy.inputs: personal_transition_priors (category->category and/or poi->poi)",
+      "interaction_topology.layers[name='mobility_transition_graph']"
+    ],
+    "code_refs": [
+      {
+        "symbol": "MobilitySimulator._choose_poi",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "MobilitySimulator._personal_category_transition_probs",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "transition_divergence\u22481.60; topk_poi_recall\u22480.184."
+    },
+    "error_identification": "Category transitions and POI recall are underperforming, consistent with missing personalization at the POI transition level.",
+    "root_cause_analysis": "The simulator computes personal transitions only for coarse categories. POI choice uses global POI transition graph probabilities (trans_probs derived from global edge counts) and agent POI affinities, but no agent-specific POI->POI transition prior is learned/applied.",
+    "correct_approach": "During training, compute per-agent POI transition counts (poi_i->poi_{i+1}) and normalize. In _choose_poi, add a personal transition term (weighted) alongside global transition term. Also use the global transition graph to form candidate sets, but score with a mixture of personal/global POI transitions.",
+    "key_insight": "If evaluation rewards reproducing habitual sequences, personalization must apply to transitions, not just marginal POI frequencies."
+  },
+  "stop-count-distribution-smoothing-support-too-narrow": {
+    "issue_type": "CODE_BUG",
+    "severity": "low",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "simulation_evaluation.metrics[name='daily_stop_count_distribution_kl'] (\"with smoothing\")"
+    ],
+    "code_refs": [
+      {
+        "symbol": "Evaluator._stop_count_dist",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "Evaluator.compute_metrics",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Stop-count KL may be unstable if distributions have disjoint supports; implementation smooths only over observed support."
+    },
+    "error_identification": "Stop-count KL can be biased/high because smoothing is applied only to keys present in each distribution, not over the union support with a shared prior.",
+    "root_cause_analysis": "_stop_count_dist builds support = sorted(ctr.keys()) and applies smoothing only on that support. When later aligning supports in compute_metrics, missing keys get EPS+1e-9, but not the same smoothing mass as present keys.",
+    "correct_approach": "Compute smoothed distributions over the union support directly (in compute_metrics): for each k in union, use count(k)+alpha, then normalize. This yields symmetric smoothing consistent with the metric definition.",
+    "key_insight": "When comparing discrete distributions, apply smoothing on a common support; per-distribution supports create artifacts that inflate divergence."
+  },
+  "missing-event-driven-minute-rounding-seconds-retained": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "low",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "scale_granularity.time_step: \"Seconds are retained in parsing but rounded for simulation.\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "parse_hhmmss_to_minute_of_day",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "TrajectoryParser.parse_daily_string",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Time parsing drops seconds entirely; could slightly affect time-of-day histograms."
+    },
+    "error_identification": "Parser ignores seconds rather than retaining then rounding, deviating from blueprint (minor but can add noise to minute histograms if seconds carry structure).",
+    "root_cause_analysis": "parse_hhmmss_to_minute_of_day parses HH and MM only; seconds are discarded even when provided.",
+    "correct_approach": "Parse optional seconds; convert to minute with rounding (e.g., minute = hh*60+mm + (ss>=30)). Clamp to [0,1439]. Keep robust stripping logic.",
+    "key_insight": "Time discretization should be explicit and consistent with spec; even small rounding rules can systematically shift histogram-based metrics."
+  }
+}

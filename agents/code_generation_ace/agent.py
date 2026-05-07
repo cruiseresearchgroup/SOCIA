@@ -1218,9 +1218,10 @@ class CodeGenerationAgent(BaseAgent):
             
             # For ACE/ALPHA mode, use template with blue_print, file_summaries, and playbook placeholders
             if mode in ["ace", "alpha"]:
-                # Check if task description contains "daily mobility trajectories" for coding_patch replacement
+                # Check task description for task-specific coding_patch replacement
                 task_description = task_spec.get('description', '').lower()
                 coding_patch_content = ""
+                
                 if 'daily mobility trajectories' in task_description:
                     self.logger.info("Loading llmob patch content for {coding_patch} placeholder (iteration 0)")
                     try:
@@ -1230,6 +1231,15 @@ class CodeGenerationAgent(BaseAgent):
                             coding_patch_content = f.read()
                     except Exception as e:
                         self.logger.error(f"Error loading llmob_patch_prompt.txt: {e}")
+                elif 'mask-wearing behavior' in task_description:
+                    self.logger.info("Loading mask adoption patch content for {coding_patch} placeholder (iteration 0)")
+                    try:
+                        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        template_path = os.path.join(project_root, "templates", "mask_adoption_patch.txt")
+                        with open(template_path, 'r', encoding='utf-8') as f:
+                            coding_patch_content = f.read()
+                    except Exception as e:
+                        self.logger.error(f"Error loading mask_adoption_patch.txt: {e}")
                 
                 # Replace {coding_patch} placeholder before formatting other placeholders
                 prompt_template_with_patch = prompt_template.replace("{coding_patch}", coding_patch_content)
@@ -1245,6 +1255,7 @@ class CodeGenerationAgent(BaseAgent):
                 # Replace {coding_patch} placeholder first (even if empty) to avoid KeyError
                 coding_patch_content = ""
                 task_description = task_spec.get('description', '').lower()
+                
                 if 'daily mobility trajectories' in task_description:
                     self.logger.info("Loading llmob patch content for {coding_patch} placeholder (iteration 0, non-ACE mode)")
                     try:
@@ -1254,6 +1265,15 @@ class CodeGenerationAgent(BaseAgent):
                             coding_patch_content = f.read()
                     except Exception as e:
                         self.logger.error(f"Error loading llmob_patch_prompt.txt: {e}")
+                elif 'mask-wearing behavior' in task_description:
+                    self.logger.info("Loading mask adoption patch content for {coding_patch} placeholder (iteration 0, non-ACE mode)")
+                    try:
+                        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        template_path = os.path.join(project_root, "templates", "mask_adoption_patch.txt")
+                        with open(template_path, 'r', encoding='utf-8') as f:
+                            coding_patch_content = f.read()
+                    except Exception as e:
+                        self.logger.error(f"Error loading mask_adoption_patch.txt: {e}")
                 
                 # Replace {coding_patch} placeholder before formatting other placeholders
                 prompt_template_with_patch = prompt_template.replace("{coding_patch}", coding_patch_content)
@@ -1598,9 +1618,10 @@ class CodeGenerationAgent(BaseAgent):
         transformed_playbook = self._transform_playbook_for_prompt(playbook)
         playbook_str = json.dumps(transformed_playbook, indent=2, ensure_ascii=False)
         
-        # Check if task description contains "daily mobility trajectories" for coding_patch replacement
+        # Check task description for task-specific coding_patch replacement
         task_description = task_spec.get('description', '').lower()
         coding_patch_content = ""
+        
         if 'daily mobility trajectories' in task_description:
             self.logger.info("Loading llmob patch content for {coding_patch} placeholder (iteration >= 1)")
             try:
@@ -1610,6 +1631,15 @@ class CodeGenerationAgent(BaseAgent):
                     coding_patch_content = f.read()
             except Exception as e:
                 self.logger.error(f"Error loading llmob_patch_prompt.txt: {e}")
+        elif 'mask-wearing behavior' in task_description:
+            self.logger.info("Loading mask adoption patch content for {coding_patch} placeholder (iteration >= 1)")
+            try:
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                template_path = os.path.join(project_root, "templates", "mask_adoption_patch.txt")
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    coding_patch_content = f.read()
+            except Exception as e:
+                self.logger.error(f"Error loading mask_adoption_patch.txt: {e}")
         
         # Replace {coding_patch} placeholder first
         prompt_template_with_patch = prompt_template.replace("{coding_patch}", coding_patch_content)

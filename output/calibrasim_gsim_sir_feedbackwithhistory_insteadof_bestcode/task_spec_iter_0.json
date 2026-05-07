@@ -1,0 +1,875 @@
+{
+  "title": "Simulation Task",
+  "description": "Design a simulator to generate epidemic state trajectories for the COVID SIR (Susceptible-Infected-Recovered) model. A trajectory is an ordered sequence of state dictionaries over time: {state[0], state[1], ..., state[T]} where each state contains (S, I, R) compartment counts.",
+  "simulation_focus": "Goal: generate state transition sequences from initial conditions using a parameterized SimulatorStep class.\\nKey components:\\n(1) Define epidemiological parameters as model parameters.\\n(2) Implement step(state[t], action, rng) function that computes state[t+1] from state[t] using dynamics.\\n(3) Parameters are optimized via Simulation-Based Inference (SBI)  or Evolution Strategy (ES) to fit observed training trajectories.\\n(4) The simulator must handle stochastic transitions and conserve total population (S + I + R = constant).",
+  "data_folder": "data_fitting/calibrasim_sir/",
+  "data_files": {
+    "train_seed_10_n_100.csv": "COVID SIR epidemic simulation training trajectories, containing 100 independent trajectories. Format: CSV with columns 'trajectory_id' (0-99), 'time_step' (0-60), 'S' (susceptible count), 'I' (infected count), 'R' (recovered count). Each trajectory represents one 61-day epidemic evolution. For simulator usage: start from state at time_step=0 as initial condition, then use state[t] to predict state[t+1] sequentially for t=0,...,59. IMPORTANT: For SBI training, ONLY use the first trajectory (trajectory_id=0) as the observation data. For final evaluation, use ALL trajectories from train/val/test datasets to compute comprehensive loss metrics (MSE).",
+    "val_seed_10_n_100.csv": "COVID SIR epidemic simulation validation trajectories. Same format as train_seed_*_n_100.csv. Used for hyperparameter tuning and model selection during training. For simulator usage: same as training - start from time_step=0, predict sequentially. Used together with train and test datasets for final evaluation.",
+    "test_seed_10_n_100.csv": "COVID SIR epidemic simulation test trajectories. Same format as train_seed_*_n_100.csv. Used ONLY for final evaluation after all training is complete. For simulator usage: same as training - start from time_step=0, predict sequentially. Used together with train and val datasets for comprehensive performance assessment."
+  },
+  "evaluation_metrics": {
+    "mse": {
+      "description": "Mean Squared Error between generated and ground-truth state trajectories (computed as mean squared difference across all (S, I, R) values over all time steps and trajectories). Measures average prediction accuracy. Lower is better."
+    },
+    "mse_per_dimension": {
+      "description": "Per-compartment MSE computed separately for S, I, and R dimensions. Returns dictionary {\\\"S\\\": mse_S, \\\"I\\\": mse_I, \\\"R\\\": mse_R}. Helps identify which compartment predictions are most accurate. Lower is better for each dimension."
+    },
+    "train_loss": {
+      "description": "Loss metrics (MSE) computed on training trajectories. Used for parameter optimization and model development."
+    },
+    "val_loss": {
+      "description": "Loss metrics (MSE) computed on validation trajectories. Used for model selection, hyperparameter tuning, and early stopping decisions."
+    },
+    "test_loss": {
+      "description": "Loss metrics (MSE) computed on test trajectories. Used ONLY for final performance assessment after all training and selection is complete. Represents generalization to unseen data."
+    }
+  },
+  "data_analysis_result": {
+    "overall_simulation_design": {
+      "objective": "Generate discrete-time SIR trajectories and calibrate simulator parameters so simulated trajectories match observed data. Use Simulation-Based Inference (SBI) with Neural Posterior Estimation (NPE) to infer parameters from a single observed trajectory (train trajectory_id=0 only), then evaluate the inferred parameters on full train/val/test sets.",
+      "initialization": {
+        "description": "For each trajectory evaluation run, initialize (S0,I0,R0) from the observed time_step==0 row of that trajectory; set population N=S0+I0+R0 and keep N constant within that trajectory. For SBI training simulations, always initialize from the initial state of the observation trajectory train trajectory_id=0. Set simulation horizon T from data max time_step per trajectory (typically 60). Random seed optionally set for reproducibility.",
+        "source_type": "mixed",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "trajectory_id",
+            "time_step",
+            "S",
+            "I",
+            "R"
+          ],
+          "derivation": "Observation trajectory for SBI is trajectory_id==0 only. For SBI simulation rollouts: use the row at time_step==0 of trajectory_id==0 as initial state; set T = max(time_step) for trajectory_id==0. For evaluation rollouts: for each trajectory_id in train/val/test files, use its own time_step==0 initial state and T = max(time_step) for that trajectory."
+        }
+      },
+      "execution": "1) Load train/val/test trajectories from CSVs; 2) Define a discrete-time stochastic SIR transition kernel mapping (S_t,I_t,R_t)->(S_{t+1},I_{t+1},R_{t+1}) via integer new infections and new recoveries with conservation; 3) SBI calibration via NPE using ONLY the single observed trajectory from training set (trajectory_id=0): construct observation vector x_o by flattening the full (T+1)x3 trajectory; simulate pairs (theta, x) by sampling theta from prior and rolling out the simulator from the same initial state and horizon; train NPE to approximate p(theta|x); sample posterior conditioned on x_o and take posterior mean as optimized_parameters; 4) Using optimized_parameters, evaluate prediction quality (MSE) on ALL trajectories in train/val/test files without any additional temporal holdout split; 5) For validation, optionally run K stochastic rollouts per trajectory and output the mean predicted trajectory to CSV.",
+      "outputs": [
+        "results.json",
+        "val_predicted_mean_trajectories.csv"
+      ]
+    },
+    "scale_granularity": {
+      "time_step": {
+        "value": "days",
+        "source_type": "unknown",
+        "data_reference": null
+      },
+      "spatial_resolution": {
+        "value": "non-spatial",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "trajectory_id",
+            "time_step",
+            "S",
+            "I",
+            "R"
+          ],
+          "derivation": "No location fields exist; dynamics are aggregate compartment counts per time_step."
+        }
+      },
+      "population_size": {
+        "value": "Per-trajectory constant N inferred as S+I+R at time_step=0 for each trajectory_id; enforce conservation in simulation.",
+        "source_type": "mixed",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "S",
+            "I",
+            "R",
+            "time_step",
+            "trajectory_id"
+          ],
+          "derivation": "Compute N_i = S+I+R for each trajectory_id at time_step==0; treat as fixed within that trajectory; enforce conservation and nonnegativity."
+        }
+      },
+      "rationale": "Data are discrete time-indexed trajectories with aggregate compartment counts and no spatial fields; thus use a non-spatial, discrete-time SIR with integer transitions and conservation."
+    },
+    "agent_archetypes": {
+      "unit": "trajectory_simulator_run (one epidemic trajectory instance)",
+      "roles": [
+        {
+          "name": "sir_trajectory_agent",
+          "static_attributes": [
+            {
+              "name": "trajectory_id",
+              "type": "int",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "trajectory_id"
+                ],
+                "derivation": "For evaluation, use observed trajectory_id from each dataset file. For SBI observation, use trajectory_id==0 in training set only."
+              }
+            },
+            {
+              "name": "N",
+              "type": "int",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "S",
+                  "I",
+                  "R",
+                  "time_step",
+                  "trajectory_id"
+                ],
+                "derivation": "N is computed from the initial state row (time_step==0) of the corresponding trajectory_id and held constant."
+              }
+            },
+            {
+              "name": "horizon_T",
+              "type": "int",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "time_step",
+                  "trajectory_id"
+                ],
+                "derivation": "For each trajectory_id, set T = max(time_step) after grouping/sorting. For SBI, use T from the observation trajectory_id==0."
+              }
+            }
+          ],
+          "dynamic_states": [
+            {
+              "name": "time_step",
+              "type": "int",
+              "update_rule": "Increment by 1 each simulation step until horizon_T.",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "time_step"
+                ],
+                "derivation": "Discrete integer index observed; simulator mirrors this indexing."
+              }
+            },
+            {
+              "name": "S",
+              "type": "int",
+              "update_rule": "S_{t+1} = S_t - new_infections_t; clamp to [0, N].",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "I",
+              "type": "int",
+              "update_rule": "I_{t+1} = I_t + new_infections_t - new_recoveries_t; clamp to [0, N].",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "R",
+              "type": "int",
+              "update_rule": "R_{t+1} = R_t + new_recoveries_t; enforce nondecreasing R and clamp to [0, N].",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "new_infections",
+              "type": "int",
+              "update_rule": "Sample integer new_infections from a stochastic infection process with mean approx beta * S_t * I_t / N or hazard 1-exp(-beta*I_t/N); truncate to [0, S_t].",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "new_recoveries",
+              "type": "int",
+              "update_rule": "Sample integer new_recoveries from a stochastic recovery process with mean approx gamma * I_t; truncate to [0, I_t].",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "conservation_adjustment",
+              "type": "int",
+              "update_rule": "After sampling transitions, enforce S_{t+1}+I_{t+1}+R_{t+1}=N exactly by adjusting within valid bounds (e.g., if rounding/clamping causes mismatch, correct the compartment(s) while preserving nonnegativity).",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "construction_from_data": "For evaluation: each agent corresponds to one trajectory_id from train/val/test grouped rows, ordered by time_step, with initial state taken from time_step==0. For SBI: the observation agent is the single trajectory train trajectory_id==0 only; its full trajectory is flattened to x_o.",
+          "update_from_data": "SBI does not use per-step targets directly; instead, it uses the flattened full-trajectory vector x as the summary/observation for NPE training and posterior inference."
+        },
+        {
+          "name": "sbi_calibration_controller",
+          "static_attributes": [
+            {
+              "name": "calibration_method",
+              "type": "enum",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "observation_trajectory_id",
+              "type": "int",
+              "source_type": "designed",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "trajectory_id"
+                ],
+                "derivation": "Fixed to 0 (use only train trajectory_id==0 as the observation)."
+              }
+            }
+          ],
+          "dynamic_states": [
+            {
+              "name": "current_posterior_estimator",
+              "type": "object",
+              "update_rule": "Train NPE on simulated (theta, x) pairs; update estimator parameters during training.",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "simulation_budget",
+              "type": "int",
+              "update_rule": "Fixed or configurable number of simulations used to generate (theta, x) pairs.",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "posterior_samples",
+              "type": "array",
+              "update_rule": "After training NPE, sample theta ~ p(theta|x_o).",
+              "source_type": "designed",
+              "data_reference": null
+            },
+            {
+              "name": "optimized_parameters",
+              "type": "object",
+              "update_rule": "Set to posterior mean of sampled theta conditioned on x_o.",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "construction_from_data": "Load train trajectories; select only trajectory_id==0 as the sole observation; flatten its full trajectory (T+1)x3 to x_o.",
+          "update_from_data": "Generate training data for NPE by sampling theta from prior and simulating trajectories from the same initial state and horizon as the observation; flatten to x and train p(theta|x)."
+        }
+      ]
+    },
+    "interaction_topology": {
+      "topology": "platform-level",
+      "layers": [
+        {
+          "name": "theta_to_simulator",
+          "from_role": "sbi_calibration_controller",
+          "to_role": "sir_trajectory_agent",
+          "edge_rule": "During SBI simulations, controller samples theta from prior and sets simulator parameters; agent rolls out from observation initial state and produces flattened x.",
+          "source_type": "designed",
+          "data_reference": null
+        },
+        {
+          "name": "x_to_npe_training",
+          "from_role": "sir_trajectory_agent",
+          "to_role": "sbi_calibration_controller",
+          "edge_rule": "Agent returns flattened simulated trajectory x; controller stores (theta, x) pairs for NPE training; after training, controller conditions on x_o and samples posterior.",
+          "source_type": "designed",
+          "data_reference": null
+        }
+      ],
+      "protocol": "SBI loop: choose observation x_o from train trajectory_id==0 -> sample theta from prior -> simulate x -> collect (theta,x) -> train NPE -> infer posterior p(theta|x_o) -> take posterior mean as optimized_parameters -> evaluate optimized_parameters on all trajectories in train/val/test."
+    },
+    "information_propagation": {
+      "exists": false,
+      "topology": "none (aggregate compartment model; no explicit message passing between individuals/regions)",
+      "mechanism": "Not applicable; infection pressure is computed from aggregate S and I within each trajectory.",
+      "source_type": "data_derived",
+      "data_reference": {
+        "file": "train_seed_10_n_100.csv",
+        "fields": [
+          "S",
+          "I",
+          "R"
+        ],
+        "derivation": "Only aggregate compartments provided; no contact network or communication fields."
+      }
+    },
+    "exogenous_signals": [
+      {
+        "name": "none_provided",
+        "effect_on_agents": "No interventions or time-varying covariates are present; base model assumes constant parameters over time within a trajectory.",
+        "bounds": "N/A",
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "trajectory_id",
+            "time_step",
+            "S",
+            "I",
+            "R"
+          ],
+          "derivation": "No columns for interventions, mobility, policies, or seasonality."
+        }
+      }
+    ],
+    "action_decision_policy": {
+      "by_role": [
+        {
+          "role": "sir_trajectory_agent",
+          "inputs": [
+            {
+              "name": "current_S",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "S"
+                ],
+                "derivation": "Current compartment state."
+              }
+            },
+            {
+              "name": "current_I",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "I"
+                ],
+                "derivation": "Current compartment state."
+              }
+            },
+            {
+              "name": "current_R",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "R"
+                ],
+                "derivation": "Current compartment state."
+              }
+            },
+            {
+              "name": "parameters_beta_gamma",
+              "source_type": "designed",
+              "data_reference": null
+            }
+          ],
+          "policy_form": "Stochastic transition: compute infection intensity from (S,I,N) and beta; sample integer new_infections; compute recovery intensity from I and gamma; sample integer new_recoveries; update compartments with conservation, nonnegativity, and exact N constraint.",
+          "parameters": [
+            "beta",
+            "gamma"
+          ]
+        },
+        {
+          "role": "sbi_calibration_controller",
+          "inputs": [
+            {
+              "name": "observed_trajectory_train_id0",
+              "source_type": "data_derived",
+              "data_reference": {
+                "file": "train_seed_10_n_100.csv",
+                "fields": [
+                  "trajectory_id",
+                  "time_step",
+                  "S",
+                  "I",
+                  "R"
+                ],
+                "derivation": "Select only trajectory_id==0, sort by time_step, flatten full trajectory to x_o."
+              }
+            }
+          ],
+          "policy_form": "SBI policy (NPE): sample theta from BoxUniform prior; simulate trajectory from observation initial state for T steps; flatten to x; train NPE for p(theta|x); infer posterior given x_o; take posterior mean as optimized_parameters.",
+          "parameters": [
+            "num_simulations",
+            "num_posterior_samples",
+            "npe_training_hyperparams"
+          ]
+        }
+      ]
+    },
+    "holdout_plan": {
+      "method": "file_split_only",
+      "time_ordering": {
+        "source_type": "data_derived",
+        "data_reference": {
+          "file": "train_seed_10_n_100.csv",
+          "fields": [
+            "time_step"
+          ],
+          "derivation": "Within each trajectory_id, states are ordered by increasing time_step for simulation alignment."
+        }
+      },
+      "train_range": "SBI calibration uses ONLY train_seed_10_n_100.csv trajectory_id==0 as the single observation x_o. No additional temporal split within that trajectory is used.",
+      "validation_range": "No within-file temporal holdout is required. Validation evaluation is performed on the entire val_seed_10_n_100.csv trajectories using the optimized_parameters inferred from the single observation.",
+      "notes": "This setup intentionally does NOT split time into train/val within a trajectory. The only separation is by dataset files: train/val/test for evaluation after SBI. The calibration observation is fixed to train trajectory_id==0."
+    },
+    "simulation_evaluation": {
+      "metrics": [
+        {
+          "name": "train_loss",
+          "definition": "Using optimized_parameters, compute mean squared error between simulated mean trajectory and observed trajectory across all train trajectories, all time steps, and compartments (S,I,R).",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "train_seed_10_n_100.csv",
+              "fields": [
+                "trajectory_id",
+                "time_step",
+                "S",
+                "I",
+                "R"
+              ],
+              "derivation": "Compare predicted (S_pred,I_pred,R_pred) at each (trajectory_id,time_step) to observed."
+            }
+          }
+        },
+        {
+          "name": "val_loss",
+          "definition": "Using optimized_parameters, compute overall MSE on validation set across all trajectories, time steps, and compartments.",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "val_seed_10_n_100.csv",
+              "fields": [
+                "trajectory_id",
+                "time_step",
+                "S",
+                "I",
+                "R"
+              ],
+              "derivation": "Compare predicted mean trajectories to observed."
+            }
+          }
+        },
+        {
+          "name": "val_mse_S",
+          "definition": "Validation per-dimension MSE for S only across all trajectories and time steps.",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "val_seed_10_n_100.csv",
+              "fields": [
+                "S",
+                "trajectory_id",
+                "time_step"
+              ],
+              "derivation": "Compare S_pred vs S."
+            }
+          }
+        },
+        {
+          "name": "val_mse_I",
+          "definition": "Validation per-dimension MSE for I only across all trajectories and time steps.",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "val_seed_10_n_100.csv",
+              "fields": [
+                "I",
+                "trajectory_id",
+                "time_step"
+              ],
+              "derivation": "Compare I_pred vs I."
+            }
+          }
+        },
+        {
+          "name": "val_mse_R",
+          "definition": "Validation per-dimension MSE for R only across all trajectories and time steps.",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "val_seed_10_n_100.csv",
+              "fields": [
+                "R",
+                "trajectory_id",
+                "time_step"
+              ],
+              "derivation": "Compare R_pred vs R."
+            }
+          }
+        },
+        {
+          "name": "test_loss",
+          "definition": "Using optimized_parameters, compute overall MSE on test set across all trajectories, time steps, and compartments.",
+          "ground_truth": {
+            "source_type": "data_derived",
+            "data_reference": {
+              "file": "test_seed_10_n_100.csv",
+              "fields": [
+                "trajectory_id",
+                "time_step",
+                "S",
+                "I",
+                "R"
+              ],
+              "derivation": "Compare predicted mean trajectories to observed."
+            }
+          }
+        },
+        {
+          "name": "conservation_violation_rate",
+          "definition": "Fraction of simulated time steps where S+I+R != N or any compartment is negative; should be 0 with correct implementation.",
+          "ground_truth": {
+            "source_type": "designed",
+            "data_reference": null
+          }
+        }
+      ],
+      "comparison_method": "Inference: optimized_parameters is the posterior mean from NPE conditioned on x_o (train trajectory_id==0). Prediction: for each trajectory in train/val/test, simulate K rollouts from that trajectory's initial state for its horizon T; compute mean predicted S,I,R per time_step; compute MSE against observed; output validation mean predicted trajectories to CSV."
+    },
+    "calibratable_parameters": [
+      {
+        "name": "beta",
+        "range_bounds": "[0.0, 5.0]",
+        "source": "designed",
+        "notes": "Transmission rate per time step; inferred via SBI (NPE) from single observed trajectory x_o."
+      },
+      {
+        "name": "gamma",
+        "range_bounds": "[0.0, 1.0]",
+        "source": "designed",
+        "notes": "Recovery probability/rate per time step; inferred via SBI (NPE) from single observed trajectory x_o."
+      }
+    ],
+    "io_contract": {
+      "results_json": {
+        "file": "results.json",
+        "top_level_keys": [
+          "optimized_parameters",
+          "calibration_artifacts",
+          "metrics"
+        ],
+        "optimized_parameters_schema": {
+          "beta": "float",
+          "gamma": "float"
+        },
+        "calibration_artifacts_schema": {
+          "observation_trajectory_id": "int",
+          "observation_T": "int",
+          "x_o_shape": "string",
+          "num_simulations": "int",
+          "num_posterior_samples": "int",
+          "posterior_samples_mean": "object"
+        },
+        "metrics_schema": {
+          "train_mse_overall": "float",
+          "val_mse_overall": "float",
+          "val_mse_S": "float",
+          "val_mse_I": "float",
+          "val_mse_R": "float",
+          "test_mse_overall": "float",
+          "conservation_violation_rate": "float"
+        }
+      },
+      "val_prediction_csv": {
+        "file": "val_predicted_mean_trajectories.csv",
+        "header": [
+          "trajectory_id",
+          "time_step",
+          "S_pred",
+          "I_pred",
+          "R_pred"
+        ],
+        "row_definition": "One row per (trajectory_id, time_step) in validation set. Values are mean predictions across K stochastic rollouts using optimized_parameters and per-trajectory initial states."
+      }
+    }
+  },
+  "file_summaries": [
+    {
+      "file_name": "train_seed_10_n_100.csv",
+      "file_type": "csv",
+      "semantic_summary": "- **Overall data structure and type**\n  - Tabular time-series dataset (CSV) representing **multiple discrete-time SIR epidemic trajectories**.\n  - Each row is one observation with fields: `trajectory_id` (int), `time_step` (int), and compartment counts `S`, `I`, `R` (ints).\n  - Counts are **population totals per compartment** at a given time step (not rates).\n\n- **Relationships or nested elements**\n  - Rows group into trajectories via `trajectory_id`.\n  - Within each `trajectory_id`, rows are ordered by `time_step` to form an **ordered state sequence**: `{state[0], state[1], \u2026, state[T]}`.\n  - Each state is a flat record/dictionary `{S, I, R}`; no additional nesting beyond the implicit grouping (trajectory \u2192 time steps).\n\n- **How this data should inform simulation entities or interactions**\n  - Defines the simulator\u2019s core **state representation**: `(S, I, R)` with **discrete-time updates**.\n  - Implies **state conservation** per time step: typically `S + I + R` \u2248 constant within a trajectory (fixed population size), useful as a validity constraint.\n  - Supports learning/setting simulator behavior by interpreting transitions between consecutive time steps as outcomes of:\n    - **Infections**: `S(t) \u2192 I(t+1)` driven by contact/infection dynamics.\n    - **Recoveries**: `I(t) \u2192 R(t+1)` driven by recovery dynamics.\n  - Simulation entities: one **trajectory generator** producing sequences; interactions are the **transition rules** mapping `state[t] \u2192 state[t+1]` conditioned on `(S,I,R)` (and optionally parameters like transmission/recovery rates) to match observed discrete-step changes."
+    },
+    {
+      "file_name": "val_seed_10_n_100.csv",
+      "file_type": "csv",
+      "semantic_summary": "- **Overall data structure and type**\n  - A **tabular time-series dataset** stored as CSV, representing **multiple discrete SIR epidemic trajectories**.\n  - Each row is an **observation at a specific time step** with integer compartment counts: `S`, `I`, `R`.\n  - Key fields:  \n    - `trajectory_id` (int): identifies which simulation run/trajectory the row belongs to  \n    - `time_step` (int): discrete time index within that trajectory  \n    - `S`, `I`, `R` (int): compartment counts at that time\n\n- **Relationships or nested elements**\n  - Implicit hierarchical grouping:\n    - **Dataset \u2192 trajectories \u2192 ordered states**\n  - Rows with the same `trajectory_id` form one trajectory; ordering is given by increasing `time_step`.\n  - The sequence `{state[0], state[1], \u2026, state[T]}` is reconstructed by grouping on `trajectory_id` and sorting by `time_step`.\n  - Within each trajectory, the compartments satisfy a conservation relationship typical of SIR: `S + I + R = N` (constant population size per trajectory, here likely `N=100` per the filename, though the shown sample totals 69\u2014indicating either a partial view, different N, or additional context).\n\n- **How this data should inform simulation entities or interactions**\n  - **Simulation entities:** a population partitioned into compartments `S`, `I`, `R` for each trajectory.\n  - **State representation:** each row corresponds to one simulator state snapshot `{S, I, R}` at a discrete time step.\n  - **Dynamics implied:** transitions between consecutive rows encode:\n    - **New infections:** `S_t - S_{t+1}` (moves from S \u2192 I)\n    - **Recoveries:** `R_{t+1} - R_t` (moves from I \u2192 R)\n    - Consistency check: `I_{t+1} = I_t + (S_t - S_{t+1}) - (R_{t+1} - R_t)`\n  - **Use in simulator design/validation:** trajectories can be used to:\n    - calibrate/fit infection and recovery parameters (e.g., \u03b2, \u03b3) under a discrete-time SIR update,\n    - validate that simulated outputs match the same schema (one row per time step per trajectory),\n    - enforce constraints (nonnegative integer counts, conserved total population per trajectory, monotone nondecreasing `R`)."
+    },
+    {
+      "file_name": "test_seed_10_n_100.csv",
+      "file_type": "csv",
+      "semantic_summary": "- **Overall data structure and type**\n  - A **tabular dataset (CSV)** representing **discrete-time epidemic simulation output**.\n  - Each row is a **state observation** at a specific time step, with integer compartment counts: **S, I, R**.\n  - Key fields: `trajectory_id` (int), `time_step` (int, sequential), `S`/`I`/`R` (int counts). The implicit total population per trajectory is typically **N = S + I + R** (expected constant over time unless modeling births/deaths).\n\n- **Relationships or nested elements**\n  - Rows are grouped by **`trajectory_id`**, forming one **trajectory** per group.\n  - Within each trajectory, rows are ordered by **`time_step`** to form an ordered sequence:\n    - `trajectory_id` \u2192 `{ state[t] }` for `t = 0..T`\n    - `state[t] = {S_t, I_t, R_t}`\n  - No explicit nesting in the CSV, but conceptually it is a **two-level structure**: dataset \u2192 trajectories \u2192 time-indexed states.\n\n- **How this data should inform simulation entities or interactions**\n  - Defines the simulator\u2019s **state representation**: a global compartmental state `(S, I, R)` at each discrete time step.\n  - Enables learning/validating the simulator\u2019s **transition dynamics**:\n    - New infections inferred from decreases in `S` (e.g., `S_t - S_{t+1}`)\n    - Recoveries inferred from increases in `R` (e.g., `R_{t+1} - R_t`)\n    - `I` changes reflect **infections minus recoveries**.\n  - Suggests interactions are **population-level**, not individual-based: transitions are governed by aggregate rates/parameters (e.g., infection and recovery processes) producing integer count updates per step.\n  - Provides ground-truth trajectory samples for:\n    - **calibrating** SIR parameters (e.g., \u03b2, \u03b3),\n    - **checking invariants** (nonnegativity, conservation of N),\n    - and **evaluating** simulator-generated trajectories against empirical/synthetic outputs."
+    }
+  ],
+  "schemas": {
+    "train_seed_10_n_100.csv": {
+      "file_type": "csv",
+      "row_count": 6100,
+      "column_count": 5,
+      "columns": [
+        "trajectory_id",
+        "time_step",
+        "S",
+        "I",
+        "R"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 6100 entries, 0 to 6099\nData columns (total 5 columns):\n #   Column         Non-Null Count  Dtype\n---  ------         --------------  -----\n 0   trajectory_id  6100 non-null   int64\n 1   time_step      6100 non-null   int64\n 2   S              6100 non-null   int64\n 3   I              6100 non-null   int64\n 4   R              6100 non-null   int64\ndtypes: int64(5)\nmemory usage: 238.4 KB\n",
+      "sample_data": [
+        {
+          "trajectory_id": 0,
+          "time_step": 0,
+          "S": 80,
+          "I": 3,
+          "R": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 1,
+          "S": 78,
+          "I": 4,
+          "R": 1
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 2,
+          "S": 75,
+          "I": 7,
+          "R": 1
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 3,
+          "S": 69,
+          "I": 12,
+          "R": 2
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 4,
+          "S": 64,
+          "I": 15,
+          "R": 4
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 5,
+          "S": 58,
+          "I": 20,
+          "R": 5
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 6,
+          "S": 51,
+          "I": 25,
+          "R": 7
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 7,
+          "S": 43,
+          "I": 30,
+          "R": 10
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 8,
+          "S": 35,
+          "I": 37,
+          "R": 11
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 9,
+          "S": 29,
+          "I": 37,
+          "R": 17
+        }
+      ],
+      "dtypes": {
+        "trajectory_id": "int64",
+        "time_step": "int64",
+        "S": "int64",
+        "I": "int64",
+        "R": "int64"
+      },
+      "file_semantic_summary": "- **Overall data structure and type**\n  - Tabular time-series dataset (CSV) representing **multiple discrete-time SIR epidemic trajectories**.\n  - Each row is one observation with fields: `trajectory_id` (int), `time_step` (int), and compartment counts `S`, `I`, `R` (ints).\n  - Counts are **population totals per compartment** at a given time step (not rates).\n\n- **Relationships or nested elements**\n  - Rows group into trajectories via `trajectory_id`.\n  - Within each `trajectory_id`, rows are ordered by `time_step` to form an **ordered state sequence**: `{state[0], state[1], \u2026, state[T]}`.\n  - Each state is a flat record/dictionary `{S, I, R}`; no additional nesting beyond the implicit grouping (trajectory \u2192 time steps).\n\n- **How this data should inform simulation entities or interactions**\n  - Defines the simulator\u2019s core **state representation**: `(S, I, R)` with **discrete-time updates**.\n  - Implies **state conservation** per time step: typically `S + I + R` \u2248 constant within a trajectory (fixed population size), useful as a validity constraint.\n  - Supports learning/setting simulator behavior by interpreting transitions between consecutive time steps as outcomes of:\n    - **Infections**: `S(t) \u2192 I(t+1)` driven by contact/infection dynamics.\n    - **Recoveries**: `I(t) \u2192 R(t+1)` driven by recovery dynamics.\n  - Simulation entities: one **trajectory generator** producing sequences; interactions are the **transition rules** mapping `state[t] \u2192 state[t+1]` conditioned on `(S,I,R)` (and optionally parameters like transmission/recovery rates) to match observed discrete-step changes."
+    },
+    "val_seed_10_n_100.csv": {
+      "file_type": "csv",
+      "row_count": 6100,
+      "column_count": 5,
+      "columns": [
+        "trajectory_id",
+        "time_step",
+        "S",
+        "I",
+        "R"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 6100 entries, 0 to 6099\nData columns (total 5 columns):\n #   Column         Non-Null Count  Dtype\n---  ------         --------------  -----\n 0   trajectory_id  6100 non-null   int64\n 1   time_step      6100 non-null   int64\n 2   S              6100 non-null   int64\n 3   I              6100 non-null   int64\n 4   R              6100 non-null   int64\ndtypes: int64(5)\nmemory usage: 238.4 KB\n",
+      "sample_data": [
+        {
+          "trajectory_id": 0,
+          "time_step": 0,
+          "S": 65,
+          "I": 4,
+          "R": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 1,
+          "S": 62,
+          "I": 5,
+          "R": 2
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 2,
+          "S": 59,
+          "I": 7,
+          "R": 3
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 3,
+          "S": 57,
+          "I": 9,
+          "R": 3
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 4,
+          "S": 53,
+          "I": 13,
+          "R": 3
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 5,
+          "S": 52,
+          "I": 14,
+          "R": 3
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 6,
+          "S": 50,
+          "I": 15,
+          "R": 4
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 7,
+          "S": 45,
+          "I": 17,
+          "R": 7
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 8,
+          "S": 42,
+          "I": 16,
+          "R": 11
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 9,
+          "S": 36,
+          "I": 19,
+          "R": 14
+        }
+      ],
+      "dtypes": {
+        "trajectory_id": "int64",
+        "time_step": "int64",
+        "S": "int64",
+        "I": "int64",
+        "R": "int64"
+      },
+      "file_semantic_summary": "- **Overall data structure and type**\n  - A **tabular time-series dataset** stored as CSV, representing **multiple discrete SIR epidemic trajectories**.\n  - Each row is an **observation at a specific time step** with integer compartment counts: `S`, `I`, `R`.\n  - Key fields:  \n    - `trajectory_id` (int): identifies which simulation run/trajectory the row belongs to  \n    - `time_step` (int): discrete time index within that trajectory  \n    - `S`, `I`, `R` (int): compartment counts at that time\n\n- **Relationships or nested elements**\n  - Implicit hierarchical grouping:\n    - **Dataset \u2192 trajectories \u2192 ordered states**\n  - Rows with the same `trajectory_id` form one trajectory; ordering is given by increasing `time_step`.\n  - The sequence `{state[0], state[1], \u2026, state[T]}` is reconstructed by grouping on `trajectory_id` and sorting by `time_step`.\n  - Within each trajectory, the compartments satisfy a conservation relationship typical of SIR: `S + I + R = N` (constant population size per trajectory, here likely `N=100` per the filename, though the shown sample totals 69\u2014indicating either a partial view, different N, or additional context).\n\n- **How this data should inform simulation entities or interactions**\n  - **Simulation entities:** a population partitioned into compartments `S`, `I`, `R` for each trajectory.\n  - **State representation:** each row corresponds to one simulator state snapshot `{S, I, R}` at a discrete time step.\n  - **Dynamics implied:** transitions between consecutive rows encode:\n    - **New infections:** `S_t - S_{t+1}` (moves from S \u2192 I)\n    - **Recoveries:** `R_{t+1} - R_t` (moves from I \u2192 R)\n    - Consistency check: `I_{t+1} = I_t + (S_t - S_{t+1}) - (R_{t+1} - R_t)`\n  - **Use in simulator design/validation:** trajectories can be used to:\n    - calibrate/fit infection and recovery parameters (e.g., \u03b2, \u03b3) under a discrete-time SIR update,\n    - validate that simulated outputs match the same schema (one row per time step per trajectory),\n    - enforce constraints (nonnegative integer counts, conserved total population per trajectory, monotone nondecreasing `R`)."
+    },
+    "test_seed_10_n_100.csv": {
+      "file_type": "csv",
+      "row_count": 6100,
+      "column_count": 5,
+      "columns": [
+        "trajectory_id",
+        "time_step",
+        "S",
+        "I",
+        "R"
+      ],
+      "data_info": "<class 'pandas.core.frame.DataFrame'>\nRangeIndex: 6100 entries, 0 to 6099\nData columns (total 5 columns):\n #   Column         Non-Null Count  Dtype\n---  ------         --------------  -----\n 0   trajectory_id  6100 non-null   int64\n 1   time_step      6100 non-null   int64\n 2   S              6100 non-null   int64\n 3   I              6100 non-null   int64\n 4   R              6100 non-null   int64\ndtypes: int64(5)\nmemory usage: 238.4 KB\n",
+      "sample_data": [
+        {
+          "trajectory_id": 0,
+          "time_step": 0,
+          "S": 59,
+          "I": 5,
+          "R": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 1,
+          "S": 58,
+          "I": 6,
+          "R": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 2,
+          "S": 55,
+          "I": 9,
+          "R": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 3,
+          "S": 51,
+          "I": 13,
+          "R": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 4,
+          "S": 49,
+          "I": 15,
+          "R": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 5,
+          "S": 45,
+          "I": 19,
+          "R": 0
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 6,
+          "S": 40,
+          "I": 23,
+          "R": 1
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 7,
+          "S": 32,
+          "I": 28,
+          "R": 4
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 8,
+          "S": 25,
+          "I": 34,
+          "R": 5
+        },
+        {
+          "trajectory_id": 0,
+          "time_step": 9,
+          "S": 19,
+          "I": 38,
+          "R": 7
+        }
+      ],
+      "dtypes": {
+        "trajectory_id": "int64",
+        "time_step": "int64",
+        "S": "int64",
+        "I": "int64",
+        "R": "int64"
+      },
+      "file_semantic_summary": "- **Overall data structure and type**\n  - A **tabular dataset (CSV)** representing **discrete-time epidemic simulation output**.\n  - Each row is a **state observation** at a specific time step, with integer compartment counts: **S, I, R**.\n  - Key fields: `trajectory_id` (int), `time_step` (int, sequential), `S`/`I`/`R` (int counts). The implicit total population per trajectory is typically **N = S + I + R** (expected constant over time unless modeling births/deaths).\n\n- **Relationships or nested elements**\n  - Rows are grouped by **`trajectory_id`**, forming one **trajectory** per group.\n  - Within each trajectory, rows are ordered by **`time_step`** to form an ordered sequence:\n    - `trajectory_id` \u2192 `{ state[t] }` for `t = 0..T`\n    - `state[t] = {S_t, I_t, R_t}`\n  - No explicit nesting in the CSV, but conceptually it is a **two-level structure**: dataset \u2192 trajectories \u2192 time-indexed states.\n\n- **How this data should inform simulation entities or interactions**\n  - Defines the simulator\u2019s **state representation**: a global compartmental state `(S, I, R)` at each discrete time step.\n  - Enables learning/validating the simulator\u2019s **transition dynamics**:\n    - New infections inferred from decreases in `S` (e.g., `S_t - S_{t+1}`)\n    - Recoveries inferred from increases in `R` (e.g., `R_{t+1} - R_t`)\n    - `I` changes reflect **infections minus recoveries**.\n  - Suggests interactions are **population-level**, not individual-based: transitions are governed by aggregate rates/parameters (e.g., infection and recovery processes) producing integer count updates per step.\n  - Provides ground-truth trajectory samples for:\n    - **calibrating** SIR parameters (e.g., \u03b2, \u03b3),\n    - **checking invariants** (nonnegativity, conservation of N),\n    - and **evaluating** simulator-generated trajectories against empirical/synthetic outputs."
+    }
+  }
+}

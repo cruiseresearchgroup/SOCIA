@@ -1,0 +1,180 @@
+{
+  "sbi-npe-not-implemented-random-search-posterior": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "objective: \"Use Simulation-Based Inference (SBI) with Neural Posterior Estimation (NPE)\"",
+      "\"Train NPE to approximate p(theta|x); sample posterior conditioned on x_o and take posterior mean\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "calibration_artifacts.training_hparams_unused indicates NPE training is not performed; metrics remain high (val_loss=234.68, test_loss=209.48)."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "test_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "Calibration claims SBI/NPE but the calibrator returns a pseudo-posterior built from selecting top-K random candidates by trajectory MSE; validation and test losses stay high.",
+    "root_cause_analysis": "SBINPECalibrator.fit performs uniform sampling of (beta,gamma), simulates one trajectory per theta, ranks by loss, and treats top candidates as \u201cposterior_samples\u201d. No neural density estimator is trained; no likelihood-free posterior approximation is performed as required by the blueprint.",
+    "correct_approach": "Replace the pseudo-posterior logic in SBINPECalibrator.fit with actual NPE training on (theta, x) pairs: (1) generate simulation pairs by sampling theta from the BoxUniform prior and simulating x (flattened trajectory) from the observation initial state/horizon; (2) train an NPE density estimator to learn p(theta|x); (3) condition on x_o to sample posterior theta; (4) set optimized_parameters to the posterior mean. If external SBI libraries are not allowed, implement a small conditional density model using the existing stack (e.g., a lightweight neural network density estimator) and train it using the simulated dataset; do not label unused hyperparameters as \u201cunused\u201d.",
+    "key_insight": "If the spec requires SBI/NPE, selecting top-K random candidates is not an acceptable substitute; extreme validation loss often reflects missing inference machinery rather than parameter tuning."
+  },
+  "posterior-mean-from-topk-causes-bias": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\"optimized_parameters: Set to posterior mean of sampled theta conditioned on x_o.\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "calibration_artifacts.best_candidate.loss=6.94 but optimized_parameters are beta=1.41,gamma=0.19 with large posterior_samples_std; val_loss=234.68."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      }
+    ],
+    "error_identification": "The best candidate fits the observation trajectory well, but the reported optimized_parameters (mean of top-K) are far from that best candidate and generalize poorly; S and R validation MSEs are especially large.",
+    "root_cause_analysis": "The pseudo-posterior is constructed by taking the top m_keep candidates by loss, then using an unweighted mean as the \u201cposterior mean\u201d. With a skewed/irregular loss landscape, this average can fall in a region with worse predictive performance than the best candidate and is not a principled posterior expectation (no weighting by likelihood/surrogate posterior).",
+    "correct_approach": "If keeping a non-NPE fallback, compute a weighted estimate instead of an unweighted mean: convert losses into weights (e.g., softmax over negative loss with temperature) and take a weighted mean and weighted resampling for posterior samples; also report/optionally use MAP (best theta) for evaluation when it outperforms the mean. Preferably, once NPE is implemented, use posterior samples directly and compute posterior mean from the learned posterior, not from top-K heuristics.",
+    "key_insight": "Averaging \u201cgood\u201d parameters can yield a bad parameter; if a point estimate is needed, use MAP or a properly weighted posterior mean rather than an unweighted mean of elites."
+  },
+  "evaluation-uses-float-mean-trajectories-breaking-integer-sir-contract": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\"State update ... via integer new infections and new recoveries with conservation\"",
+      "\"conservation_violation_rate: Fraction of simulated time steps where S+I+R != N\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "DiscreteTimeSIRSimulator.rollout",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "Evaluator._conservation_violation_rate",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_conservation_violation_rate=0.0 despite predictions being averaged floats; conservation check uses atol=1e-6."
+    },
+    "metric_links": [
+      {
+        "name": "val_conservation_violation_rate",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "Predicted mean trajectories are floats (averaged over rollouts), but conservation_violation_rate is computed as if exact integer conservation should hold; reported 0.0 may hide small floating mismatches and does not reflect the intended \u201cinteger transitions then conservation\u201d requirement.",
+    "root_cause_analysis": "DiscreteTimeSIRSimulator.rollout returns float means across rollouts; Evaluator._conservation_violation_rate checks sum(row) against N with a tiny atol (1e-6). Floating means can pass this check due to arithmetic, but the metric no longer measures whether individual simulated steps conserve exactly; it measures whether averaged trajectories conserve approximately.",
+    "correct_approach": "Compute conservation_violation_rate on raw integer rollouts (before averaging) or explicitly redefine it to check the averaged output with an appropriate tolerance and document it. To stay closest to the blueprint, track per-rollout violations during simulation and aggregate violation rate across all rollouts/time steps/trajectories. Keep averaged outputs for MSE evaluation but keep violation metric tied to the underlying integer simulator.",
+    "key_insight": "If outputs are posterior/rollout means, metrics about \u201cexact conservation\u201d must be computed on the underlying discrete trajectories, not on the averaged float trajectory."
+  },
+  "holdout-split-unused-and-confusing": {
+    "issue_type": "CODE_BUG",
+    "severity": "low",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\"No within-file temporal holdout is required.\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "holdout_split",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "SBINPECalibrator.fit",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "main",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "holdout is computed but ignored in SBINPECalibrator.fit (_ = holdout)."
+    },
+    "metric_links": [],
+    "error_identification": "A train/holdout prefix-suffix split is created but never used; this adds complexity and risks future logic drift from the blueprint.",
+    "root_cause_analysis": "holdout_split is called in main and passed to calibrator.fit, but SBINPECalibrator.fit explicitly discards it. This contradicts the blueprint\u2019s explicit instruction that no within-trajectory temporal holdout is needed.",
+    "correct_approach": "Remove holdout_split and the HoldoutBundle plumbing entirely (or make it optional behind a flag defaulting off). Update BaseCalibrator.fit signature accordingly if feasible within the integration constraints. If signature cannot change, at least stop computing holdout_split in main and pass a minimal empty placeholder, and remove dead code to prevent confusion.",
+    "key_insight": "Dead \u201choldout\u201d logic in a spec that forbids temporal splits is technical debt that encourages accidental leakage or mis-evaluation later."
+  },
+  "validation-loss-dominated-by-s-and-r-suggests-missing-heterogeneity": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "\"infer parameters from a single observed trajectory (train trajectory_id=0 only), then evaluate ... on full train/val/test sets\"",
+      "\"base model assumes constant parameters over time within a trajectory\""
+    ],
+    "code_refs": [
+      {
+        "symbol": "DiscreteTimeSIRSimulator.step",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "Evaluator._mse_over_dataset",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss_per_dim: S=365.28, I=70.47, R=268.30; train_loss_per_dim shows similar pattern; gap persists."
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      },
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      }
+    ],
+    "error_identification": "Errors are much larger in S and R than I, indicating systematic mismatch in cumulative infections/recoveries across trajectories rather than just noisy I fluctuations.",
+    "root_cause_analysis": "The simulator uses a single global (beta,gamma) inferred from one trajectory and applies it to all trajectories with potentially different effective transmission/recovery dynamics. With only two parameters and no heterogeneity, very low validation loss (\u22641e-6) is unrealistic. Current code further compounds this by using a heuristic pseudo-posterior rather than a true posterior, reducing robustness.",
+    "correct_approach": "Within blueprint constraints (still global beta/gamma), improve robustness by: (1) implementing true NPE posterior so posterior uncertainty is meaningful; (2) using posterior-predictive averaging consistently (already partly done) but ensure theta sampling reflects posterior, not top-K; (3) consider changing evaluation loss scaling (only if allowed) is not permitted\u2014so focus on better inference and potentially increasing K rollouts to reduce Monte Carlo noise. Also add debug logging in evaluation to identify which trajectories dominate S/R MSE (per-trajectory MSE table) to confirm heterogeneity is the main driver.",
+    "key_insight": "When per-dimension errors show systematic bias (S/R large, I smaller), it usually indicates structural mismatch/heterogeneity rather than insufficient simulation noise tuning; don\u2019t chase tiny losses with only two global parameters."
+  }
+}

@@ -1,0 +1,152 @@
+{
+  "zero-peer-influence-parameters": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": true,
+    "blueprint_refs": [
+      "peer-influence-scales-mismatch",
+      "action_decision_policy.by_role.resident.policy_form",
+      "calibratable_parameters.name: beta_f, beta_w, beta_c"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L138-L145"
+      },
+      {
+        "symbol": "Simulator._compute_adoption_probability",
+        "lines": "L340-L345"
+      }
+    ],
+    "evidence": {
+      "user_feedback": "Calibrated beta_f, beta_w, beta_c are all 0.0, breaking peer influence; Blueprint requires them as non-zero sensitivity multipliers.",
+      "error_logs": null,
+      "metrics": "TransitionFit: 0.7 (validation), 0.435 (test) \u2014 high error indicates poor transition modeling; simulated transitions show excessive persistence (11 vs 23 observed 10 transitions, 451 vs 288 observed 11 transitions)."
+    },
+    "metric_links": [
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "Peer influence parameters (beta_f, beta_w, beta_c) are calibrated to minimum bound (0.01), causing near-zero peer sensitivity, which breaks social influence mechanism and leads to poor transition fit.",
+    "root_cause_analysis": "Gradient-based calibration enforces lower bound of 0.01 on beta_* parameters, but the optimization converges to this bound due to lack of informative peer signal in the likelihood objective, violating Blueprint requirement that peer influence slopes must be non-zero and calibrated from observed transitions.",
+    "correct_approach": "Remove lower bound from beta_f, beta_w, beta_c in GradientBasedCalibrator.fit bounds (set to 0.0), and ensure the info_prob and adoption_probability functions use the full range of beta_* values without clipping. Re-enable gradient flow through peer influence terms by ensuring neighbor shares are computed correctly and included in the log-likelihood.",
+    "key_insight": "Never constrain behavioral sensitivity parameters to a positive lower bound unless supported by empirical prior; zero values are meaningful and should be allowed during calibration to avoid model collapse."
+  },
+  "info-decay-zero": {
+    "issue_type": "CODE_BUG",
+    "severity": "blocker",
+    "from_user_feedback": true,
+    "blueprint_refs": [
+      "information_propagation.mechanism",
+      "calibratable_parameters.name: rho_info_decay"
+    ],
+    "code_refs": [
+      {
+        "symbol": "calibrate_parameters",
+        "lines": "L700"
+      },
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L297-L301"
+      },
+      {
+        "symbol": "Simulator.step",
+        "lines": "L318-L321"
+      }
+    ],
+    "evidence": {
+      "user_feedback": "rho_info_decay=0.0 eliminates memory persistence, causing abrupt state transitions. Blueprint requires continuous memory_of_info to drive adoption.",
+      "error_logs": null,
+      "metrics": "rho_info_decay=0.0 in calibrated_parameters; simulated daily rates (val: 0.24-0.47) lag observed (0.63-0.73), indicating no memory-driven persistence; Brier=0.516 suggests poor probabilistic calibration."
+    },
+    "metric_links": [
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "rho_info_decay is calibrated to 0.0, eliminating memory_of_info persistence, which causes simulated behavior to respond only to instantaneous signals, failing to capture behavioral inertia and leading to poor probabilistic and transition fit.",
+    "root_cause_analysis": "In calibrate_parameters(), rho_info_decay is initialized to 0.1, but the optimization returns 0.0, indicating the objective function does not penalize its absence. The info_prob computation in Simulator._compute_info_receipt uses memory_of_info but the calibration objective in GradientBasedCalibrator.fit still uses binary received_info for likelihood, breaking consistency.",
+    "correct_approach": "In GradientBasedCalibrator.fit, replace binary received_info with continuous memory_of_info in the info_prob likelihood term. Set rho_info_decay initial value to 0.3 and enforce a lower bound of 0.05 to prevent collapse. Ensure memory_of_info is updated correctly in Simulator.step using decay rate from calibrated parameters.",
+    "key_insight": "Memory-based processes must be modeled consistently across simulation and calibration; using binary proxies for continuous memory states breaks gradient flow and leads to parameter collapse."
+  },
+  "exogenous-broadcast-overfit": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": true,
+    "blueprint_refs": [
+      "exogenous-broadcast-overfit",
+      "calibratable_parameters.name: lambda_broadcast"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L228-L230"
+      },
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L297-L301"
+      }
+    ],
+    "evidence": {
+      "user_feedback": "lambda_broadcast is at upper bound (0.5) but simulation underpredicts adoption, indicating it's compensating for broken peer mechanisms.",
+      "error_logs": null,
+      "metrics": "lambda_broadcast=0.5 (max bound); simulated aggregate rates are consistently below observed (val: 0.24-0.47 vs 0.63-0.73); RMSE_aggregate=0.321 on validation indicates poor fit despite max broadcast."
+    },
+    "metric_links": [
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "lambda_broadcast is pinned at upper bound (0.5), yet simulated adoption remains significantly below observed, indicating it is overcompensating for collapsed peer influence, violating Blueprint's warning against using broadcast as a crutch.",
+    "root_cause_analysis": "The soft penalty on lambda_broadcast (L228-L230) is too weak to prevent convergence to 0.5, and the model lacks sufficient peer influence signal to explain adoption, so the optimizer exploits the broadcast channel as the only available lever.",
+    "correct_approach": "Replace the soft penalty with a hard constraint: enforce lambda_broadcast <= 0.2 during optimization. Add a regularization term that penalizes lambda_broadcast proportional to its deviation from 0.1, and increase the weight of peer influence terms in the likelihood objective to prioritize fitting neighbor shares over broadcast.",
+    "key_insight": "Exogenous signals must be constrained to plausible baselines and never serve as primary drivers when peer mechanisms are broken; use bounds and priors to enforce structural integrity over empirical fit."
+  },
+  "peer-influence-scales-mismatch": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": true,
+    "blueprint_refs": [
+      "calibratable_parameters.name: w_family, w_work, w_community",
+      "information_propagation.parameters"
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L146-L152"
+      },
+      {
+        "symbol": "Simulator._compute_adoption_probability",
+        "lines": "L335-L337"
+      }
+    ],
+    "evidence": {
+      "user_feedback": "w_family, w_work, w_community are calibrated to 0.0 due to unnormalized optimization with post-hoc normalization, collapsing peer influence.",
+      "error_logs": null,
+      "metrics": "w_family=w_work=w_community=0.333 (equal), but TransitionFit is high, suggesting layer-specific influence is not captured; simulated transitions show uniform persistence, not layer-clustered behavior."
+    },
+    "metric_links": [
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "Layer weights (w_*) are equal (0.333) despite evidence of heterogeneous layer influence in transition patterns, indicating the softmax normalization is not enabling differential layer salience calibration.",
+    "root_cause_analysis": "The softmax transformation of w_* parameters enforces sum-to-one but removes the ability to distinguish layer salience because the optimization space is symmetric and the likelihood function does not incentivize asymmetry. The model defaults to uniform weights.",
+    "correct_approach": "Replace softmax with unconstrained optimization of w_family, w_work, w_community with bounds [0, 2] and add an L2 penalty on deviation from equal weights (e.g., penalty = 0.5 * ((w_f - w_w)**2 + (w_w - w_c)**2 + (w_c - w_f)**2)) to encourage distinct but stable layer weights.",
+    "key_insight": "Enforcing sum-to-one via softmax can erase meaningful heterogeneity; use unconstrained parameters with symmetry-breaking penalties to preserve structural distinctions while maintaining interpretability."
+  }
+}

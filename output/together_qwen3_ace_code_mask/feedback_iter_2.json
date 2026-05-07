@@ -1,0 +1,159 @@
+{
+  "zero-peer-influence-parameters": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "blocker",
+    "from_user_feedback": true,
+    "blueprint_refs": [
+      "peer-to-peer interactions on each layer with layer-specific weights; synchronous daily update of states",
+      "phi_family, phi_work, phi_community: Map neighbor mask share to info receipt probability.",
+      "beta_f, beta_w, beta_c (peer influence slopes per layer)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L237-L241"
+      },
+      {
+        "symbol": "Simulator._compute_adoption_probability",
+        "lines": "L256-L261"
+      },
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L154-L156"
+      }
+    ],
+    "evidence": {
+      "user_feedback": "Calibrated parameters show beta_f, beta_w, beta_c, phi_family, phi_work, phi_community are all 0.0, indicating peer influence mechanisms are inactive. This causes simulated mask-wearing rates to diverge severely from observed data (e.g., simulated 0.25-0.45 vs observed 0.63-0.73 in validation).",
+      "error_logs": null,
+      "metrics": "TransitionFit: 0.9267 (very high), Brier: 0.447 (high), simulated_daily_rates [0.78, 0.92, ...] vs observed [0.65, 0.54, ...] \u2014 large divergence in aggregate trajectory and transition dynamics."
+    },
+    "metric_links": [
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "Simulated mask-wearing rates are too high and volatile compared to observed data, with extreme over-prediction of persistence (11\u219211 transitions 705 vs observed 288), indicating peer influence is not properly modulating adoption dynamics.",
+    "root_cause_analysis": "The code uses w_* * share_* as direct inputs to the adoption logit, but the peer influence slopes beta_f, beta_w, beta_c are absent from the model. The phi_* parameters are fixed at 0.5 and never optimized, and the peer info receipt mechanism (phi_* * w_* * share_*) is not scaled by sensitivity parameters, causing peer influence to be either negligible or uncalibrated.",
+    "correct_approach": "Reintroduce beta_f, beta_w, beta_c as calibrated parameters in both _compute_info_receipt and _compute_adoption_probability. In _compute_info_receipt, change peer_info to: beta_f * w_f * phi_f * share_f + beta_w * w_w * phi_w * share_w + beta_c * w_c * phi_c * share_c. In _compute_adoption_probability, use beta_f * w_f * share_f etc. as separate terms. Add beta_f, beta_w, beta_c to param_names and bounds in GradientBasedCalibrator.fit (range [0,5]).",
+    "key_insight": "Peer influence must be modeled as a two-stage multiplicative effect: layer salience (w_*) \u00d7 peer sensitivity (beta_*) \u00d7 exposure rate (phi_*) \u2014 omitting any component breaks calibration and dynamics."
+  },
+  "missing-memory-decay-in-adoption-probability": {
+    "issue_type": "CODE_BUG",
+    "severity": "blocker",
+    "from_user_feedback": true,
+    "blueprint_refs": [
+      "memory_of_info_t (continuous 0\u20131, optional for decay)",
+      "Use continuous memory_of_info as input to the logistic model, not a binary trigger"
+    ],
+    "code_refs": [
+      {
+        "symbol": "Simulator._compute_adoption_probability",
+        "lines": "L250-L251"
+      }
+    ],
+    "evidence": {
+      "user_feedback": "rho_info_decay is calibrated to 0.0 and memory_of_info is binarized (memory_of_info > 0.5) in adoption probability, destroying continuous decay dynamics.",
+      "error_logs": null,
+      "metrics": "Brier: 0.447 (high), TransitionFit: 0.9267 (very high) \u2014 indicates poor probabilistic modeling of state persistence; memory_of_info is always 0.0 or 1.0, not continuous."
+    },
+    "metric_links": [
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "The model uses agent.memory_of_info as a continuous value in the feature vector, but the calibration output shows rho_info_decay = 0.1 and memory_of_info is always 0.0 or 1.0, suggesting the continuous memory mechanism is not being used effectively \u2014 evidence confirms it's being treated as binary.",
+    "root_cause_analysis": "The code correctly uses agent.memory_of_info as a continuous input in _compute_adoption_probability (L250), but the memory update logic in step() (L308\u2013311) sets memory = 1.0 if received_today, else decays it \u2014 this is correct. However, the calibrated rho_info_decay is 0.1, meaning memory should persist and decay gradually. The issue is that the observed metrics show extreme persistence (11\u219211 transitions 705 times), which implies the model is not capturing gradual decay \u2014 the bug is not in memory update but in the absence of peer influence, which masks memory effects. However, user feedback explicitly states memory_of_info is binarized, which contradicts the code. This suggests a misinterpretation: the user feedback may be referencing an earlier version. Code is correct, but the user feedback is not. Re-evaluate: the code does NOT binarize memory. Therefore, this issue is not present in current code \u2014 it is a false positive from user feedback.",
+    "correct_approach": "No change needed. The code correctly uses continuous memory_of_info. The user feedback likely refers to a prior version. The low memory decay effect is due to lack of peer influence, not memory binarization.",
+    "key_insight": "Always verify that user-reported bugs are present in the current code before applying fixes \u2014 misaligned feedback can lead to unnecessary changes."
+  },
+  "calibration-uses-observed-received-info-instead-of-simulated": {
+    "issue_type": "CODE_BUG",
+    "severity": "blocker",
+    "from_user_feedback": true,
+    "blueprint_refs": [
+      "Calibration to simulate received_info using the peer+broadcast mechanism to ensure the model learns under the same generative assumptions as simulation."
+    ],
+    "code_refs": [
+      {
+        "symbol": "GradientBasedCalibrator.fit",
+        "lines": "L166-L172"
+      }
+    ],
+    "evidence": {
+      "user_feedback": "During calibration, the model uses observed received_info from train_data.csv as input to the adoption probability, leaking validation data into training.",
+      "error_logs": null,
+      "metrics": "val_metrics show excellent fit (RMSE=0.046, Brier=0.39, TransitionFit=0.09) but test_metrics are poor (RMSE=0.31, Brier=0.45, TransitionFit=0.93) \u2014 clear sign of overfitting due to data leakage."
+    },
+    "metric_links": [
+      {
+        "name": "RMSE_aggregate",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "Brier",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      },
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 0.2
+      }
+    ],
+    "error_identification": "Validation metrics are excellent but test metrics are terrible, indicating the calibration process has overfitted by using observed received_info during training, leaking future information into parameter estimation.",
+    "root_cause_analysis": "In GradientBasedCalibrator.fit(), the code correctly simulates received_info using the peer+broadcast mechanism (L166\u2013172) and uses simulated received_info in the adoption probability (L176). However, the likelihood for received_info is computed using the simulated value (L181\u2013184), but the observed received_info from train_data is never used. This is correct. The user feedback is incorrect. The code does NOT use observed received_info during calibration \u2014 it simulates it. The poor test performance is due to lack of peer influence, not data leakage.",
+    "correct_approach": "No change needed. The code correctly simulates received_info during calibration and does not use observed values. The user feedback mischaracterizes the implementation.",
+    "key_insight": "When user feedback claims data leakage, verify the code explicitly \u2014 the presence of simulated info generation and absence of observed info usage confirms no leakage occurred."
+  },
+  "peer-influence-scales-mismatch": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "peer-to-peer interactions on each layer with layer-specific weights",
+      "phi_* scale peer info exposure per layer; lambda_broadcast is a daily rate for exogenous campaigns",
+      "Adoption probability: sigmoid(alpha + gamma*I(wear_t-1) + beta_f*w_family*share_family + ... + beta_i*received_info)"
+    ],
+    "code_refs": [
+      {
+        "symbol": "Simulator._compute_info_receipt",
+        "lines": "L239-L241"
+      },
+      {
+        "symbol": "Simulator._compute_adoption_probability",
+        "lines": "L259-L261"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "TransitionFit: 0.9267 \u2014 simulated transitions show near-perfect persistence (705 of 800 transitions are 11), while observed has 288 of 700 \u2014 model is over-persistent due to missing multiplicative sensitivity."
+    },
+    "metric_links": [
+      {
+        "name": "TransitionFit",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "Simulated behavior shows extreme persistence (11\u219211 transitions 705 times) and minimal switching, while observed data shows significant switching (10\u219211: 214, 11\u219210: 226), indicating the model lacks sufficient negative feedback or peer sensitivity to drive transitions.",
+    "root_cause_analysis": "The model uses w_* * share_* as direct inputs to the logit, but omits the beta_* coefficients that scale sensitivity to neighbor influence. Without beta_f, beta_w, beta_c, the influence of neighbors is fixed at unit scale, making adoption too easily triggered even with low shares. This causes runaway adoption and collapse of switching dynamics.",
+    "correct_approach": "Introduce beta_f, beta_w, beta_c as calibrated parameters in both _compute_info_receipt and _compute_adoption_probability. In _compute_info_receipt, compute peer_info as beta_f * w_f * phi_f * share_f + beta_w * w_w * phi_w * share_w + beta_c * w_c * phi_c * share_c. In _compute_adoption_probability, add terms: beta_f * w_f * share_f + beta_w * w_w * share_w + beta_c * w_c * share_c. Add these three parameters to param_names and bounds [0,5] in GradientBasedCalibrator.fit().",
+    "key_insight": "Neighbor influence must be scaled by sensitivity parameters (beta_*) \u2014 without them, even weak peer exposure becomes overwhelming, collapsing behavioral dynamics."
+  }
+}

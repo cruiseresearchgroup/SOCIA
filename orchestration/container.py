@@ -17,15 +17,18 @@ from agents.code_generation.agent import CodeGenerationAgent
 from agents.code_generation_odd.agent import CodeGenerationAgent as CodeGenerationOddAgent
 from agents.code_generation_ace.agent import CodeGenerationAgent as CodeGenerationAceAgent
 from agents.code_generation_alpha.agent import CodeGenerationAgent as CodeGenerationAlphaAgent
+from agents.code_generation_gsim.agent import CodeGenerationAgent as CodeGenerationGsimAgent
 from agents.code_verification.agent import CodeVerificationAgent
 from agents.simulation_execution.agent import SimulationExecutionAgent
 from agents.simulation_execution_ace.agent import SimulationExecutionAgent as SimulationExecutionAceAgent
 from agents.simulation_execution_alpha.agent import SimulationExecutionAgent as SimulationExecutionAlphaAgent
+from agents.simulation_execution_gsim.agent import SimulationExecutionAgent as SimulationExecutionGsimAgent
 from agents.result_evaluation.agent import ResultEvaluationAgent
 from agents.feedback_generation.agent import FeedbackGenerationAgent
 from agents.feedback_generation_odd.agent import FeedbackGenerationOddAgent
 from agents.feedback_generation_ace.agent import FeedbackGenerationAgent as FeedbackGenerationAceAgent
 from agents.feedback_generation_alpha.agent import FeedbackGenerationAgent as FeedbackGenerationAlphaAgent
+from agents.feedback_generation_gsim.agent import FeedbackGenerationAgent as FeedbackGenerationGsimAgent
 from agents.iteration_control.agent import IterationControlAgent
 from agents.iteration_control_ace.agent import IterationControlAgent as IterationControlAceAgent
 
@@ -70,6 +73,10 @@ class AgentContainer(containers.DeclarativeContainer):
             "code_generation_odd": {"prompt_template": "templates/code_generation_prompt.txt", "output_format": "python"},
             "code_generation_ace": {"prompt_template": "templates/code_generation_odd_prompt.txt", "output_format": "python"},
             "code_generation_alpha": {"prompt_template": "templates/code_generation_ace_prompt.txt", "output_format": "python"},
+            "code_generation_gsim": {"prompt_template": "templates/code_generation_ace_prompt.txt", "output_format": "python"},
+            "data_analysis_gsim": {"prompt_template": "templates/data_analysis_alpha_prompt.txt", "output_format": "json"},
+            "simulation_execution_gsim": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
+            "feedback_generation_gsim": {"prompt_template": "templates/feedback_generation_gsim_prompt.txt", "output_format": "json"},
             "code_verification": {"prompt_template": "templates/code_verification_prompt.txt", "output_format": "json"},
             "simulation_execution": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
             "simulation_execution_ace": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
@@ -111,6 +118,12 @@ class AgentContainer(containers.DeclarativeContainer):
         config=config.agents.data_analysis_ace,
         output_path=output_path
     )
+
+    data_analysis_gsim_agent = providers.Factory(
+        DataAnalysisAceAgent,
+        config=config.agents.data_analysis_gsim,
+        output_path=output_path
+    )
     
     model_planning_agent = providers.Factory(
         ModelPlanningAgent,
@@ -135,6 +148,11 @@ class AgentContainer(containers.DeclarativeContainer):
     code_generation_alpha_agent = providers.Factory(
         CodeGenerationAlphaAgent,
         config=config.agents.code_generation_alpha
+    )
+
+    code_generation_gsim_agent = providers.Factory(
+        CodeGenerationGsimAgent,
+        config=config.agents.code_generation_gsim
     )
     
     code_verification_agent = providers.Factory(
@@ -161,6 +179,12 @@ class AgentContainer(containers.DeclarativeContainer):
         output_dir=providers.Callable(lambda op: f"{op}/execution", output_path),
         config=config.agents.simulation_execution_alpha
     )
+
+    simulation_execution_gsim_agent = providers.Factory(
+        SimulationExecutionGsimAgent,
+        output_dir=providers.Callable(lambda op: f"{op}/execution", output_path),
+        config=config.agents.simulation_execution_gsim
+    )
     
     result_evaluation_agent = providers.Factory(
         ResultEvaluationAgent,
@@ -186,6 +210,11 @@ class AgentContainer(containers.DeclarativeContainer):
         FeedbackGenerationAlphaAgent,
         config=config.agents.feedback_generation_alpha
     )
+
+    feedback_generation_gsim_agent = providers.Factory(
+        FeedbackGenerationGsimAgent,
+        config=config.agents.feedback_generation_gsim
+    )
     
     iteration_control_agent = providers.Factory(
         IterationControlAgent,
@@ -210,6 +239,10 @@ class AgentContainer(containers.DeclarativeContainer):
             "code_generation_odd": code_generation_odd_agent,
             "code_generation_ace": code_generation_ace_agent,
             "code_generation_alpha": code_generation_alpha_agent,
+            "code_generation_gsim": code_generation_gsim_agent,
+            "data_analysis_gsim": data_analysis_gsim_agent,
+            "simulation_execution_gsim": simulation_execution_gsim_agent,
+            "feedback_generation_gsim": feedback_generation_gsim_agent,
             "code_verification": code_verification_agent,
             "simulation_execution": simulation_execution_agent,
             "simulation_execution_ace": simulation_execution_ace_agent,

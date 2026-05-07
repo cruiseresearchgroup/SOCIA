@@ -1,0 +1,201 @@
+{
+  "playbook_metadata": {
+    "version": "v0.1",
+    "project_name": "",
+    "last_updated_time": "2026-01-23T09:20:52.474059",
+    "last_updated_iteration": "0"
+  },
+  "strategies": {
+    "eval-high-val-loss-single-trajectory-calibration": {
+      "meta_info": {
+        "token_count": 425,
+        "status": "in_progress",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Objective: infer parameters from a single observed trajectory (train trajectory_id=0 only), then evaluate on full train/val/test sets.",
+          "SBI does not use per-step targets directly; instead, it uses the flattened full-trajectory vector x as the summary/observation for NPE training and posterior inference."
+        ],
+        "code_refs": [
+          {
+            "symbol": "SBINPECalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "DiscreteTimeSIRSimulator.rollout",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "train_loss=186.36, val_loss=280.22, test_loss=260.41; per-dim val_loss_per_dim S=415.54, I=91.01, R=334.11"
+        },
+        "error_identification": "Validation and test MSE remain much worse than training MSE, indicating limited generalization from calibrating beta/gamma on a single observed trajectory.",
+        "root_cause_analysis": "This is likely an inherent identifiability/generalization limit of fitting two global parameters from one trajectory when other trajectories differ in effective contact patterns/noise. The code correctly follows the blueprint (single-trajectory SBI), so the gap is not necessarily a bug but a structural limitation of the experimental design. Metrics show S and R dominate validation error, consistent with mismatched epidemic timing/amplitude across trajectories when using one shared beta/gamma.",
+        "correct_approach": "Within the blueprint constraints (must use trajectory_id=0 only for SBI), improve robustness of inference by reducing stochasticity mismatch and stabilizing posterior learning: (1) in SBINPECalibrator.fit, simulate multiple rollouts per theta and average the flattened x used for NPE training (same T and init), so x becomes an estimator of E[x|theta] matching the evaluation setup that averages rollouts; (2) standardize/scale x (e.g., divide by N or use per-compartment z-scoring based on simulated batch statistics) before feeding to NPE to reduce domination by large-magnitude S/R; apply the same transform to x_o; (3) optionally reduce observation dimensionality by using a fixed summary statistic vector (peak I, time-to-peak, final size, etc.) only if allowed—if not, keep full x but at least normalize.",
+        "key_insight": "When evaluation uses mean-of-K stochastic rollouts, train SBI on the same object (an averaged/denoised x) and normalize high-dynamic-range observations; otherwise NPE learns noise and magnitude rather than dynamics, hurting validation.",
+        "metric_links": [
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.7
+          },
+          {
+            "name": "test_loss",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "sbi-training-target-mismatch-single-rollout-vs-eval-mean": {
+      "meta_info": {
+        "token_count": 317,
+        "status": "in_progress",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Prediction: simulate K rollouts per trajectory and output the mean predicted trajectory to CSV.",
+          "SBI: simulate pairs (theta, x) ... flatten simulated trajectory to x and train NPE."
+        ],
+        "code_refs": [
+          {
+            "symbol": "SBINPECalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "DiscreteTimeSIRSimulator.rollout",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "val_one_step_MAE_SIR=8.97; val_peak_I_error peak_time_mae=5.15 suggests timing mismatch; val_loss=280.22"
+        },
+        "error_identification": "SBI is trained on single stochastic rollouts per theta, but evaluation compares observed trajectories to the mean of many rollouts; this mismatch can make the learned posterior unnecessarily broad/noisy and shift the posterior mean away from parameters that best match mean trajectories.",
+        "root_cause_analysis": "In SBINPECalibrator.fit, for each sampled theta the code produces exactly one stochastic simulated trajectory x. In evaluation (DiscreteTimeSIRSimulator.rollout), predictions are averaged across cfg.num_rollouts (default 50). If the data represent a typical/expected trajectory (or have reduced noise), the SBI training target should approximate E[x|theta] to align with the evaluation objective (MSE on mean predictions).",
+        "correct_approach": "Modify SBINPECalibrator.fit to generate x for each theta as the average of K_cal rollouts (e.g., 10–50) from the same init/N/T, then flatten that mean trajectory as the training x. Keep K_cal fixed and documented in calibration_artifacts. This is a structural alignment change (training data generation) and should reduce posterior noise and improve posterior mean estimates for downstream MSE.",
+        "key_insight": "Train the inference model on the same statistic you will evaluate (mean trajectory vs single noisy trajectory) to avoid objective mismatch and posterior mean bias.",
+        "metric_links": [
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "val_one_step_MAE_SIR",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          },
+          {
+            "name": "val_peak_I_error",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          }
+        ]
+      }
+    },
+    "observation-vector-not-normalized-dominates-by-s-r": {
+      "meta_info": {
+        "token_count": 236,
+        "status": "in_progress",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Flatten full (T+1)x3 trajectory into x_o by concatenation."
+        ],
+        "code_refs": [
+          {
+            "symbol": "SBINPECalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "flatten_states",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "val_loss_per_dim shows S (415.54) and R (334.11) much larger than I (91.01)"
+        },
+        "error_identification": "Validation errors are dominated by S and R, which also have much larger raw magnitudes in x than I; unnormalized flattening can cause NPE to focus on matching S/R scales rather than infectious dynamics timing.",
+        "root_cause_analysis": "SBINPECalibrator.fit feeds raw counts in x_o and x directly to the density estimator. With N around 100, S and R are O(100) while I is often much smaller, so the observation space is poorly conditioned for neural density estimation and for learning parameter sensitivity.",
+        "correct_approach": "In SBINPECalibrator.fit, apply a deterministic, invertible scaling to both simulated xs and x_o before NPE training/inference: simplest is divide all S/I/R counts by N (obs_agent.N) so inputs are in [0,1]. Store the scaling choice in calibration_artifacts. Ensure evaluation remains on counts (scaling only for SBI).",
+        "key_insight": "For SBI on flattened time series, always normalize by population/scale so the posterior estimator learns dynamics rather than absolute magnitudes.",
+        "metric_links": [
+          {
+            "name": "val_loss_per_dim",
+            "direction": "lower_is_better",
+            "weight": 1.0
+          }
+        ]
+      }
+    },
+    "holdout-split-unused-and-confusing": {
+      "meta_info": {
+        "token_count": 208,
+        "status": "in_progress",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "severity": "low",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "No within-file temporal holdout is required. Validation evaluation is performed on the entire val_seed_10_n_100.csv trajectories."
+        ],
+        "code_refs": [
+          {
+            "symbol": "holdout_split",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "SBINPECalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "main",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "No direct metric symptom; structural dead code/unused argument: holdout passed to fit but ignored."
+        },
+        "error_identification": "The program constructs a HoldoutBundle (prefix/suffix) but SBINPECalibrator.fit explicitly ignores it; this deviates from the blueprint’s simpler plan and adds complexity that could mislead future modifications.",
+        "root_cause_analysis": "holdout_split creates a temporal split inside training trajectories, but the blueprint specifies no such split for calibration/evaluation. SBINPECalibrator.fit sets `_ = holdout`, making the split unused.",
+        "correct_approach": "Remove holdout_split and HoldoutBundle plumbing entirely, or repurpose it only for optional diagnostics (not passed into fit). Update BaseCalibrator.fit signature to not require holdout if it is not used. This reduces accidental future misuse and clarifies blueprint adherence.",
+        "key_insight": "Eliminate unused “holdout” mechanisms when the spec explicitly forbids/doesn’t need them—dead interfaces invite later leakage and confusion.",
+        "metric_links": []
+      }
+    }
+  }
+}

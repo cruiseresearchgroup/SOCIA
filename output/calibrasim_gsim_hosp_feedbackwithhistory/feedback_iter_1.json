@@ -1,0 +1,174 @@
+{
+  "validation-loss-stuck-high-parameter-extremes-suggest-missing-mechanism": {
+    "issue_type": "EVAL_SIGNAL",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Fit/eval computed on 7-D summary produced by trajectories_to_numpy()",
+      "assign initial los_remaining via calibrated LOS distributions conditional on disease_id and bed_type",
+      "assign each admitted patient a bed_type via calibrated probabilities"
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel._sample_los",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel._sample_bed_type",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel.rollout",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss=36.044; val_loss_per_dim has large errors for d0_alive=72.72, d1_alive=74.09, total_alive=43.55; optimized los_mean for d1 ICU/Std and d2 ICU collapsed to 1.0; p_icu(d0)=0, p_icu(d1)=0, p_icu(d2)~0.99"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      },
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 0.5
+      }
+    ],
+    "error_identification": "Validation MSE remains high and is dominated by alive-count dimensions. Multiple calibrated parameters hit bounds (LOS means collapse to 1; ICU routing collapses to 0/1), indicating the optimizer is compensating for structural mismatch rather than finding stable, generalizable dynamics.",
+    "root_cause_analysis": "Current dynamics can only change alive counts through LOS-based discharge with a (mostly) stationary arrival model and fixed bed assignment. The extreme fitted parameters suggest the model cannot match disease-specific alive trajectories with just per-disease Poisson arrivals + a mean-scaled empirical LOS sampler, so it drives LOS to minimum and forces bed routing extremes to indirectly shape occupancy/alive counts. Likely missing: disease-specific LOS shape (not just mean scaling) and/or stronger nonstationarity/trajectory heterogeneity in arrivals than the global day-profile provides.",
+    "correct_approach": "Within existing 12-parameter interface, reduce the need for extreme compensation by: (1) replacing mean-scaling of empirical LOS with a discrete reweighting scheme that preserves integer support but shifts mass smoothly (e.g., exponential tilting over observed LOS values) per (disease, bed) using the los_mean parameter as a control; this allows shape adaptation without collapsing to LOS=1. Implement in HospitalFlowModel._sample_los by computing tilted probabilities over info['values'] based on a temperature/tilt derived from target_mean vs empirical mean, then sample from tilted probs. (2) Make arrival nonstationarity disease-specific but also allow trajectory-level randomness: in HospitalFlowModel.rollout, draw a per-trajectory multiplicative random effect for each disease (mean 1, moderate variance) applied to arrival_lambda_for_day; this improves cross-trajectory generalization without changing theta dimensionality. Keep the effect deterministic given seed and trajectory_id to avoid training/val leakage.",
+    "key_insight": "When calibrated parameters consistently hit bounds, treat it as evidence the simulator\u2019s latent degrees of freedom (distribution shapes and heterogeneity) are insufficient; add shape/heterogeneity mechanisms before further tuning."
+  },
+  "arrival-profile-derived-from-train-may-overfit-and-leak-structure": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "high",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "day_index used as a covariate for arrival rates and/or mixture weights by disease; optional",
+      "Evaluation: evaluate on ALL trajectories from train/val/test via existing evaluation functions"
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel.ingest_training_statistics",
+        "lines": "unknown"
+      },
+      {
+        "symbol": "HospitalFlowModel._arrival_lambda_for_day",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "train_loss\u224836.27, val_loss\u224836.04 (no meaningful improvement vs prior best); alive-count errors remain very large"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.7
+      },
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.3
+      }
+    ],
+    "error_identification": "Day-varying arrival modulation learned from the entire training set does not improve validation and can encode split-specific temporal structure that does not transfer, while also being non-parameterized (not part of \u03b8) and therefore not properly inferred by SBI.",
+    "root_cause_analysis": "HospitalFlowModel.ingest_training_statistics learns _arrival_profile_scale directly from train data and then uses it during both calibration and evaluation. This adds a strong, fixed, non-\u03b8 component to the simulator. Because SBI only infers \u03b8, any data-derived profile acts like an unmodeled, hard-coded prior that may fit training idiosyncrasies and reduce identifiability/generalization.",
+    "correct_approach": "Gate or simplify the arrival profile so it cannot overfit: (1) Change ingest_training_statistics to compute a single smooth seasonality curve shared across diseases (or a very low-rank representation) rather than a full length-T per-disease profile; keep it normalized to mean 1. (2) Add an on/off toggle (default off) for using _arrival_profile_scale during calibration/evaluation, and evaluate whether val_loss improves with it disabled. (3) If kept on, compute the profile from train_states[0] only (matching x_o) to avoid injecting information from other training trajectories into the simulator used for inference.",
+    "key_insight": "Avoid injecting non-\u03b8, data-derived dynamics into the simulator unless they are part of the inference target; otherwise SBI optimizes against a moving/hidden mechanism and generalization suffers."
+  },
+  "los-empirical-scaling-rounding-causes-discrete-hazard-distortion": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Prefer empirical discrete distribution over observed initial los_remaining (day_in_hospital==1) to match integer nature"
+    ],
+    "code_refs": [
+      {
+        "symbol": "HospitalFlowModel._sample_los",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "val_loss_per_dim: standard_occupancy=31.18 and total_alive=43.55 indicate discharge/occupancy timing mismatch"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss_per_dim",
+        "direction": "lower_is_better",
+        "weight": 1.0
+      }
+    ],
+    "error_identification": "Even with empirical LOS values, scaling individual draws by target_mean/emp_mean and rounding can create unrealistic LOS mass at 1 (or other small integers), changing discharge hazards and producing persistent occupancy/alive errors.",
+    "root_cause_analysis": "In HospitalFlowModel._sample_los, LOS is sampled from empirical values then multiplied by a scale and rounded. This transforms the distribution in a non-smooth, value-dependent way and can concentrate probability mass at small integers after rounding/clipping, especially when target_mean is driven low by calibration.",
+    "correct_approach": "Replace per-sample scaling with probability reweighting over the original empirical support: keep info['values'] unchanged, compute new probabilities proportional to probs * f(values; tilt) where tilt is chosen to match (approximately) the desired mean implied by los_mean, then sample directly from values. Maintain clipping to [1, max_los] but avoid rounding a scaled value.",
+    "key_insight": "For discrete time-to-exit processes, adjust distribution via probability tilting on the original integer support rather than scaling sampled values and rounding."
+  },
+  "posterior-surrogate-calibration-objective-misaligned-with-eval-mse": {
+    "issue_type": "DESIGN_MISMATCH",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [
+      "Train NPE posterior p(\u03b8|x) on simulated pairs; then condition on x_o, sample posterior, and take posterior mean as optimized_parameters."
+    ],
+    "code_refs": [
+      {
+        "symbol": "NPEGaussianCalibrator.fit",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": "Calibration loss_history decreases to ~0.95 but val_loss remains ~36, indicating good surrogate fit does not translate to better trajectory MSE"
+    },
+    "metric_links": [
+      {
+        "name": "val_loss",
+        "direction": "lower_is_better",
+        "weight": 0.6
+      },
+      {
+        "name": "train_loss",
+        "direction": "lower_is_better",
+        "weight": 0.4
+      }
+    ],
+    "error_identification": "The calibrator\u2019s neural surrogate training objective (Gaussian NLL on standardized \u03b8) improves substantially, but downstream evaluation MSE does not improve, implying the inferred \u03b8 is not well-aligned with minimizing trajectory MSE.",
+    "root_cause_analysis": "Blueprint expects an SBI posterior; current implementation uses a diagonal Gaussian posterior surrogate and then performs a heuristic candidate search. This can be poorly calibrated for multi-modal or heteroscedastic posteriors and can overemphasize matching \u03b8 distribution rather than directly optimizing x reconstruction. Candidate selection uses only train_states[0] flattened MSE, which can still select \u03b8 that overfits the single observation and generalizes poorly.",
+    "correct_approach": "Keep the same structure but align selection more robustly: (1) during candidate selection, score each candidate not only on x_o MSE but also on a small set of auxiliary summaries computed from x (e.g., per-dimension time-averages/variances derived from the same 7-D array) to reduce degenerate fits; implement inside NPEGaussianCalibrator.fit without changing outputs. (2) Increase stochastic averaging for the score: for each candidate \u03b8, run multiple rollouts with different RNG substreams (seeded deterministically from \u03b8 hash + base seed) and score the mean MSE; this reduces selecting lucky noise fits and improves validation stability.",
+    "key_insight": "If posterior learning is approximate, selecting \u03b8 should be noise-robust and summary-aware; otherwise the selector overfits a single noisy rollout and won\u2019t improve validation."
+  },
+  "main-executes-on-import-causes-integration-instability": {
+    "issue_type": "CODE_BUG",
+    "severity": "medium",
+    "from_user_feedback": false,
+    "blueprint_refs": [],
+    "code_refs": [
+      {
+        "symbol": "module-level main() call",
+        "lines": "unknown"
+      }
+    ],
+    "evidence": {
+      "user_feedback": null,
+      "error_logs": null,
+      "metrics": null
+    },
+    "metric_links": [],
+    "error_identification": "The script calls main() at module import time, which can break evaluation harnesses that import the module (e.g., for unit testing or reusing functions) and can cause unexpected side effects.",
+    "root_cause_analysis": "At the end of the file, main() is invoked unconditionally instead of being protected by an if __name__ == '__main__' guard.",
+    "correct_approach": "Wrap the final main() invocation in a standard __name__ guard so importing the module does not immediately start calibration/evaluation and attempt to read environment variables/files.",
+    "key_insight": "Simulation modules should be import-safe; always guard CLI execution to prevent side effects that can masquerade as runtime or evaluation failures."
+  }
+}
