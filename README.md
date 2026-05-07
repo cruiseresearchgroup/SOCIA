@@ -2,7 +2,7 @@
   <img src="docs/images/socia_logo_large.png" alt="SOCIA Logo" width="200px" />
 </p>
 
-# 🌆 SOCIA: Simulation Orchestration for Cyber-Physical-Social Intelligence and Agents
+# 🌆 SOCIA: Simulation Orchestration for Computational Intelligence with Agents
 
 <!-- Illustration Image Placeholder -->
 
