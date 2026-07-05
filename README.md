@@ -4,29 +4,26 @@
 
 # 🌆 SOCIA: Simulation Orchestration for Computational Intelligence with Agents
 
-<p align="center"><i>The work is in rapid progress...</i></p>
-
-<!-- Illustration Image Placeholder -->
+<p align="center"><i>A family of LLM-driven multi-agent simulation systems.</i></p>
 
 <p align="center">
   <img src="docs/images/illustration.png" alt="Illustration of SOCIA." width="100%" />
 </p>
 
-<!-- Replace this with your actual architecture diagram -->
+## Repository Scope
 
-An LLM-driven multi-agent Cyber-Physical-Social simulation generator that automatically creates simulation environments based on user requirements and data.
+This repository contains the current **SOCIA series** codebase.
 
-For more details about SOCIA, please check out our [paper](https://arxiv.org/abs/2505.12006).
+For **SOCIA-EVO**, please use:  
+[cruiseresearchgroup/SOCIA-EVO](https://github.com/cruiseresearchgroup/SOCIA-EVO)
 
-If you use SOCIA in your research, please cite:
-```bibtex
-@article{hua2025socia,
-  title={SOCIA-Nabla: Textual Gradient Meets Multi-Agent Orchestration for Automated Simulator Generation},
-  author={Hua, Yuncheng and Weatherhead, Sion and Jafari, Mehdi and Xue, Hao and Salim, Flora D},
-  journal={arXiv preprint arXiv:2505.12006},
-  year={2025}
-}
-```
+SOCIA is an umbrella project for LLM-driven multi-agent social simulation. Different branches and repositories may correspond to different papers or versions of the system. To avoid confusion, we are separating paper-specific implementations into dedicated repositories when they are released.
+
+## Versions
+
+| Version | Repository / Branch | Description |
+| --- | --- | --- |
+| SOCIA-EVO | [cruiseresearchgroup/SOCIA-EVO](https://github.com/cruiseresearchgroup/SOCIA-EVO) | The official implementation for SOCIA-EVO. |
 
 ## ⚠️ Disclaimer  
 SOCIA generates simulator code using backbone LLMs. By using this software, you agree that:  
