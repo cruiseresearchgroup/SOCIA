@@ -14,10 +14,10 @@
 
 This repository contains the current **SOCIA series** codebase.
 
+SOCIA is an umbrella project for LLM-driven multi-agent social simulation. Different branches and repositories may correspond to different papers or versions of the system. To avoid confusion, we are separating paper-specific implementations into dedicated repositories when they are released.
+
 For **SOCIA-EVO**, please use:  
 [cruiseresearchgroup/SOCIA-EVO](https://github.com/cruiseresearchgroup/SOCIA-EVO)
-
-SOCIA is an umbrella project for LLM-driven multi-agent social simulation. Different branches and repositories may correspond to different papers or versions of the system. To avoid confusion, we are separating paper-specific implementations into dedicated repositories when they are released.
 
 ## Versions
 
