@@ -24,6 +24,9 @@ If you use SOCIA in your research, please cite:
 }
 ```
 
+For **SOCIA-EVO**, please use:  
+[cruiseresearchgroup/SOCIA-EVO](https://github.com/cruiseresearchgroup/SOCIA-EVO)
+
 ## ⚠️ Disclaimer  
 SOCIA generates simulator code using backbone LLMs. By using this software, you agree that:  
 - **No Liability**: The developers of SOCIA are **not responsible** for any consequences arising from the use of generated simulators (e.g., financial decisions like stock investments, medical diagnoses, or legal applications).  
