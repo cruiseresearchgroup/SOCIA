@@ -1,10 +1,5 @@
-<p align="center">
-  <img src="docs/images/socia_logo_large.png" alt="SOCIA Logo" width="200px" />
-</p>
 
-# 🌆 SOCIA: Simulation Orchestration for Cyber-Physical-Social Intelligence and Agents
-
-<p align="center"><i>The work is in rapid progress...</i></p>
+# 🌆 SOCIA-EVO: Automated Simulator Construction via Dual-Anchored Bi-Level Optimization
 
 <!-- Illustration Image Placeholder -->
 
@@ -14,17 +9,18 @@
 
 <!-- Replace this with your actual architecture diagram -->
 
-An LLM-driven multi-agent Cyber-Physical-Social simulation generator that automatically creates simulation environments based on user requirements and data.
+This paper introduces SOCIA-EVO, a framework that automatically builds data-grounded simulators by anchoring constraints, separating structure from parameters, and validating repair strategies through metrics.
 
-For more details about SOCIA, please check out our [paper](https://arxiv.org/abs/2505.12006).
+For more details about SOCIA, please check out our [paper](https://arxiv.org/abs/2604.17351).
 
 If you use SOCIA in your research, please cite:
 ```bibtex
-@article{hua2025socia,
-  title={SOCIA-Nabla: Textual Gradient Meets Multi-Agent Orchestration for Automated Simulator Generation},
+@inproceedings{hua2026socia,
+  title={SOCIA-EVO: Automated Simulator Construction via Dual-Anchored Bi-Level Optimization},
   author={Hua, Yuncheng and Weatherhead, Sion and Jafari, Mehdi and Xue, Hao and Salim, Flora D},
-  journal={arXiv preprint arXiv:2505.12006},
-  year={2025}
+  booktitle={Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)},
+  pages={27596--27634},
+  year={2026}
 }
 ```
 
