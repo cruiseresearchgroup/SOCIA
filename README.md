@@ -1,4 +1,9 @@
 
+> [!IMPORTANT]
+> The SOCIA-EVO codebase has moved to its own repository:
+> [cruiseresearchgroup/SOCIA-EVO](https://github.com/cruiseresearchgroup/SOCIA-EVO).
+> Please use the new repository for the latest SOCIA-EVO code, issues, and updates.
+
 # 🌆 SOCIA-EVO: Automated Simulator Construction via Dual-Anchored Bi-Level Optimization
 
 <!-- Illustration Image Placeholder -->
