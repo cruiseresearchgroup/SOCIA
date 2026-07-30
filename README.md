@@ -74,17 +74,6 @@ python scripts/prepare_socia_selected_bo_recalibration.py
 python scripts/run_socia_selected_bo_recalibration.py --workers 4
 ```
 
-### C: exploratory layer-weight operability probes
-
-Experiment C checks whether the three blueprint-level social-layer weights are behaviorally operative in frozen snapshots. It is explicitly exploratory and is not part of the confirmatory counterfactual score.
-
-```bash
-python scripts/fixed_snapshot_layer_weight_probes.py \
-  --manifest experiments/fixed_snapshot_counterfactual/manifest.json \
-  --probe-manifest experiments/fixed_snapshot_counterfactual/layer_weight_exploratory_manifest.json \
-  --output output/fixed_snapshot_layer_weight_exploratory
-```
-
 ### Predicted Counterfactual Consistency Probes
 
 This experiment evaluates frozen simulator snapshots under pre-registered intervention, social, persistence, and risk probes. The evaluator does not invoke SOCIA orchestration, calibration, LLM diagnosis, code generation, repair, or selection.
