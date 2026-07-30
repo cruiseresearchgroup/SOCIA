@@ -1,0 +1,1738 @@
+{
+  "playbook_metadata": {
+    "version": "v0.1",
+    "project_name": "",
+    "last_updated_time": "2026-07-26T17:31:29.710976",
+    "last_updated_iteration": "2",
+    "total_token_count": 712,
+    "total_insights": 21,
+    "solved_count": 15,
+    "unsolved_count": 6,
+    "deleted_count": 0,
+    "finalized_at": "2026-07-26T16:09:53.075663"
+  },
+  "strategies": {
+    "validation-leakage-training-window-evaluated-as-validation": {
+      "meta_info": {
+        "token_count": 256,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "holdout_plan",
+          "\"Initialize validation simulation from the last observed train-day state per agent. Ensure no leakage of validation labels into calibration of parameters.\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "evaluate_params",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BoCalibrator._objective_function",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "stdout shows BO final metrics RMSE=0.2337/MAE=0.2085/Brier=0.3157/TransitionFit=0.1202 during optimization, while saved val_metrics are much better RMSE=0.0748/MAE=0.0677/Brier=0.2254/TransitionFit=0.0449."
+        },
+        "error_identification": "The optimizer is not scoring candidates on the true temporal holdout. Its internal scores differ sharply from the final saved validation metrics, indicating the search objective is computed on the training slice or an incorrectly defined window.",
+        "root_cause_analysis": "evaluate_params unpacks train_window and passes train_start/train_end into evaluate_on_validation as val_start_idx/val_end_idx, so BO optimizes on the training window rather than the blueprint-required last 20% validation window. This violates the temporal holdout design and can bias parameter selection.",
+        "correct_approach": "Change the evaluator contract so calibration uses only train data to fit parameters, but candidate scoring for model selection uses a separate validation window derived from build_train_validation_splits. Pass both train_window and val_window explicitly; initialize the validation rollout from the last observed train-day state as the blueprint specifies.",
+        "key_insight": "Never reuse a train-window tuple as a validation-window tuple; make train and validation indices separate typed inputs.",
+        "metric_links": [
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          },
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "objective-normalization-clamp-creates-flat-0p2-plateau": {
+      "meta_info": {
+        "token_count": 246,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "simulation_evaluation",
+          "\"Select best run by mean Brier or a weighted composite of metrics.\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "BoCalibrator._get_objective_value",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BoCalibrator._normalize_metric_minmax",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "stdout shows repeated 'New candidate: objective = 0.2000' from iteration 32 onward, with trust region repeatedly contracting to ~0 and 'best_improvement': 0."
+        },
+        "error_identification": "The BO objective collapses to a constant value of 0.2000 for most iterations, preventing meaningful search progress.",
+        "root_cause_analysis": "After 20 samples, _get_objective_value computes tf_loss = 1.0 - transition_fit and then normalizes it with _normalize_metric_minmax using stats collected on raw transition errors. Because transition_fit is already an error metric where lower is better, subtracting from 1 reverses the direction and pushes values outside the collected range; the subsequent clamp in _normalize_metric_minmax yields a constant 1.0 component, and with other metrics also saturating the weighted composite can flatten at 0.2000.",
+        "correct_approach": "Remove the 1.0 - transition_fit transform and normalize TransitionFit_mean directly as a loss. Recompute normalization stats on exactly the same transformed quantities used in the objective. Add a guardrail log if the last N objective values have near-zero variance.",
+        "key_insight": "Normalize exactly the metric form you optimize; do not mix raw errors with inverted scores.",
+        "metric_links": [
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "training-history-double-counted-and-misreported": {
+      "meta_info": {
+        "token_count": 165,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"Calibration diagnostics (convergence stats, parameter sensitivities, regularization paths)\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "BoCalibrator._objective_function",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BoCalibrator._run_bayesian_optimization",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "calibrated_parameters.meta.optimization_history_length=590 for a 300-trial run; stdout says 'Total evaluations: 600'."
+        },
+        "error_identification": "Optimization diagnostics are internally inconsistent, so convergence reporting cannot be trusted.",
+        "root_cause_analysis": "_objective_function appends one history record per evaluation, and _run_bayesian_optimization appends another per BO iteration. This double counts progress and corrupts derived diagnostics such as total evaluations and best-improvement summaries.",
+        "correct_approach": "Keep one history stream per evaluation with explicit fields for source phase (init/bo) and another optional summary stream per iteration. Compute totals from actual evaluated candidates only.",
+        "key_insight": "Diagnostics should be generated from a single source of truth; never mix per-evaluation and per-iteration records in one list.",
+        "metric_links": []
+      }
+    },
+    "info-diffusion-uses-previous-info-neighbors-instead-of-mask-wearing-neighbors": {
+      "meta_info": {
+        "token_count": 214,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "information_propagation",
+          "\"Each day, an agent receives information with probability: 1 - exp(-(phi_family * share_family - weighted by mask-wearing neighbors - + phi_work * share_work + phi_community * share_community + lambda_broadcast))\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "simulate_step_info",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_window",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Brier_mean=0.2254 and predicted rates are systematically above observed rates (0.7175/0.7520/0.7635 vs 0.63/0.68/0.73)."
+        },
+        "error_identification": "Information receipt is simulated from the wrong contagion source, which can decouple received_info from the social masking process and distort adoption probabilities.",
+        "root_cause_analysis": "simulate_step_info computes neighbor shares from info_state_prev, and simulate_window passes prev_info_state into it. The blueprint requires peer information receipt to depend on mask-wearing neighbor shares, not on who received info yesterday. This changes the diffusion mechanism entirely.",
+        "correct_approach": "Refactor simulate_step_info to accept current/previous mask-wearing states and compute family/work/community shares from mask states. If retaining info-memory, apply rho_info_decay only after receipt is generated, not as the source graph signal.",
+        "key_insight": "When the spec defines one state as the driver of another process, wire that exact state into the simulator; do not substitute a convenient proxy state.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.55
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.25
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          }
+        ]
+      }
+    },
+    "received-info-observations-ignored-in-logit-calibration": {
+      "meta_info": {
+        "token_count": 183,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "agent_archetypes.update_from_data",
+          "information_propagation.construction_from_data",
+          "\"During calibration, use train_data.csv to compute observed transitions ... and received_info_t targets per day-agent.\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "LogitHeadCalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "main",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Code comment says 'received_info is available or zero' but implementation sets received_info = np.zeros_like(wearing)."
+        },
+        "error_identification": "The logistic calibrator cannot learn the effect of information exposure because the observed received_info panel is discarded.",
+        "root_cause_analysis": "In LogitHeadCalibrator.fit, received_info is hard-coded to zeros instead of using the pivoted received array from train_data. This makes mem_info identically zero and renders beta_i and info-related calibration unidentifiable, contrary to blueprint requirements.",
+        "correct_approach": "Include received in the calibration bundle, compute mem_info from observed received_info over the training period, and optionally fit phi_* and lambda_broadcast jointly or in an alternating scheme. Remove placeholder zero arrays.",
+        "key_insight": "If a field is available in training data and named in the spec, never replace it with zeros in calibration code.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.7
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "parameter-mapping-misaligned-between-features-and-coefficients": {
+      "meta_info": {
+        "token_count": 196,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "action_decision_policy",
+          "\"feature vector including: intercept; inertia; neighbor shares per layer ... risk_perception; received_info; demographic fixed effects\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "build_feature_matrix",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "LogitHeadCalibrator.fit",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "In build_feature_matrix base columns are [intercept, wear_prev, share_f, share_w, share_c, risk, mem_t], but LogitHeadCalibrator assigns beta[2] to beta_r and beta[3] to beta_i."
+        },
+        "error_identification": "At least one calibrator constructs coefficient meanings incorrectly, so fitted parameters would be semantically wrong even if optimization converged.",
+        "root_cause_analysis": "The feature matrix orders columns as intercept, previous state, three neighbor shares, risk, memory, demographics. LogitHeadCalibrator then maps beta[2] to risk and beta[3] to info, skipping the share coefficients entirely and shifting all subsequent coefficients. This is a direct coefficient-index bug.",
+        "correct_approach": "Define a shared feature schema with explicit column names and map coefficients by name, not position. Extract theta_f/theta_w/theta_c from columns 2-4, beta_r from column 5, beta_i from column 6, then demographics after that.",
+        "key_insight": "Any learned linear model needs an explicit feature-name registry; positional mapping alone is too fragile.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          },
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          }
+        ]
+      }
+    },
+    "generic-category-names-break-demographic-effects": {
+      "meta_info": {
+        "token_count": 183,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "agent_archetypes.static_attributes",
+          "\"Age group and occupation are categorical features used as fixed effects or multipliers.\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "encode_demographics",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "evaluate_params",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "SBICalibrator.fit",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "evaluate_params and several calibrators reconstruct age_cat_names/occ_cat_names as generic age_cat_i / occ_cat_i instead of reusing names returned by encode_demographics."
+        },
+        "error_identification": "Demographic coefficients can be silently ignored or applied to the wrong columns because category names are inconsistent across encoding, calibration, and simulation.",
+        "root_cause_analysis": "encode_demographics returns true category names, but evaluate_params and SBI/BO helper paths fabricate generic placeholders based only on matrix width. compute_logit looks up params.age_effects/occ_effects by these names, so mismatched keys drop effects to zero or misassign them.",
+        "correct_approach": "Carry age_cat_names and occ_cat_names through the bundle and all calibrator/evaluator APIs. Parameter dictionaries should use the real category labels from encode_demographics.",
+        "key_insight": "For categorical effects, preserve the exact category labels end-to-end; dimensionality alone is not enough.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "layer-weight-parameters-unused-in-decision-logit": {
+      "meta_info": {
+        "token_count": 174,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "action_decision_policy",
+          "\"neighbor shares per layer weighted by w_family, w_work, w_community\"",
+          "\"w_family, w_work, w_community (layer weights, sum-to-one constraint applied during calibration)\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "compute_logit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "Parameters",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "FittedParams.to_parameters",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "calibrated_parameters include layer_weights values, but compute_logit uses theta_f/theta_w/theta_c directly and never uses w_family/w_work/w_community."
+        },
+        "error_identification": "A major calibrated parameter group has no effect on simulation behavior, reducing identifiability and wasting optimizer capacity.",
+        "root_cause_analysis": "The blueprint separates normalized layer weights from influence slopes, but compute_logit only applies theta_f/theta_w/theta_c to shares. layer_weights are stored and optimized yet never enter the decision rule, so the implemented mechanism does not match the specified model.",
+        "correct_approach": "Either remove redundant parameters or implement the specified factorization: beta_f*w_family*share_family etc., with weights normalized to sum to one at runtime.",
+        "key_insight": "Every calibrated parameter must have a live path into the simulator; dead parameters confuse both optimization and interpretation.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "hardcoded-day10-broadcast-shift-not-data-driven": {
+      "meta_info": {
+        "token_count": 211,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "initialization",
+          "information_propagation.parameters",
+          "\"Initialize parameter vector ... exogenous broadcast rate, decay\"",
+          "\"lambda_broadcast is a daily rate for exogenous campaigns\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "SimulationConfig",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_window",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "calibrate_info_params_simple",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "simulate_window multiplies lambda when global_day > 10 regardless of dataset split or learned schedule."
+        },
+        "error_identification": "The exogenous campaign effect is tied to a fixed calendar threshold rather than inferred from observed data or explicit configuration of the actual time series.",
+        "root_cause_analysis": "simulate_window uses if global_day > 10 to scale lambda_broadcast_base, and the config names this as gov_intervention_day with default 10. The blueprint does not define a universal day-10 intervention; it expects calibration to observed received_info prevalence and broadcast rates over the training window.",
+        "correct_approach": "Replace the hardcoded switch with either a learned constant lambda_broadcast, a fitted schedule from train_data received_info prevalence, or a configurable intervention series derived from data. At minimum use cfg.gov_intervention_day consistently instead of literal 10.",
+        "key_insight": "Temporal interventions should come from data or explicit configuration, never from buried magic numbers.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.35
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.35
+          },
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "validation-aggregate-overprediction-signal": {
+      "meta_info": {
+        "token_count": 178,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "simulation_evaluation"
+        ],
+        "code_refs": [
+          {
+            "symbol": "evaluate_on_validation",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_window",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "observed_daily_rates=[0.63,0.68,0.73] vs predicted_daily_rates_mean=[0.7175,0.7520,0.7635]; RMSE_aggregate_mean=0.0748, MAE_aggregate_mean=0.0677."
+        },
+        "error_identification": "The model consistently overpredicts mask-wearing on all validation days, not just noisily around the truth.",
+        "root_cause_analysis": "This directional bias is consistent with the combined mechanism problems above: objective mismatch during calibration, incorrect info diffusion source, and hardcoded broadcast amplification. The evaluation output itself shows the systematic shift.",
+        "correct_approach": "After fixing calibration/evaluator wiring, add calibration diagnostics that compare observed vs predicted aggregate trajectories on both train and validation, and log mean signed error to detect one-sided bias early.",
+        "key_insight": "Always inspect signed trajectory bias, not only absolute error metrics; persistent one-direction drift points to mechanism misspecification.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "forecast-starts-from-last-observed-day-not-last-train-day": {
+      "meta_info": {
+        "token_count": 225,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "After calibration, run forward simulations on the validation window from the last observed state",
+          "Initialize validation simulation from the last observed train-day state per agent"
+        ],
+        "code_refs": [
+          {
+            "symbol": "SocialMaskSimulator.rollout",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_forecast",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Forecast is initialized with last_train_day_idx=data['wearing'].shape[0]-1, i.e. the last observed dataset day rather than the last training day."
+        },
+        "error_identification": "The rollout pipeline evaluates validation correctly, but the separate forecast artifact is started from the final observed panel day, not from the end of the training window required by the blueprint.",
+        "root_cause_analysis": "In SocialMaskSimulator.rollout, simulate_forecast is called with last_train_day_idx=data['wearing'].shape[0]-1 and last_day_label=data['days'][-1]. That uses the final observed day after validation, creating a forecast that is not anchored at the train/validation boundary described in the blueprint.",
+        "correct_approach": "Pass the training boundary from windows into simulate_forecast: use last_train_day_idx=windows['train_window'][1]-1 and the matching day label from data['days'][last_train_day_idx]. This keeps all forward simulation artifacts aligned to the temporal holdout protocol.",
+        "key_insight": "Any forecast produced in a temporal holdout setup must start at the train cutoff, never at the last labeled day in the full dataset.",
+        "metric_links": [
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          },
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "received-info-day0-fallback-missing": {
+      "meta_info": {
+        "token_count": 205,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Derive initial received_info from train_data day 0 if provided; else initialize false."
+        ],
+        "code_refs": [
+          {
+            "symbol": "pivot_states",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "build_network_and_agents",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "pivot_states synthesizes day 0 for wearing when missing, but leaves received day 0 as zeros without checking whether train_data supplies another initialization path."
+        },
+        "error_identification": "Initial information state handling is only partially aligned with spec: wearing has a day-0 fallback, but received_info initialization is implicit and may mis-seed memory features when day 0 is absent.",
+        "root_cause_analysis": "pivot_states prepends day 0 when needed and fills wearing from initial_mask_wearing, but received is simply left at zero for the synthetic day. The blueprint explicitly defines day-0 received_info initialization as a separate step.",
+        "correct_approach": "Make day-0 received_info initialization explicit: if day 0 exists in train_data, use it; otherwise initialize false and record that choice. Keep this initialization path visible in metadata so downstream memory calculations are auditable.",
+        "key_insight": "When a blueprint specifies separate initializers for multiple state variables, implement each explicitly rather than relying on zero-filled defaults.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "info-parameter-calibration-is-heuristic-and-out-of-bounds": {
+      "meta_info": {
+        "token_count": 308,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Calibrate parameters by maximizing the likelihood of observed wearing_mask transitions on the training time window ... while matching observed received_info rates",
+          "Estimate from observed received_info (if present) and mask transitions via joint likelihood",
+          "lambda_broadcast range_bounds: [0, 0.5] daily"
+        ],
+        "code_refs": [
+          {
+            "symbol": "calibrate_info_params_simple",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "LogitHeadCalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "FittedParams.to_parameters",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "calibrated_parameters.info_params.lambda_broadcast_base=0.269554438710809 and lambda_broadcast_factor_after_day10=5.0; the resulting post-day10 effective broadcast exceeds the blueprint's [0,1] probability and the calibrated info model is not likelihood-fit."
+        },
+        "error_identification": "The model returns plausible execution but calibrates information diffusion with fixed heuristics and produces a very aggressive broadcast regime, which likely distorts downstream mask adoption probabilities.",
+        "root_cause_analysis": "calibrate_info_params_simple hardcodes phi values and infers lambda via prevalence matching rather than fitting a joint likelihood over observed received_info and mask transitions. LogitHeadCalibrator.fit always uses that heuristic output. The legacy parameterization also multiplies lambda_broadcast_base by a post-day10 factor, allowing an effective rate above the blueprint's bounded daily probability semantics.",
+        "correct_approach": "Replace the heuristic info fit with a train-window likelihood model for received_info using the blueprint hazard form 1-exp(-(phi_f*share_f+phi_w*share_w+phi_c*share_c+lambda))). Estimate phi_* and lambda jointly with decision parameters or in an alternating optimization. Enforce blueprint bounds directly and store a single bounded lambda_broadcast rather than a free multiplicative post-day factor unless the spec is formally updated.",
+        "key_insight": "If an exogenous signal is observed in training data, calibrate it from its own likelihood and enforce parameter bounds at the same level where the simulator consumes them.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.45
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.35
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          }
+        ]
+      }
+    },
+    "memory-feature-uses-current-day-info-during-training": {
+      "meta_info": {
+        "token_count": 246,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Daily synchronous updates",
+          "inputs: previous wearing_mask state ... received_info (current or decayed memory)"
+        ],
+        "code_refs": [
+          {
+            "symbol": "compute_mem_info",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "build_feature_matrix",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "build_feature_matrix uses mem_info[t, :] as a predictor for wearing[t, :], while mem_info[t] is computed including received_info[t], mixing same-day exposure into the target-day feature."
+        },
+        "error_identification": "Training features use a memory signal that already includes current-day received_info, while simulation decisions are made before new info is generated for that day. This train/sim timing mismatch can bias coefficient estimates.",
+        "root_cause_analysis": "compute_mem_info updates mem[t] from received_info[t], and build_feature_matrix then uses mem_info[t] to predict wearing[t]. In simulate_window, logits are computed from previous memory and only afterward received_info_t is generated. The training graph therefore has a different causal order from the simulator.",
+        "correct_approach": "Shift the training memory feature back one step so prediction of wearing[t] uses memory derived only from information available before day t, e.g. mem_info[t-1] or a separately constructed pre-decision memory state. Keep the simulator and calibrator on the same daily event ordering.",
+        "key_insight": "Feature timing in calibration must match state-update timing in simulation exactly; same-day latent inputs create silent leakage even without validation leakage.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "aggregate-underprediction-on-validation-tail": {
+      "meta_info": {
+        "token_count": 241,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Evaluation metrics on validation set (RMSE, MAE, Brier, TransitionFit)"
+        ],
+        "code_refs": [
+          {
+            "symbol": "compute_metrics_from_rollouts",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "LogitHeadCalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_window",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "MeanSignedError_aggregate=-0.03966666666666666; observed daily rates [0.63, 0.68, 0.73] vs predicted means [0.6210, 0.6485, 0.6515]."
+        },
+        "error_identification": "The simulator systematically underpredicts the rising validation trajectory, especially on the last day where 0.6515 predicted trails 0.73 observed.",
+        "root_cause_analysis": "The underprediction is consistent with the combined design shortcuts: heuristic info calibration, same-day memory mismatch, and a static linear logit without the blueprint's richer calibrated interactions. These choices make the model too weak to reproduce late-period adoption acceleration.",
+        "correct_approach": "First fix the timing and info-calibration issues, then add the blueprint-supported interaction terms such as risk_perception × received_info and calibrate them on the training panel. Also log simulated daily received_info prevalence against observed prevalence to verify whether adoption underprediction is driven by weak exposure generation or weak decision sensitivity.",
+        "key_insight": "When aggregate signed error is directional across all validation days, inspect missing growth drivers before tuning stochasticity or optimizer settings.",
+        "metric_links": [
+          {
+            "name": "MeanSignedError_aggregate",
+            "direction": "higher_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          }
+        ]
+      }
+    },
+    "missing-blueprint-calibration-diagnostics-and-uncertainty-output": {
+      "meta_info": {
+        "token_count": 192,
+        "status": "resolved",
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "low",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Calibration diagnostics (convergence stats, parameter sensitivities, regularization paths)",
+          "Calibrated parameter set (point estimates and, if enabled, posterior samples/uncertainty)",
+          "Reproducible seeds and configuration used for this run"
+        ],
+        "code_refs": [
+          {
+            "symbol": "save_results",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "LogitHeadCalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "SimulationEvaluator",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Outputs include point estimates and validation metrics, but no regularization-path, sensitivity, or uncertainty artifacts for the default calibrator."
+        },
+        "error_identification": "The run succeeds, but required diagnostic outputs from the blueprint are mostly absent, limiting debuggability and calibration auditability.",
+        "root_cause_analysis": "save_results persists only config, parameters, validation metrics, and forecast. The default LogitHeadCalibrator prints optimization loss but does not save convergence traces, coefficient path comparisons, parameter sensitivity summaries, or uncertainty intervals.",
+        "correct_approach": "Persist training loss history, feature coefficient table, validation preview metrics, and at least bootstrap or multi-seed parameter variability for the default calibrator. Save these as additional JSON/CSV artifacts alongside existing outputs.",
+        "key_insight": "For simulation calibrators, missing diagnostics are a product issue: you cannot reliably improve what you do not record.",
+        "metric_links": []
+      }
+    },
+    "validation-uses-simulated-info-instead-of-observed-info-features": {
+      "meta_info": {
+        "token_count": 289,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "During calibration, use train_data.csv to compute observed transitions (wear_t-1 -> wear_t) and received_info_t targets per day-agent.",
+          "After calibration, run forward simulations on the validation window from the last observed state, then evaluate.",
+          "Brier: Mean squared error between predicted per-agent probabilities and observed wearing_mask outcomes on validation."
+        ],
+        "code_refs": [
+          {
+            "symbol": "generate_validation_rollouts",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_window",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "compute_logit",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Brier_mean=0.2319, MeanSignedError_info_aggregate=-0.3718, predicted_daily_info_rates_mean≈0.622-0.639 while observed_daily_info_rates=[1.0,1.0,1.0]"
+        },
+        "error_identification": "Validation probability scoring is degraded while the simulated information process strongly underestimates observed exposure on holdout days.",
+        "root_cause_analysis": "In validation rollout generation, probabilities are produced inside simulate_window using simulated info memory updates, not the observed received_info available in the validation labels. Because compute_logit depends on mem_info, Brier is partly measuring mismatch from the latent info simulator rather than the calibrated decision rule against observed panel covariates. This conflicts with the blueprint's panel-data evaluation framing.",
+        "correct_approach": "Separate two validation products: (1) a one-step panel probability pass using observed lagged wearing_mask and observed lagged received_info/memory to compute per-agent validation probabilities for Brier; (2) a forward stochastic rollout for trajectory/aggregate metrics. Keep simulated-info evaluation as a diagnostic, not the sole source of validation probabilities when observed received_info exists.",
+        "key_insight": "If a covariate is observed in validation and enters the decision rule, score probability metrics against observed covariates, not only against simulated latent replacements.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "MeanSignedError_info_aggregate",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "info-memory-decay-never-calibrated-and-fixed-at-default": {
+      "meta_info": {
+        "token_count": 216,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "rho_info_decay controls persistence of received_info memory.",
+          "Estimate from observed received_info (if present) and mask transitions via joint likelihood.",
+          "Initialize parameter vector ... decay ... with priors or heuristic defaults."
+        ],
+        "code_refs": [
+          {
+            "symbol": "LogitHeadCalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "compute_mem_info",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "fit_info_hazard_model",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "calibrated_parameters.info_params.rho_info_decay=0.5 exactly equals cfg.rho_info_decay_default; MeanSignedError_info_aggregate=-0.3718; Brier_mean=0.2319"
+        },
+        "error_identification": "A major modeled driver of behavior, information memory persistence, is not actually estimated despite being listed as calibratable, limiting fit of both info exposure and mask decisions.",
+        "root_cause_analysis": "LogitHeadCalibrator computes mem_info once from cfg.rho_info_decay_default and stores that same default into fitted params. fit_info_hazard_model calibrates phi_* and lambda only, so rho_info_decay never participates in likelihood optimization or validation selection. This is a direct omission versus the blueprint's joint estimation requirement.",
+        "correct_approach": "Add rho_info_decay to calibration. At minimum, grid-search or jointly optimize rho with the logistic and info-hazard losses by recomputing mem_info for each candidate rho. Persist the selected rho into fitted_params.info_params.",
+        "key_insight": "Do not declare a state-dynamics parameter as calibratable if the training objective never updates it.",
+        "metric_links": [
+          {
+            "name": "MeanSignedError_info_aggregate",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "broadcast-step-change-hardcoded-outside-blueprint": {
+      "meta_info": {
+        "token_count": 219,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "campaign_broadcaster: each agent independently receives info with probability lambda_broadcast per day; optionally modulate lambda_broadcast by time or adoption level.",
+          "Initialize parameter vector ... exogenous broadcast rate ..."
+        ],
+        "code_refs": [
+          {
+            "symbol": "SimulationConfig",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_window",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "fit_info_hazard_model",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Simulation uses gov_intervention_day=10 and lambda_broadcast_factor_after_day10, but fitted info model fixes lambda_broadcast_factor_after_day10=1.0 and never calibrates any time-varying broadcast."
+        },
+        "error_identification": "The simulator includes a policy shock mechanism that is not supported by the fitted model and not grounded in observed broadcast prevalence.",
+        "root_cause_analysis": "simulate_window modifies lambda_broadcast after a hardcoded gov_intervention_day using lambda_broadcast_factor_after_day10, but the calibrator always sets that factor to 1.0 and the info hazard fit has no temporal broadcast term. This creates architecture drift: a simulator feature exists without coherent estimation or data linkage.",
+        "correct_approach": "Either remove the intervention-day multiplier from the default simulation path, or explicitly fit a time-varying broadcast term from train_data day-level received_info prevalence. If retained, expose it as a true calibratable parameter and include day features in the info hazard model.",
+        "key_insight": "Avoid simulator branches that are not connected to calibration data; they add complexity without explanatory power.",
+        "metric_links": [
+          {
+            "name": "MeanSignedError_info_aggregate",
+            "direction": "lower_is_better",
+            "weight": 0.7
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "validation-info-process-severely-underpredicts-saturated-exposure": {
+      "meta_info": {
+        "token_count": 275,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "match the empirical daily and agent-level prevalence to calibrate lambda_broadcast and phi_* via likelihood or moment matching",
+          "Each day, an agent receives information with probability: 1 - exp(-(phi_family * share_family ... + lambda_broadcast))"
+        ],
+        "code_refs": [
+          {
+            "symbol": "fit_info_hazard_model",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_step_info",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "compute_metrics_from_rollouts",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "observed_daily_info_rates=[1.0,1.0,1.0] vs predicted_daily_info_rates_mean=[0.6385,0.6220,0.6240]; MeanSignedError_info_aggregate=-0.3718"
+        },
+        "error_identification": "The information diffusion module misses holdout exposure prevalence by a large margin: predicted receipt is about 62% when observed validation exposure is 100% every day.",
+        "root_cause_analysis": "The fitted hazard uses only previous-day neighbor mask shares plus a constant lambda_broadcast_base. With lambda capped at 0.5 and moderate phi values, the model cannot reproduce saturated validation exposure unless peer shares are near 1 and/or a stronger day-level exogenous term is learned. The training diagnostics also show weak probabilistic fit (train_received_info_mae_probability≈0.4603).",
+        "correct_approach": "Augment the info hazard with a day-level intercept or broadcast schedule estimated from observed received_info prevalence. If observed validation/training indicate near-universal campaigns, allow lambda_broadcast to approach that regime within blueprint bounds or condition it on day. Add holdout plots of observed vs predicted info prevalence to catch this earlier.",
+        "key_insight": "When a latent diffusion submodel drives actions, first verify it can reproduce the observed exposure prevalence range before trusting downstream behavior forecasts.",
+        "metric_links": [
+          {
+            "name": "MeanSignedError_info_aggregate",
+            "direction": "lower_is_better",
+            "weight": 1.0
+          }
+        ]
+      }
+    },
+    "aggregate-mask-trajectory-systematically-underpredicted-on-validation": {
+      "meta_info": {
+        "token_count": 244,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "Validation forecasts of per-agent and aggregate mask-wearing trajectories",
+          "RMSE_aggregate",
+          "MAE_aggregate"
+        ],
+        "code_refs": [
+          {
+            "symbol": "compute_logit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_window",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "compute_metrics_from_rollouts",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "observed_daily_rates=[0.63,0.68,0.73] vs predicted_daily_rates_mean=[0.5960,0.5955,0.5840]; MeanSignedError_aggregate=-0.0882; RMSE_aggregate_mean=0.1054; MAE_aggregate_mean=0.0935"
+        },
+        "error_identification": "The model consistently predicts lower mask-wearing than observed throughout the validation tail, and it fails to capture the upward trend.",
+        "root_cause_analysis": "The underprediction is consistent with the weakly fitted information process and a one-step logistic model that lacks any explicit day trend or validation anchoring beyond prior state. Since received_info is under-simulated and validation logits consume simulated memory, the adoption pressure remains too low, yielding a flat-to-declining predicted trajectory instead of the observed increase.",
+        "correct_approach": "Fix the information-process fit first, then recompute validation probabilities using observed lagged info where available. If upward drift remains, add a blueprint-compatible day-level exogenous term or time-varying broadcast feature to the decision/information models rather than relying solely on network shares and inertia.",
+        "key_insight": "A persistent signed aggregate bias usually signals a missing common-cause driver, not just noisy parameter estimates.",
+        "metric_links": [
+          {
+            "name": "MeanSignedError_aggregate",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.35
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.25
+          }
+        ]
+      }
+    },
+    "parameter-bounds-misaligned-with-blueprint-in-alternative-calibrators": {
+      "meta_info": {
+        "token_count": 211,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "beta_r (risk perception coefficient) range_bounds: [0, 5]",
+          "beta_i (info exposure effect) range_bounds: [0, 5]",
+          "gamma (inertia) range_bounds: [0, 6]",
+          "phi_family, phi_work, phi_community range_bounds: [0, 2]",
+          "lambda_broadcast range_bounds: [0, 0.5] daily"
+        ],
+        "code_refs": [
+          {
+            "symbol": "RandomSearchCalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "SBICalibrator._define_prior",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BoCalibrator._define_parameter_bounds",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "EvoCalibrator._define_parameter_bounds",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Current run used logit_head, but alternative calibrators sample beta_r/beta_i from negative ranges and cap phi/lambda to narrower-than-blueprint ranges in some cases."
+        },
+        "error_identification": "Several calibrators search parameter regions that contradict the blueprint or omit required parameters, which can produce implausible behaviors and inconsistent results across backends.",
+        "root_cause_analysis": "RandomSearch, SBI, BO, and Evo use ad hoc bounds such as beta_r/beta_i in negative ranges and phi/lambda much narrower than blueprint maxima; Evo also omits explicit layer weights and full info parameters. This backend inconsistency means the same task is not being solved under a common specification.",
+        "correct_approach": "Centralize blueprint-conformant parameter bounds in one shared definition and make all calibrators consume it. Include all required parameters, including rho_info_decay and layer weights, with runtime normalization where needed.",
+        "key_insight": "When multiple calibrators exist, they must share one authoritative parameter schema and bound set or comparisons become invalid.",
+        "metric_links": []
+      }
+    }
+  },
+  "insights": {
+    "optimizer-uses-validation-window-during-calibration": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 31,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "Do not reuse a holdout evaluator as a calibration loss; training loss and validation metrics must be separate code paths.",
+        "metric_links": [
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          },
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "global-mean-inertia-instead-of-agent-previous-state": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 30,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "key_insight": "When a blueprint specifies agent-level state dependence, never collapse it to a global summary inside the decision rule.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          }
+        ]
+      }
+    },
+    "info-diffusion-uses-info-neighbors-not-mask-neighbors": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 41,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "Keep diffusion state and behavioral state semantics separate; if a spec says exposure depends on neighbors' behavior, do not substitute neighbors' exposure state.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "observed-received-info-ignored-in-calibration": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 38,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "If a target variable is present in training data, thread it through the full calibration interface instead of reconstructing or zero-filling it later.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.7
+          },
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "logit-head-feature-mapping-is-misaligned": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 32,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "key_insight": "Any learned linear model should carry explicit feature names; positional coefficient decoding is fragile and easy to corrupt.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "bo-transitionfit-objective-direction-is-inverted": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 26,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "key_insight": "Before combining metrics, confirm each metric's direction from its implementation, not from its name.",
+        "metric_links": [
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "bo-objective-clamping-causes-flat-2000-plateau": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 32,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "key_insight": "Bayesian optimization needs a smooth, discriminative objective; clipped composite metrics can silently destroy search signal.",
+        "metric_links": [
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "training-and-final-evaluation-use-inconsistent-objectives": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 40,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "Metrics from different windows or simulation budgets must never be presented side-by-side without labels; otherwise optimization diagnostics become misleading.",
+        "metric_links": [
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          },
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          }
+        ]
+      }
+    },
+    "bo-runtime-excessive-for-tiny-time-horizon": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 32,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "key_insight": "For network ABMs inside an optimizer, vectorize the simulator first and add optimization stop rules before scaling trial counts.",
+        "metric_links": []
+      }
+    },
+    "forecast-initialized-from-last-observed-day-not-last-train-day": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 37,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "Any temporal holdout pipeline must thread the train/validation boundary into every downstream rollout entry point; never infer it from array length.",
+        "metric_links": [
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          },
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          },
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          }
+        ]
+      }
+    },
+    "hardcoded-post-day10-broadcast-shock-not-in-blueprint": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 27,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "Optional blueprint mechanisms should remain configurable, not silently hardwired into the default simulator.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.45
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.35
+          },
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          }
+        ]
+      }
+    },
+    "info-parameter-calibration-uses-heuristics-instead-of-joint-likelihood": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 39,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "When a latent sub-process directly drives the main behavior model, calibrate its parameters in the same loss loop rather than freezing them from heuristics.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.2
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "validation-trajectory-systematically-underpredicts-upward-trend": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 37,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "key_insight": "If holdout curves are directionally biased, inspect whether the model class itself can express the observed slope before only tuning coefficients.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "missing-blueprint-interaction-terms-in-decision-rule": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 34,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "When the blueprint names specific interaction effects, encode them explicitly in both feature construction and parameter serialization.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.55
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.45
+          }
+        ]
+      }
+    },
+    "calibration-diagnostics-required-by-blueprint-not-produced": {
+      "meta_info": {
+        "status": "solved",
+        "token_count": 32,
+        "usage_count": 1,
+        "unusage_count": 0,
+        "success_attribution": 1,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "A simulator can meet headline metrics yet still fail the spec if it omits the diagnostics needed to verify calibration behavior.",
+        "metric_links": []
+      }
+    },
+    "validation-underpredicts-rising-mask-trend": {
+      "meta_info": {
+        "status": "unsolved",
+        "token_count": 36,
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "key_insight": "A model can fit average training transitions yet still fail on trend direction; always inspect holdout trajectory slope, not just pooled loss.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "info-memory-uses-current-day-exposure-during-training": {
+      "meta_info": {
+        "status": "unsolved",
+        "token_count": 36,
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "For panel transitions, every feature must have a clear time index relative to the predicted state; hidden same-day leakage distorts calibration.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.55
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.45
+          }
+        ]
+      }
+    },
+    "layer-weights-are-computed-but-not-used-in-decision-rule": {
+      "meta_info": {
+        "status": "unsolved",
+        "token_count": 30,
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "Do not emit calibrated parameters that are behaviorally inert; every learned parameter should affect the simulator path.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.35
+          },
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.35
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "fixed-short-grids-limit-calibration-quality": {
+      "meta_info": {
+        "status": "unsolved",
+        "token_count": 32,
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "If calibration space is discretized too aggressively, mediocre validation can be a search problem rather than a model problem.",
+        "metric_links": [
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "evaluation-uses-sampled-states-for-aggregate-error-instead-of-expected-probabilities": {
+      "meta_info": {
+        "status": "unsolved",
+        "token_count": 40,
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "key_insight": "When predicted probabilities are available, evaluate deterministic forecast accuracy on expectations and reserve sampled trajectories for uncertainty analysis.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "MAE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "main-swallows-exceptions-and-prints-only-message": {
+      "meta_info": {
+        "status": "unsolved",
+        "token_count": 30,
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "key_insight": "Top-level orchestration should never erase traceback context; concise error handling must still preserve the root cause.",
+        "metric_links": []
+      }
+    }
+  }
+}

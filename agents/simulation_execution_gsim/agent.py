@@ -254,7 +254,7 @@ class SimulationExecutionAgent(BaseAgent):
         
         # Choose execution method based on mode
         # ACE/ALPHA/GSIM mode and lite mode both use subprocess execution (same path)
-        if mode in ["ace", "alpha", "lite", "gsim"]:
+        if mode in ["ace", "alpha", "lite", "gsim", "srr"]:
             # Use direct subprocess execution for lite/ace/alpha mode
             self.logger.info(f"Using subprocess execution for {mode} mode")
             
@@ -453,17 +453,21 @@ class SimulationExecutionAgent(BaseAgent):
                     is_covid_sir = False
                     is_hospital = False
                     is_supply = False
+                    is_mask_wearing = False
                     if task_spec:
                         task_description = task_spec.get("description", "").lower()
                         is_covid_sir = "covid sir" in task_description
                         is_hospital = "three-disease hospital" in task_description
                         is_supply = "beer game (supply)" in task_description
+                        is_mask_wearing = "mask-wearing behavior" in task_description
                         if is_covid_sir:
                             self.logger.info("COVID SIR task detected: will read results.json and apply special mapping")
                         if is_hospital:
                             self.logger.info("Three-disease Hospital task detected: will read results.json and apply special mapping")
                         if is_supply:
                             self.logger.info("Beer Game (SUPPLY) task detected: will read results.json and apply special mapping")
+                        if is_mask_wearing:
+                            self.logger.info("Mask-wearing behavior task detected: will read results.json and apply ACE-compatible mapping")
                     
                     # Try to read each expected file (skip large files like simulated_trajectories)
                     expected_files = {
@@ -473,8 +477,8 @@ class SimulationExecutionAgent(BaseAgent):
                         # Skip simulated_trajectories_validation.json as it's large and not needed for metrics
                     }
                     
-                    # For COVID SIR tasks, Hospital tasks, or SUPPLY tasks, also read results.json
-                    if is_covid_sir or is_hospital or is_supply:
+                    # Task-specific directory outputs use results.json.
+                    if is_covid_sir or is_hospital or is_supply or is_mask_wearing:
                         expected_files["results"] = "results.json"
                     
                     files_found = 0
@@ -494,6 +498,29 @@ class SimulationExecutionAgent(BaseAgent):
                     if files_found > 0:
                         # Transform directory format to match single-file format structure
                         transformed_output = {}
+
+                        # Mask adoption uses the same directory schema as SOCIA/ACE:
+                        # metrics, val_metrics, and parameters.
+                        if is_mask_wearing and "results" in simulation_output:
+                            results_data = simulation_output["results"]
+                            self.logger.info("Applying ACE-compatible mask-wearing mapping from results.json")
+
+                            if isinstance(results_data.get("metrics"), dict):
+                                execution_result["simulation_metrics"] = results_data["metrics"]
+
+                            if isinstance(results_data.get("val_metrics"), dict):
+                                execution_result["val_metrics"] = results_data["val_metrics"]
+
+                            parameters = results_data.get(
+                                "parameters",
+                                results_data.get("optimized_parameters"),
+                            )
+                            if isinstance(parameters, dict):
+                                execution_result["calibrated_parameters"] = parameters
+                                transformed_output["calibrated_parameters"] = parameters
+                                transformed_output["optimized_parameters"] = parameters
+
+                            transformed_output["results"] = results_data
                         
                         # Special handling for COVID SIR tasks: map results.json fields
                         if is_covid_sir and "results" in simulation_output:

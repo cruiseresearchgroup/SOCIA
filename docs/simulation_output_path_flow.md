@@ -2,7 +2,7 @@
 
 ## 📍 完整调用链
 
-### 1️⃣ 入口：`test_data_analysis.py` (Line 1449-1458)
+### 1️⃣ 入口：`main.py` (Line 1449-1458)
 
 ```python
 state["simulation_results"] = agents["simulation_execution"].process(
@@ -103,7 +103,7 @@ if output_file and os.path.exists(output_file):
 ## 📊 完整流程图
 
 ```
-test_data_analysis.py
+main.py
     │
     ├─> args.output = "output/test_ace/..."
     ├─> current_iteration = 0
@@ -153,7 +153,7 @@ _execute_code_with_subprocess() 读取结果
     └─> 解析并返回 execution_result
             │
             ▼
-test_data_analysis.py 接收结果
+main.py 接收结果
     │
     └─> state["simulation_results"] = execution_result
 ```
@@ -164,7 +164,7 @@ test_data_analysis.py 接收结果
 
 | 步骤 | 文件 | 行号 | 功能 |
 |-----|------|------|------|
-| **1. 调用** | `test_data_analysis.py` | 1449-1458 | 传递 `output_dir` 和 `iteration` |
+| **1. 调用** | `main.py` | 1449-1458 | 传递 `output_dir` 和 `iteration` |
 | **2. 生成路径** | `agents/simulation_execution_ace/agent.py` | 214-216 | 生成 `simulation_results_iter_{N}.json` 路径 |
 | **3. 传递路径** | `agents/simulation_execution_ace/agent.py` | 222 | 传递给 `_execute_code_with_subprocess` |
 | **4. 构建命令** | `agents/simulation_execution_ace/agent.py` | 65-66 | 添加 `--output` 参数到命令 |
@@ -208,4 +208,3 @@ test_data_analysis.py 接收结果
 4. **目录创建**：
    - 目录由 Python 脚本负责创建（如果不存在）
    - Agent 不会预先创建目录
-

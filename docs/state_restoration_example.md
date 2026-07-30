@@ -108,7 +108,7 @@ cd /Users/z3546829/PycharmProjects/SOCIA
 conda activate SOCIA
 
 # 前提：已经执行过iter_0和iter_1，现在从iter_1继续
-python test_data_analysis.py \
+python main.py \
     --config config.yaml \
     --mode ace \
     --output output/test_ace_resume \
@@ -144,7 +144,7 @@ INFO - CODE GENERATION  # ✅ 应该生成新代码
 ### 测试用例2：加载 iter_0 继续执行
 
 ```bash
-python test_data_analysis.py \
+python main.py \
     --config config.yaml \
     --mode ace \
     --output output/test_ace_resume \
@@ -185,4 +185,3 @@ INFO - No previous code available (first iteration)  # ✅ 正常，iter_0没有
    - 如果历史文件不存在，优雅降级（使用空字典）
 
 5. **🚀 完整性**: 确保从任意迭代恢复后，后续workflow能正常进行
-

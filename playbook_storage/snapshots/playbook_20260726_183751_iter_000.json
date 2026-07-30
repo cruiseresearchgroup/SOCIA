@@ -1,0 +1,475 @@
+{
+  "playbook_metadata": {
+    "version": "v0.1",
+    "project_name": "",
+    "last_updated_time": "2026-07-26T18:37:51.939706",
+    "last_updated_iteration": "0",
+    "total_token_count": 0,
+    "total_insights": 0,
+    "solved_count": 0,
+    "unsolved_count": 0,
+    "deleted_count": 0,
+    "finalized_at": "2026-07-26T18:00:03.883643"
+  },
+  "strategies": {
+    "bo-optimizes-on-train-window-not-validation-holdout": {
+      "meta_info": {
+        "token_count": 274,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"holdout_plan\": \"Initialize validation simulation from the last observed train-day state per agent. Ensure no leakage of validation labels into calibration of parameters.\"",
+          "\"execution\": \"After calibration, run forward simulations on the validation window from the last observed state, then evaluate.\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "evaluate_params",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BoCalibrator._objective_function",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "main",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "BoCalibrator final metrics in stdout are much worse (RMSE 0.2337, MAE 0.2085, Brier 0.3157, TransitionFit 0.1202) than the final saved validation metrics (RMSE 0.0748, MAE 0.0677, Brier 0.2254, TransitionFit 0.0449), showing the optimizer is evaluating a different window than the reported holdout."
+        },
+        "error_identification": "Calibration is not aligned with the required temporal holdout. The optimizer scores candidates on the training window while the final report is based on the validation window.",
+        "root_cause_analysis": "evaluate_params unpacks train_window and passes train_start/train_end into evaluate_on_validation as val_start_idx/val_end_idx, so every calibrator objective uses the training slice. BoCalibrator._objective_function calls this evaluator during search, and main later computes true validation metrics separately. This violates the blueprint's train/validation separation and makes the search target inconsistent with reported metrics.",
+        "correct_approach": "Change the evaluator callback used by calibrators to score candidates on a validation window derived from the temporal split, while fitting any supervised submodels only on the train window. Pass both train_window and validation_window in the bundle or callback signature, and initialize validation simulations from wearing[last_train_day].",
+        "key_insight": "If a blueprint specifies temporal holdout, the optimizer's objective must be computed on the same holdout definition as the final reported metrics.",
+        "metric_links": [
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          },
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          },
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          }
+        ]
+      }
+    },
+    "transitionfit-direction-inverted-in-bo-objective": {
+      "meta_info": {
+        "token_count": 189,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "CODE_BUG",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"TransitionFit\": \"Absolute or squared error between simulated and observed transition probabilities\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "BoCalibrator._get_objective_value",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "TransitionFit_mean is an error metric (0.0449 in final results), but _get_objective_value converts it via tf_loss = 1.0 - transition_fit, which rewards larger transition error. The stdout composite score plateaus at 0.2000 despite poor printed final metrics."
+        },
+        "error_identification": "The BO composite objective treats TransitionFit as if higher were better, even though it is defined and reported as an error where lower is better.",
+        "root_cause_analysis": "In BoCalibrator._get_objective_value, the comment says 'larger is better → smaller is better' and computes tf_loss = 1.0 - transition_fit. But evaluate_on_validation already returns TransitionFit_mean as a mean absolute error across P01/P11/P10/P00. This flips the optimization pressure in the wrong direction.",
+        "correct_approach": "Use transition_fit directly as the loss term in objective construction and normalization. Remove the 1 - transition_fit conversion and normalize raw TransitionFit_mean as a lower-is-better metric.",
+        "key_insight": "Never invert a metric without checking whether the implementation already returns an error/loss form.",
+        "metric_links": [
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "ace-val-loss-adds-transition-error-with-wrong-sign": {
+      "meta_info": {
+        "token_count": 164,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"outputs\": \"Evaluation metrics on validation set (RMSE, MAE, Brier, TransitionFit)\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "main",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "ACE val_loss is computed as 0.4*RMSE + 0.2*MAE + 0.2*Brier + 0.2*TransitionFit, while BO internally uses 1-TransitionFit. The saved objective and search objective are inconsistent."
+        },
+        "error_identification": "The externally reported ACE objective does not match the BO search objective, so the selected parameter set is not guaranteed to minimize the saved val_loss.",
+        "root_cause_analysis": "main computes validation_objective_raw by directly adding TransitionFit_mean as a loss component, while BoCalibrator._get_objective_value uses 1 - transition_fit. The system therefore optimizes one scalar objective and reports another.",
+        "correct_approach": "Define one canonical scalar objective for search and reporting. After fixing TransitionFit direction, reuse the same formula in BO and in ACE result emission.",
+        "key_insight": "Search-time and report-time objectives must be identical, or optimization diagnostics become misleading.",
+        "metric_links": [
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "risk-effect-sign-flip-for-high-risk-agents": {
+      "meta_info": {
+        "token_count": 181,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"beta_r (risk perception coefficient)\": \"Scales individual propensity to wear independent of peers.\"",
+          "\"policy_form\": \"... + beta_r*risk + beta_i*received_info ...\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "compute_logit",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Saved parameters include beta_r = -1.3343 and predicted aggregate rates overshoot observed rates (0.7175/0.7520/0.7635 vs 0.63/0.68/0.73), indicating distorted behavioral effects. compute_logit explicitly flips sign when risk > 0.4."
+        },
+        "error_identification": "The decision rule applies a non-blueprint threshold rule that reverses the risk effect for higher-risk agents, changing behavior in a way not specified by the model design.",
+        "root_cause_analysis": "compute_logit builds risk_effect = params.beta_r * risk and then mutates it with risk_effect[risk > 0.4] *= -1.0. The blueprint specifies a linear coefficient beta_r*risk (optionally with explicit interaction terms), not a hidden thresholded sign reversal.",
+        "correct_approach": "Remove the hardcoded threshold sign flip. If nonlinear risk effects are desired, model them explicitly as calibratable features or interactions stated in the blueprint.",
+        "key_insight": "Do not inject hidden behavioral heuristics into a calibrated model; every nonlinearity should be explicit, named, and estimable.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "info-diffusion-uses-info-neighbors-instead-of-mask-neighbors": {
+      "meta_info": {
+        "token_count": 204,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"information_propagation\": \"Each day, an agent receives information with probability: 1 - exp(-(phi_family * share_family - weighted by mask-wearing neighbors - + ... + lambda_broadcast))\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "simulate_step_info",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "simulate_window",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Brier_mean remains high at 0.2254 and beta_i is estimated negative, consistent with the info channel being mechanistically miswired. simulate_step_info computes shares from info_state_prev rather than mask-wearing neighbors."
+        },
+        "error_identification": "Information receipt is driven by prior information recipients, not by mask-wearing neighbor shares as specified, so the exogenous/peer info mechanism is not the one in the blueprint.",
+        "root_cause_analysis": "simulate_step_info takes info_state_prev and computes layer shares from that state. simulate_window passes prev_info_state into it. The blueprint explicitly ties peer information probability to shares of mask-wearing neighbors, not shares of already-informed neighbors.",
+        "correct_approach": "Refactor simulate_step_info to accept current or previous mask states and compute family/work/community shares from mask-wearing neighbors. Keep broadcast as an additive rate, then optionally maintain decaying memory separately.",
+        "key_insight": "When two latent channels exist (behavior and information), verify that each diffusion equation is driven by the intended state variable.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "calibration-ignores-observed-received-info": {
+      "meta_info": {
+        "token_count": 222,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"execution\": \"Calibrate parameters by maximizing the likelihood of observed wearing_mask transitions ... while matching observed received_info rates\"",
+          "\"construction_from_data\": \"If train_data.csv includes received_info, match the empirical daily and agent-level prevalence to calibrate lambda_broadcast and phi_* via likelihood or moment matching.\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "LogitHeadCalibrator.fit",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "main",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BoCalibrator._objective_function",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "train_data is pivoted with received_info, but bundle passed to calibrators omits received_info. LogitHeadCalibrator replaces it with zeros, and BO evaluates only mask metrics. Final beta_i is negative and Brier_mean is high (0.2254), suggesting the info channel is not fitted to observed exposures."
+        },
+        "error_identification": "Observed received_info data is loaded but not actually used in the calibration path, contrary to the joint-likelihood requirement.",
+        "root_cause_analysis": "main computes received and mem_info but bundle only includes (wearing, neighbors, risk_perception, age_oh, occ_oh, cfg). LogitHeadCalibrator.fit creates received_info = np.zeros_like(wearing), and BO/other calibrators optimize only downstream mask metrics. This drops the blueprint's requirement to match observed information exposure rates.",
+        "correct_approach": "Include observed received_info in the bundle and calibrate phi_family/phi_work/phi_community/lambda_broadcast/rho_info_decay against received_info likelihood or moment targets jointly with mask transitions. Reuse actual mem_info based on observed exposure during supervised fitting.",
+        "key_insight": "If the data contains an observed latent driver, omitting it from calibration makes downstream coefficients absorb the misspecification.",
+        "metric_links": [
+          {
+            "name": "Brier_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "layer-weights-are-not-used-in-decision-rule": {
+      "meta_info": {
+        "token_count": 197,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "DESIGN_MISMATCH",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"w_family, w_work, w_community (layer weights, sum-to-one constraint applied during calibration)\"",
+          "\"policy_form\": \"... beta_f*w_family*share_family + beta_w*w_work*share_work + beta_c*w_community*share_community ...\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "Parameters",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "FittedParams.to_parameters",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "compute_logit",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "Calibrated layer_weights differ by layer, but compute_logit only uses theta_f/theta_w/theta_c and never applies normalized w_family/w_work/w_community. The blueprint requires explicit layer weights with sum-to-one normalization."
+        },
+        "error_identification": "A full parameter block is calibrated and saved for layer salience, but it does not affect the actual behavior equation.",
+        "root_cause_analysis": "Parameters stores both theta_* and w_* fields, but compute_logit uses only theta_f/theta_w/theta_c. FittedParams.to_parameters copies raw layer_weights without normalizing them or combining them into the peer term. This makes the blueprint's constrained layer-weight mechanism effectively dead code.",
+        "correct_approach": "Normalize family/work/community weights to sum to one at runtime and use them multiplicatively in the peer influence terms, either as beta_* * w_* * share_* or by collapsing to a single weighted share consistent with the blueprint.",
+        "key_insight": "If a parameter is exposed to calibration, verify it appears in the forward equations; otherwise the search space contains inert dimensions.",
+        "metric_links": [
+          {
+            "name": "RMSE_aggregate_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          },
+          {
+            "name": "TransitionFit_mean",
+            "direction": "lower_is_better",
+            "weight": 0.5
+          }
+        ]
+      }
+    },
+    "bo-normalization-clamps-objective-and-causes-plateau": {
+      "meta_info": {
+        "token_count": 232,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "severity": "high",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"Calibration diagnostics (convergence stats, parameter sensitivities, regularization paths)\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "BoCalibrator._compute_normalization_stats",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BoCalibrator._normalize_metric_minmax",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "BoCalibrator._run_bayesian_optimization",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "stdout shows objective values collapse to exactly 0.2000 from iteration 32 onward, with repeated trust-region contraction to ~0 and optimization_summary.total_improvements = 0 despite 300 trials and 370.97s runtime."
+        },
+        "error_identification": "The optimizer experiences objective collapse/plateau: many different candidates receive the same score (0.2000), so TuRBO repeatedly shrinks the trust region without meaningful progress.",
+        "root_cause_analysis": "BoCalibrator normalizes metrics using min-max stats from the first 20 evaluations, then clamps normalized values to [0,1]. Once candidates fall outside those initial ranges, components saturate to 0 or 1. Combined with the TransitionFit sign bug, the composite objective becomes piecewise constant, destroying BO signal.",
+        "correct_approach": "Use a stable objective without hard clipping, or update normalization adaptively from a rolling window/all observed points. Also log per-metric normalized values each iteration to detect saturation early. After fixing metric direction, consider optimizing a raw weighted loss directly.",
+        "key_insight": "For BO, objective shaping must preserve ranking resolution; clipping early-sampled min-max ranges often destroys the acquisition signal.",
+        "metric_links": [
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.6
+          },
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.4
+          }
+        ]
+      }
+    },
+    "runtime-excessive-for-short-series-bo-loop": {
+      "meta_info": {
+        "token_count": 204,
+        "status": "open",
+        "usage_count": 0,
+        "unusage_count": 0,
+        "success_attribution": 0,
+        "failure_attribution": 0
+      },
+      "reflection": {
+        "issue_type": "EVAL_SIGNAL",
+        "severity": "medium",
+        "from_user_feedback": false,
+        "blueprint_refs": [
+          "\"execution\": \"use gradient-based optimization or Bayesian optimization with cross-validated early stopping.\""
+        ],
+        "code_refs": [
+          {
+            "symbol": "BoCalibrator._run_bayesian_optimization",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "evaluate_on_validation",
+            "lines": "unknown"
+          },
+          {
+            "symbol": "main",
+            "lines": "unknown"
+          }
+        ],
+        "evidence": {
+          "user_feedback": null,
+          "error_logs": null,
+          "metrics": "execution_time is 370.97 seconds for a 15-day series with only 3 validation days, while stdout shows 300 BO iterations continue after objective stagnation at 0.2000."
+        },
+        "error_identification": "The run is computationally expensive relative to problem size and continues long after convergence has clearly stalled.",
+        "root_cause_analysis": "BoCalibrator._run_bayesian_optimization always runs the full 300 trials, repeatedly fitting a GP and evaluating candidates even when the objective is flat and trust region has shrunk to the minimum. The blueprint explicitly mentions early stopping, but no stagnation-based stop is implemented.",
+        "correct_approach": "Add early stopping criteria based on no improvement over a patience window, flat acquisition values, repeated duplicate objectives, or minimum trust-region size reached. Reduce k_runs during search more aggressively and reserve full K only for final validation.",
+        "key_insight": "When optimization diagnostics show a flat objective and collapsed trust region, stop the search instead of paying for identical evaluations.",
+        "metric_links": [
+          {
+            "name": "val_loss",
+            "direction": "lower_is_better",
+            "weight": 0.3
+          },
+          {
+            "name": "validation_objective_raw",
+            "direction": "lower_is_better",
+            "weight": 0.7
+          }
+        ]
+      }
+    }
+  },
+  "insights": {}
+}

@@ -39,6 +39,9 @@ class CodeGenerationAgent(BaseAgent):
         "Use the functions provided. When calling any helper function, only provide a "
         "RFC8259 compliant JSON request (no additional text or formatting)."
     )
+    PATCH_TEMPLATE_NAME: str = "code_generation_gsim_patch.txt"
+    PATCH_MAX_OUTPUT_TOKENS: Optional[int] = None
+    STRICT_PATCH_RESPONSE: bool = False
 
     def process(
         self,
@@ -382,7 +385,14 @@ class CodeGenerationAgent(BaseAgent):
             client = OpenAI(api_key=api_key)
             provider_cfg = global_config.get("llm_providers", {}).get("openai", {})
             model = provider_cfg.get("model", "gpt-4o")
-            max_output_tokens = provider_cfg.get("max_output_tokens") or provider_cfg.get("max_tokens", 100000)
+            configured_max_output_tokens = (
+                provider_cfg.get("max_output_tokens")
+                or provider_cfg.get("max_tokens", 100000)
+            )
+            max_output_tokens = (
+                self.PATCH_MAX_OUTPUT_TOKENS
+                or configured_max_output_tokens
+            )
 
             responses_kwargs: Dict[str, Any] = {
                 "model": model,
@@ -1511,6 +1521,11 @@ Respond as:
             )
         else:
             # Format for full template (uses all placeholders)
+            task_spec_str = (
+                json.dumps(task_spec, indent=2)
+                if task_spec
+                else "No task specification provided"
+            )
             # Extract blueprint from data_analysis_result (excluding file_summaries)
             blueprint = {k: v for k, v in task_spec.get("data_analysis_result", {}).items() if k != "file_summaries"}
             blueprint_str = json.dumps(blueprint, indent=2) if blueprint else "No blueprint provided"
@@ -1599,6 +1614,7 @@ Respond as:
                 
                 # Fill in the template with blueprint and file_summaries placeholders
                 prompt = prompt_template_with_patch.format(
+                    task_spec=task_spec_str,
                     blue_print=blueprint_str,
                     file_summaries=file_summaries_str,
                 )
@@ -1621,6 +1637,7 @@ Respond as:
                 prompt_template_with_patch = prompt_template.replace("{coding_patch}", coding_patch_content)
                 
                 prompt = prompt_template_with_patch.format(
+                    task_spec=task_spec_str,
                     blue_print=blueprint_str,
                     model_plan=model_plan_str,
                     data_analysis=data_analysis_str,
@@ -1689,11 +1706,13 @@ Respond as:
         # Load the gsim patch template
         try:
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            patch_template_path = os.path.join(project_root, "templates", "code_generation_gsim_patch.txt")
+            patch_template_path = os.path.join(
+                project_root, "templates", self.PATCH_TEMPLATE_NAME
+            )
             with open(patch_template_path, "r", encoding="utf-8") as f:
                 patch_template = f.read()
         except Exception as e:
-            self.logger.error(f"Failed to load code_generation_gsim_patch.txt: {e}")
+            self.logger.error(f"Failed to load {self.PATCH_TEMPLATE_NAME}: {e}")
             raise
 
         # Fill {completions} with best_simulator_info['code']
@@ -1732,7 +1751,6 @@ Respond as:
         patch_message = {
             "role": "user",
             "content": prompt,
-            "function_call": {"name": "complete_SimStep_code"},
         }
         if messages is not None:
             messages.append(patch_message)
@@ -1777,7 +1795,14 @@ Respond as:
             client = OpenAI(api_key=api_key)
             provider_cfg = _global_cfg.get("llm_providers", {}).get("openai", {})
             model = provider_cfg.get("model", "gpt-4o")
-            max_output_tokens = provider_cfg.get("max_output_tokens") or provider_cfg.get("max_tokens", 100000)
+            configured_max_output_tokens = (
+                provider_cfg.get("max_output_tokens")
+                or provider_cfg.get("max_tokens", 100000)
+            )
+            max_output_tokens = (
+                self.PATCH_MAX_OUTPUT_TOKENS
+                or configured_max_output_tokens
+            )
 
             responses_kwargs: Dict[str, Any] = {
                 "model": model,
@@ -1788,6 +1813,13 @@ Respond as:
                 "reasoning": {"effort": "medium"},
             }
             resp = client.responses.create(**responses_kwargs)
+            response_status = getattr(resp, "status", None)
+            if response_status == "incomplete":
+                incomplete_details = getattr(resp, "incomplete_details", None)
+                raise RuntimeError(
+                    "GSIM patch response was incomplete: "
+                    f"{incomplete_details}"
+                )
 
             for item in getattr(resp, "output", []):
                 if getattr(item, "type", None) == "function_call":
@@ -1802,8 +1834,16 @@ Respond as:
                                     "GSIM patch: successfully extracted SimulatorStep_code"
                                 )
                                 return code_out, desc_out
+                            if self.STRICT_PATCH_RESPONSE:
+                                raise RuntimeError(
+                                    "GSIM patch tool call returned empty SimulatorStep_code"
+                                )
                             return raw_args, desc_out
-                        except json.JSONDecodeError:
+                        except json.JSONDecodeError as parse_error:
+                            if self.STRICT_PATCH_RESPONSE:
+                                raise RuntimeError(
+                                    "GSIM patch tool arguments were incomplete or invalid JSON"
+                                ) from parse_error
                             return raw_args, ""
 
             output_text = getattr(resp, "output_text", None)
@@ -1812,9 +1852,15 @@ Respond as:
                 return output_text, ""
 
             self.logger.warning("GSIM patch: no usable output from Responses API")
+            if self.STRICT_PATCH_RESPONSE:
+                raise RuntimeError(
+                    "GSIM patch response contained no usable code output"
+                )
             return "", ""
 
         except Exception as exc:
+            if self.STRICT_PATCH_RESPONSE:
+                raise
             self.logger.error(f"GSIM patch: Responses API error ({exc}); falling back to _call_llm")
             return self._call_llm(prompt, reasoning={"effort": "medium"}), ""
 

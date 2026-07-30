@@ -115,7 +115,7 @@ class FeedbackGenerationAgent(BaseAgent):
             self.logger.info(f"{mode_name} mode: Using ACE-specific feedback generation workflow")
             
             # Step 2: Collect user feedback if in interactive mode
-            # Note: interactive=True only when --auto=False in test_data_analysis.py
+            # Note: interactive=True only when --auto=False in main.py
             # In auto mode (--auto=True), interactive=False, so user feedback collection is skipped
             user_feedback = None
             should_stop = False
@@ -874,8 +874,17 @@ class FeedbackGenerationAgent(BaseAgent):
             if simulation_info_history:
                 for hist_item in simulation_info_history:
                     iter_num = hist_item.get("iteration", "N/A")
-                    hist_results_json = hist_item.get("results_json", {})
-                    hist_metrics = hist_results_json.get("metrics", {}) if isinstance(hist_results_json, dict) else {}
+                    hist_results_json = hist_item.get("results_json") or {}
+                    hist_native_results = hist_item.get("simulation_results") or {}
+                    hist_metrics = (
+                        hist_results_json.get("metrics", {})
+                        if isinstance(hist_results_json, dict)
+                        else {}
+                    )
+                    if not hist_metrics and isinstance(hist_native_results, dict):
+                        hist_metrics = hist_native_results.get("simulation_metrics", {})
+                    if not hist_metrics:
+                        hist_metrics = hist_item.get("simulation_metrics", {}) or {}
                     
                     # Extract train_loss, val_loss, test_loss from metrics
                     train_loss = hist_metrics.get("train_loss", "N/A")
@@ -942,22 +951,59 @@ class FeedbackGenerationAgent(BaseAgent):
                 }
             
             # Extract current iteration data
-            current_results_json = current_iteration_info.get("results_json", {}) if current_iteration_info else {}
+            current_results_json = (
+                current_iteration_info.get("results_json") or {}
+                if current_iteration_info
+                else {}
+            )
+            current_native_results = (
+                current_iteration_info.get("simulation_results") or {}
+                if current_iteration_info
+                else {}
+            )
             current_code_from_history = current_iteration_info.get("code") if current_iteration_info else None
             
-            # {simulation_metrics}: 当前迭代的["results_json"]["metrics"]
-            simulation_metrics_dict = current_results_json.get("metrics", {}) if isinstance(current_results_json, dict) else {}
+            # Support both the mask results.json contract and task-native
+            # executor payloads such as llmob's simulation_metrics plus
+            # evaluation_results_on_validation.
+            simulation_metrics_dict = (
+                current_results_json.get("metrics", {})
+                if isinstance(current_results_json, dict)
+                else {}
+            )
+            if not simulation_metrics_dict and isinstance(current_native_results, dict):
+                simulation_metrics_dict = current_native_results.get("simulation_metrics", {})
+            if not simulation_metrics_dict and current_iteration_info:
+                simulation_metrics_dict = current_iteration_info.get("simulation_metrics", {}) or {}
             simulation_metrics_str = json.dumps(simulation_metrics_dict, indent=2, ensure_ascii=False) if simulation_metrics_dict else "No simulation metrics available"
             
             # {code_content}: 当前迭代的["code"]
             code_content_str = current_code_from_history if current_code_from_history else (current_code if current_code else "No code provided")
             
-            # {calibrated_parameters}: 当前迭代的["results_json"]["optimized_parameters"]
-            calibrated_parameters_dict = current_results_json.get("optimized_parameters", {}) if isinstance(current_results_json, dict) else {}
+            # Accept both native G-SIM optimized_parameters and the
+            # SOCIA/ACE-compatible mask schema's parameters field.
+            calibrated_parameters_dict = (
+                current_results_json.get(
+                    "optimized_parameters",
+                    current_results_json.get("parameters", {}),
+                )
+                if isinstance(current_results_json, dict)
+                else {}
+            )
+            if not calibrated_parameters_dict and isinstance(current_native_results, dict):
+                calibrated_parameters_dict = current_native_results.get(
+                    "calibrated_parameters", {}
+                )
+            if not calibrated_parameters_dict and current_iteration_info:
+                calibrated_parameters_dict = (
+                    current_iteration_info.get("optimized_parameters", {}) or {}
+                )
             calibrated_parameters_str = json.dumps(calibrated_parameters_dict, indent=2, ensure_ascii=False) if calibrated_parameters_dict else "No calibrated parameters available"
             
-            # {simulation_results}: 当前迭代的["results_json"]
-            simulation_results_str = json.dumps(current_results_json, indent=2, default=str, ensure_ascii=False) if current_results_json else "No simulation results available"
+            # Prefer results.json for mask tasks; otherwise expose the complete
+            # task-native executor payload to the same reflection prompt.
+            prompt_results = current_results_json or current_native_results
+            simulation_results_str = json.dumps(prompt_results, indent=2, default=str, ensure_ascii=False) if prompt_results else "No simulation results available"
             
             # {available_metric_keys}: 当前迭代的["results_json"]["metrics"]的所有keys
             available_metric_keys = list(simulation_metrics_dict.keys()) if isinstance(simulation_metrics_dict, dict) else []

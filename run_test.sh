@@ -8,11 +8,11 @@ echo "Starting DataAnalysisAgent test..."
 echo "PROJECT_ROOT: $PROJECT_ROOT"
 echo "DATA_PATH: $DATA_PATH"
 
-python test_data_analysis.py \
+python main.py \
     --task "Develop a multi-agent simulation system to simulate the review and star a user will comment on a product." \
     --task-file examples/agent_society.json \
-    --mode full \
+    --mode ace \
     --output ./output/agent_society_test_data_analysis \
     --debug
 
-echo "Test completed. Check the output directory for results." 
+echo "Test completed. Check the output directory for results."

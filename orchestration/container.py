@@ -18,6 +18,7 @@ from agents.code_generation_odd.agent import CodeGenerationAgent as CodeGenerati
 from agents.code_generation_ace.agent import CodeGenerationAgent as CodeGenerationAceAgent
 from agents.code_generation_alpha.agent import CodeGenerationAgent as CodeGenerationAlphaAgent
 from agents.code_generation_gsim.agent import CodeGenerationAgent as CodeGenerationGsimAgent
+from agents.code_generation_srr.agent import CodeGenerationAgent as CodeGenerationSrrAgent
 from agents.code_verification.agent import CodeVerificationAgent
 from agents.simulation_execution.agent import SimulationExecutionAgent
 from agents.simulation_execution_ace.agent import SimulationExecutionAgent as SimulationExecutionAceAgent
@@ -29,6 +30,7 @@ from agents.feedback_generation_odd.agent import FeedbackGenerationOddAgent
 from agents.feedback_generation_ace.agent import FeedbackGenerationAgent as FeedbackGenerationAceAgent
 from agents.feedback_generation_alpha.agent import FeedbackGenerationAgent as FeedbackGenerationAlphaAgent
 from agents.feedback_generation_gsim.agent import FeedbackGenerationAgent as FeedbackGenerationGsimAgent
+from agents.feedback_generation_srr.agent import FeedbackGenerationAgent as FeedbackGenerationSrrAgent
 from agents.iteration_control.agent import IterationControlAgent
 from agents.iteration_control_ace.agent import IterationControlAgent as IterationControlAceAgent
 
@@ -74,9 +76,11 @@ class AgentContainer(containers.DeclarativeContainer):
             "code_generation_ace": {"prompt_template": "templates/code_generation_odd_prompt.txt", "output_format": "python"},
             "code_generation_alpha": {"prompt_template": "templates/code_generation_ace_prompt.txt", "output_format": "python"},
             "code_generation_gsim": {"prompt_template": "templates/code_generation_ace_prompt.txt", "output_format": "python"},
+            "code_generation_srr": {"prompt_template": "templates/code_generation_srr_prompt.txt", "output_format": "python"},
             "data_analysis_gsim": {"prompt_template": "templates/data_analysis_alpha_prompt.txt", "output_format": "json"},
             "simulation_execution_gsim": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
             "feedback_generation_gsim": {"prompt_template": "templates/feedback_generation_gsim_prompt.txt", "output_format": "json"},
+            "feedback_generation_srr": {"prompt_template": "templates/feedback_generation_srr_prompt.txt", "output_format": "json"},
             "code_verification": {"prompt_template": "templates/code_verification_prompt.txt", "output_format": "json"},
             "simulation_execution": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
             "simulation_execution_ace": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
@@ -154,6 +158,11 @@ class AgentContainer(containers.DeclarativeContainer):
         CodeGenerationGsimAgent,
         config=config.agents.code_generation_gsim
     )
+
+    code_generation_srr_agent = providers.Factory(
+        CodeGenerationSrrAgent,
+        config=config.agents.code_generation_srr
+    )
     
     code_verification_agent = providers.Factory(
         CodeVerificationAgent,
@@ -215,6 +224,11 @@ class AgentContainer(containers.DeclarativeContainer):
         FeedbackGenerationGsimAgent,
         config=config.agents.feedback_generation_gsim
     )
+
+    feedback_generation_srr_agent = providers.Factory(
+        FeedbackGenerationSrrAgent,
+        config=config.agents.feedback_generation_srr
+    )
     
     iteration_control_agent = providers.Factory(
         IterationControlAgent,
@@ -240,9 +254,11 @@ class AgentContainer(containers.DeclarativeContainer):
             "code_generation_ace": code_generation_ace_agent,
             "code_generation_alpha": code_generation_alpha_agent,
             "code_generation_gsim": code_generation_gsim_agent,
+            "code_generation_srr": code_generation_srr_agent,
             "data_analysis_gsim": data_analysis_gsim_agent,
             "simulation_execution_gsim": simulation_execution_gsim_agent,
             "feedback_generation_gsim": feedback_generation_gsim_agent,
+            "feedback_generation_srr": feedback_generation_srr_agent,
             "code_verification": code_verification_agent,
             "simulation_execution": simulation_execution_agent,
             "simulation_execution_ace": simulation_execution_ace_agent,
