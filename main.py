@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Test script for DataAnalysisOddAgent
-SOCIA command-line entry point for simulator construction and refinement.
-"""
+"""Command-line entry point for SOCIA simulator construction workflows."""
 
 import argparse
 import logging
@@ -45,11 +42,11 @@ def setup_logging(output_path: Optional[str] = None, debug: bool = False):
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=handlers
     )
-    return logging.getLogger('SOCIA.DataAnalysisOddTest')
+    return logging.getLogger('SOCIA.Main')
 
 def parse_arguments():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Test script for SOCIA DataAnalysisOddAgent')
+    parser = argparse.ArgumentParser(description='Run a SOCIA simulator-construction workflow.')
     parser.add_argument('--task', type=str, required=True, help='Description of the simulation task')
     parser.add_argument('--task-file', type=str, help='Path to task description JSON file')
     parser.add_argument('--output', type=str, default='./output', help='Path to output directory')
@@ -2219,7 +2216,7 @@ def main():
     # Check API key
     if not check_api_key():
         logger.error("OpenAI API key not found in keys.py")
-        logger.info("Please set up your API key using: python main.py --setup-api-key")
+        logger.info("Please set up your API key using: python setup_api_key.py")
         return 1
     
     # Set up the dependency injection container

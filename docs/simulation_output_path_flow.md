@@ -2,7 +2,7 @@
 
 ## 📍 完整调用链
 
-### 1️⃣ 入口：`main.py` (Line 1449-1458)
+### 1️⃣ 入口：`main.py`
 
 ```python
 state["simulation_results"] = agents["simulation_execution"].process(
@@ -164,7 +164,7 @@ main.py 接收结果
 
 | 步骤 | 文件 | 行号 | 功能 |
 |-----|------|------|------|
-| **1. 调用** | `main.py` | 1449-1458 | 传递 `output_dir` 和 `iteration` |
+| **1. 调用** | `main.py` | 工作流主循环 | 传递 `output_dir` 和 `iteration` |
 | **2. 生成路径** | `agents/simulation_execution_ace/agent.py` | 214-216 | 生成 `simulation_results_iter_{N}.json` 路径 |
 | **3. 传递路径** | `agents/simulation_execution_ace/agent.py` | 222 | 传递给 `_execute_code_with_subprocess` |
 | **4. 构建命令** | `agents/simulation_execution_ace/agent.py` | 65-66 | 添加 `--output` 参数到命令 |

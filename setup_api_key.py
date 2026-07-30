@@ -109,8 +109,7 @@ def main():
     save_to_keys_py(openai_key, gemini_key)
     
     print("\nThe application will now read the API key(s) from keys.py.")
-    print("To test your configuration, update the provider in config.yaml and run:")
-    print("python main.py --run-example")
+    print("To run SOCIA after configuration, see the commands in README.md.")
 
 if __name__ == "__main__":
-    main() 
+    main()

@@ -1,63 +1,82 @@
-<p align="center">
-  <img src="docs/images/socia_logo_large.png" alt="SOCIA Logo" width="200px" />
-</p>
+# SOCIA
 
-# SOCIA: Simulation Orchestration for Computational Intelligence with Agents
-
-SOCIA constructs and refines executable social simulators through a structured blueprint, fixed-structure calibration, and evidence-based diagnosis and repair. This repository includes the ACE workflow and the focused experiments used to evaluate controlled mechanism recovery and predicted counterfactual consistency.
+SOCIA constructs and refines executable social simulators with a structured simulator blueprint, calibration, and evidence-based repair. This repository contains the ACE workflow used for the main experiments, plus scripts and frozen artifacts for the controlled supplementary experiments.
 
 ## Usage
 
-Run all commands from the repository root. Install the environment first, configure the API key in `keys.py`, and set the project and data paths:
+### Installation
+
+Create the project environment and install the pinned dependencies:
 
 ```bash
 conda activate SOCIA
 pip install -r requirements.txt
-export PROJECT_ROOT="$(pwd)"
-export DATA_PATH="data_fitting/mask_adoption_data/"
 ```
 
-### SOCIA ACE workflow
+Set an OpenAI key in `keys.py` with `python setup_api_key.py`, or provide it through the environment if your local configuration supports that. Run all commands from the repository root.
 
-This is the main command for an ACE-mode mask-adoption run. It writes the task specification, generated simulator snapshots, calibration artifacts, diagnosis/repair artifacts, playbook, and log below the selected output directory.
+### Main SOCIA ACE workflow
+
+The primary command-line entry point is `main.py`. The following command runs the ACE workflow on Mask Adoption, producing all per-iteration code, metrics, feedback, and playbook artifacts in the chosen output directory:
 
 ```bash
+conda activate SOCIA && \
+export PROJECT_ROOT="$(pwd)" && \
+export DATA_PATH="data_fitting/mask_adoption_data/" && \
 python main.py \
   --task "Develop a multi-agent simulation system that models the spread of mask-wearing behavior through social networks." \
-  --task-file examples/mask_adoption_task.json \
-  --output output/together_llama3.3-70b_ace_code_mask \
+  --task-file "examples/mask_adoption_task.json" \
+  --output "output/ace_mask_adoption" \
   --selfloop 3 \
   --mode ace \
   --auto \
   --iterations 3
 ```
 
-Use `python main.py --help` to view the complete command-line interface. The LLM key is read from `keys.py`; create it with `python setup_api_key.py` if needed.
+`--auto` enables non-interactive execution. Omit it to supply feedback interactively. `--iterations` caps outer repair iterations; `--selfloop` caps code-generation self-check attempts.
 
-### A+B: controlled injected-defect recovery and matched recalibration
+### A+B: known-defect recovery experiments
 
-The A+B study creates the seven isolated mask-adoption defects (D1–D7), runs the frozen SRR comparison, and performs fixed 300-trial BO+TuRBO recalibration over the saved G-SIM and selected SOCIA snapshots. The latter two stages are snapshot-based and do not make agent/API calls.
+The A+B controlled experiments start from the seven pre-specified Mask Adoption defects (D1–D7). The following runner prepares each frozen injected starting point, runs the matched structured-reflection (SRR) baseline with BO+TuRBO preserved, and writes an auditable artifact gate and progress record:
 
 ```bash
-# 1. Generate the D1--D7 starting programs and run the SRR recovery suite.
+conda activate SOCIA && \
+export PROJECT_ROOT="$(pwd)" && \
+export DATA_PATH="data_fitting/mask_adoption_data/" && \
 python scripts/run_srr_defect_suite.py \
-  --output output/test_mask_patch_srr_error_injection_frozen \
+  --output output/ab_srr_defect_suite \
+  --defects D1 D2 D3 D4 D5 D6 D7 \
   --iterations 3
+```
 
-# 2. Reproduce matched G-SIM BO+TuRBO recalibration (all saved snapshots).
+For a SOCIA ACE recovery run on one prepared defect, first prepare the suite, then supply the generated task specification and corrupted simulator snapshot to `main.py`:
+
+```bash
+python scripts/prepare_srr_defect_suite.py --destination output/ab_socia_defect_suite
+
+python main.py \
+  --task "Develop a multi-agent simulation system that models the spread of mask-wearing behavior through social networks." \
+  --task-file examples/mask_adoption_task.json \
+  --output output/ab_socia_defect_suite/injected_error_D1 \
+  --mode ace --auto --selfloop 3 --iterations 3 \
+  --persisted-data-analysis-file output/ab_socia_defect_suite/injected_error_D1/task_spec_iter_0.json \
+  --persisted-code-file output/ab_socia_defect_suite/injected_error_D1/simulation_code_using_calibration_template_SBI_BO_TuRBO_EVO_error_injection.py
+```
+
+The checked-in `output/experiment_A_gsim_BO_recalibration/` and `output/experiment_socia_selected_logit_bo_recalibration/` manifests record the fixed snapshots and BO+TuRBO recalibration artifacts used in the reported matched comparison.
+
+To regenerate the matched recalibration artifacts from the saved snapshots, run:
+
+```bash
 python scripts/prepare_gsim_bo_recalibration.py
 python scripts/run_gsim_bo_recalibration.py --workers 4
-
-# 3. Reproduce fixed BO+TuRBO recalibration of selected SOCIA snapshots.
 python scripts/prepare_socia_selected_bo_recalibration.py
 python scripts/run_socia_selected_bo_recalibration.py --workers 4
 ```
 
-The exact source snapshots and their hashes are recorded in the generated `manifest.json` files. The comparison summary is in `output/experiment_A_gsim_BO_recalibration/SOCIA_vs_GSIM.md`.
-
 ### C: exploratory layer-weight operability probes
 
-Experiment C evaluates whether the three blueprint-level social-layer weights are behaviorally operative in frozen snapshots. It is explicitly exploratory and is not part of the confirmatory counterfactual score.
+Experiment C checks whether the three blueprint-level social-layer weights are behaviorally operative in frozen snapshots. It is explicitly exploratory and is not part of the confirmatory counterfactual score.
 
 ```bash
 python scripts/fixed_snapshot_layer_weight_probes.py \
@@ -68,50 +87,75 @@ python scripts/fixed_snapshot_layer_weight_probes.py \
 
 ### Predicted Counterfactual Consistency Probes
 
-This evaluation compares fixed simulator snapshots under pre-specified intervention, social, persistence, and risk probes. The runner prevents calibration, fitting, diagnosis, repair, selection, and parameter updates based on probe outcomes.
+This experiment evaluates frozen simulator snapshots under pre-registered intervention, social, persistence, and risk probes. The evaluator does not invoke SOCIA orchestration, calibration, LLM diagnosis, code generation, repair, or selection.
 
 ```bash
+conda activate SOCIA && \
 python scripts/fixed_snapshot_counterfactual_eval.py \
   --manifest experiments/fixed_snapshot_counterfactual/manifest.json \
   --output output/fixed_snapshot_counterfactual_confirmatory
 ```
 
-To regenerate only the report from existing probe artifacts, append `--summarize-only`.
+To reproduce only the summary from an existing output directory, add `--summarize-only`. The exploratory layer-weight operability probes are intentionally separate from the confirmatory score:
+
+```bash
+python scripts/fixed_snapshot_layer_weight_probes.py \
+  --manifest experiments/fixed_snapshot_counterfactual/manifest.json \
+  --probe-manifest experiments/fixed_snapshot_counterfactual/layer_weight_exploratory_manifest.json \
+  --output output/fixed_snapshot_layer_weight_exploratory
+```
+
+## Workflow agents
+
+The paper's ACE workflow uses the following roles:
+
+- **Task understanding / blueprinting** translates the task and available data into a structured simulator specification.
+- **Data analysis** derives data semantics, empirical targets, and diagnostic evidence.
+- **Code generation** produces the initial simulator and applies bounded structural repairs.
+- **Simulation execution** runs the generated simulator and collects structured artifacts.
+- **Feedback generation (Evidence-to-Text)** maps residuals and code context to explicit mechanism-level diagnoses and repair strategies.
+- **Iteration control** accepts only improving candidates and manages the outer calibration/repair loop.
+- **Playbook manager** persists and retrieves prior diagnosis-and-repair knowledge across ACE iterations.
+
+Calibration is performed by the simulator code using the configured fixed-structure calibration routine (for example BO+TuRBO or SBI); it is not a separate LLM agent.
+
+## Outputs and logs
+
+For a main run with `--output output/ace_mask_adoption`, the key artifacts are:
+
+```text
+output/ace_mask_adoption/
+├── socia.log
+├── task_spec_iter_0.json
+├── simulation_code_iter_<n>.py
+├── simulation_results_iter_<n>.json
+├── feedback_iter_<n>.json
+├── verification_results_iter_<n>.json
+└── output_iter_<n>/
+    ├── results.json
+    └── calibrated_parameters.json
+```
+
+The precise artifacts vary when a generated simulator changes its internal calibration backend. ACE playbook snapshots are stored under `playbook_storage/`.
 
 ## Project structure
 
 ```text
-main.py                         Main CLI entry point for SOCIA workflows
-agents/                         Mode-specific implementations of workflow agents
-core/                           Blueprint and ACE playbook persistence
-orchestration/                  Dependency-injection container and workflow support
-templates/                      Prompts used by generation and diagnosis agents
-examples/                       Task specifications
-data_fitting/                   Task data and calibration inputs
-experiments/                    Frozen manifests for counterfactual experiments
-scripts/                        Reproducible A+B, C, and counterfactual runners
-output/                         Run artifacts, frozen snapshots, summaries, and logs
-requirements.txt                Python dependencies
-config.yaml                     Active runtime configuration
+SOCIA/
+├── main.py                         # primary ACE/experimental workflow entry point
+├── agents/                         # workflow-agent implementations and mode variants
+├── core/                           # blueprint, simulation, and playbook state
+├── orchestration/                  # dependency-injection container and workflow support
+├── templates/                      # prompts used by generation and diagnosis roles
+├── examples/                       # task specifications
+├── data_fitting/                   # benchmark data and calibration inputs
+├── scripts/                        # A+B and fixed-snapshot experiment runners
+├── experiments/                    # immutable probe manifests
+├── output/                         # experiment artifacts and reported snapshots
+├── playbook_storage/               # ACE playbook state and snapshots
+└── requirements.txt
 ```
 
-## Outputs and logs
+## Reproduction notes
 
-Each main workflow run writes its artifacts to the directory supplied through `--output`. Key files include `task_spec_iter_*.json`, `simulation_code_iter_*.py`, `simulation_results_iter_*.json`, `verification_results_iter_*.json` (when applicable), `output_iter_*/`, and `socia.log`. ACE playbook snapshots are stored under `playbook_storage/`.
-
-The experiment runners also write manifests, checksums, per-run logs, machine-readable summaries, and result tables to their requested output folders. Existing valid fixed-snapshot calibration artifacts are reused only when their schema and fixed-budget checks pass.
-
-## Agents used in the ACE workflow
-
-- **Task Understanding / Chain-of-Structure agent**: converts the task and data constraints into the simulator blueprint and mechanism requirements.
-- **Data Analysis agent**: derives data semantics, empirical targets, and calibration/evaluation interfaces used by the simulator.
-- **Code Generation agent**: turns the blueprint and current repair strategy into executable simulator code while preserving the required interface.
-- **Simulation Execution agent**: executes generated simulator code and collects the calibration and behavioural results.
-- **Evidence-Based Diagnosis (Feedback Generation) agent**: maps residual patterns to a localized mechanism hypothesis and an actionable code-level repair strategy.
-- **Iteration Control agent**: accepts or rejects candidates, preserves the best-so-far simulator, and coordinates the next calibration/repair iteration.
-
-The ACE playbook records reusable diagnosis and repair evidence across iterations. Auxiliary legacy or baseline-specific agents remain in the source tree for the experiments but are not part of the ACE workflow described above.
-
-## Disclaimer
-
-SOCIA generates simulator code using backbone LLMs. Generated simulators are research artifacts and are supplied without guarantees of accuracy, safety, or fitness for consequential financial, medical, legal, or policy decisions.
+`README.md` commands are intended to be run from the repository root. The data paths and frozen artifact paths in the supplementary commands are repository-relative. The fixed-snapshot manifests record the exact code and parameter snapshots, selected iterations, seeds, and prohibitions used by the counterfactual evaluation.
