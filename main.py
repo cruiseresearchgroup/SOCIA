@@ -52,7 +52,7 @@ def parse_arguments():
     parser.add_argument('--output', type=str, default='./output', help='Path to output directory')
     parser.add_argument('--config', type=str, default='./config.yaml', help='Path to configuration file')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
-    parser.add_argument('--mode', type=str.lower, default='persona', choices=['lite', 'medium', 'persona', 'blueprint', 'odd', 'ace', 'alpha', 'gsim', 'srr'], help='Workflow mode')
+    parser.add_argument('--mode', type=str.lower, default='persona', choices=['lite', 'medium', 'persona', 'blueprint', 'odd', 'ace', 'alpha', 'gsim', 'random', 'srr'], help='Workflow mode')
     parser.add_argument('--selfloop', type=int, default=3, help='Number of self-checking loop attempts for code generation')
     parser.add_argument('--persisted-data-analysis-file', type=str, help='Path to persisted data analysis file (task_spec.json) to skip data analysis phase')
     parser.add_argument('--persisted-code-file', type=str, help='Path to persisted code file (simulation_code_iter_N.py) to skip data analysis and initial code generation')
@@ -121,13 +121,65 @@ def load_task_data(task_file_path: str) -> Optional[Dict[str, Any]]:
     """Load task data from JSON file."""
     if not task_file_path or not os.path.exists(task_file_path):
         return None
-    
     try:
         with open(task_file_path, 'r') as f:
             return json.load(f)
     except Exception as e:
         logging.error(f"Error loading task file {task_file_path}: {e}")
         return None
+
+
+def _collect_named_values(value: Any, key_name: str) -> list:
+    """Recursively collect values for an exact metadata key."""
+    found = []
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key == key_name:
+                found.append(nested)
+            found.extend(_collect_named_values(nested, key_name))
+    elif isinstance(value, list):
+        for nested in value:
+            found.extend(_collect_named_values(nested, key_name))
+    return found
+
+
+def audit_random_calibrator_result(
+    simulation_results: Dict[str, Any],
+    output_path: str,
+    iteration: int,
+) -> Dict[str, Any]:
+    """Prove that a completed random-mode run actually used random search."""
+    payloads = [simulation_results]
+    output_dir = os.path.join(output_path, f"output_iter_{iteration}")
+    for filename in ("results.json", "calibrated_parameters.json"):
+        path = os.path.join(output_dir, filename)
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                payloads.append(json.load(handle))
+
+    names = []
+    for payload in payloads:
+        names.extend(_collect_named_values(payload, "calibrator_name"))
+    normalized = sorted(
+        {
+            str(name).strip().lower()
+            for name in names
+            if name is not None and str(name).strip()
+        }
+    )
+    passed = normalized == ["random_search"]
+    audit = {
+        "passed": passed,
+        "required_calibrator": "random_search",
+        "reported_calibrators": normalized,
+        "iteration": iteration,
+    }
+    if not passed:
+        raise RuntimeError(
+            "Random mode runtime calibrator audit failed: "
+            f"expected only random_search, found {normalized or 'no metadata'}"
+        )
+    return audit
 
 def extract_data_path_from_task_file(task_file_path: str, task_data: Dict[str, Any]) -> Optional[str]:
     """Extract data path from task file, resolving relative paths."""
@@ -940,15 +992,15 @@ def run_data_analysis_test(
             feedback_generation_agent = agent_container.feedback_generation_alpha_agent()
             logger.info("Alpha mode: Using feedback_generation_alpha_agent for feedback generation")
             iteration_control_agent = agent_container.iteration_control_ace_agent()
-        elif args.mode == "gsim":
+        elif args.mode in ["gsim", "random"]:
             data_analysis_agent = agent_container.data_analysis_gsim_agent()
-            logger.info("Gsim mode: Using data_analysis_gsim_agent for data analysis")
+            logger.info(f"{args.mode.upper()} mode: Using data_analysis_gsim_agent for data analysis")
             code_generation_agent = agent_container.code_generation_gsim_agent()
-            logger.info("Gsim mode: Using code_generation_gsim_agent for code generation")
+            logger.info(f"{args.mode.upper()} mode: Using code_generation_gsim_agent for code generation")
             simulation_execution_agent = agent_container.simulation_execution_gsim_agent()
-            logger.info("Gsim mode: Using simulation_execution_gsim_agent for execution")
+            logger.info(f"{args.mode.upper()} mode: Using simulation_execution_gsim_agent for execution")
             feedback_generation_agent = agent_container.feedback_generation_gsim_agent()
-            logger.info("Gsim mode: Using feedback_generation_gsim_agent for feedback generation")
+            logger.info(f"{args.mode.upper()} mode: Using feedback_generation_gsim_agent for feedback generation")
             iteration_control_agent = agent_container.iteration_control_ace_agent()
         elif args.mode == "srr":
             data_analysis_agent = agent_container.data_analysis_gsim_agent()
@@ -1003,7 +1055,7 @@ def run_data_analysis_test(
         # Shared conversation message list for gsim mode.
         # Stores list[{"role": str, "content": str}] that grows across code-gen
         # and feedback-gen calls, enabling multi-turn LLM conversations.
-        if args.mode in ["gsim", "srr"]:
+        if args.mode in ["gsim", "random", "srr"]:
             state["messages"] = []
         
         # Initialize historical fix log
@@ -1082,7 +1134,7 @@ def run_data_analysis_test(
             
             # For persisted start, load simulator_description from generated_code_iter_<persisted_iteration>.json
             # instead of regenerating it from code.
-            if args.mode in ["alpha", "gsim", "srr"]:
+            if args.mode in ["alpha", "gsim", "random", "srr"]:
                 persisted_generated_json = os.path.join(
                     args.output, f"generated_code_iter_{persisted_iteration}.json"
                 )
@@ -1180,7 +1232,7 @@ def run_data_analysis_test(
             # For gsim mode: reconstruct the two messages that would have been sent
             # to the LLM during the persisted iteration's code generation, so that
             # subsequent feedback generation can continue the conversation naturally.
-            if args.mode in ["gsim", "srr"] and "messages" in state:
+            if args.mode in ["gsim", "random", "srr"] and "messages" in state:
                 try:
                     _cg_agent = agents["code_generation"]
                     # Build the same prompt_args that _build_prompt() would receive
@@ -1286,7 +1338,7 @@ def run_data_analysis_test(
         # ==================================================
         # BLUEPRINT FEEDBACK AFTER DATA ANALYSIS (ACE/ALPHA mode only)
         # ==================================================
-        if args.mode in ["ace", "alpha", "gsim"]:
+        if args.mode in ["ace", "alpha", "gsim", "random"]:
             logger.info("=" * 50)
             logger.info("BLUEPRINT FEEDBACK AFTER DATA ANALYSIS (ACE mode)")
             logger.info("=" * 50)
@@ -1335,7 +1387,7 @@ def run_data_analysis_test(
         # Initialize best_simulator_info and simulation_info_history for alpha mode (track best code across iterations)
         best_simulator_info = None
         simulation_info_history = []
-        if args.mode in ["alpha", "gsim", "srr"]:
+        if args.mode in ["alpha", "gsim", "random", "srr"]:
             logger.info("Alpha mode: Initializing best_simulator_info tracker and simulation_info_history")
             
             # Try to load simulation_info_history from previous run
@@ -1492,7 +1544,7 @@ def run_data_analysis_test(
                     process_kwargs["playbook"] = playbook
                 
                 # Add best_simulator_info and simulation_info_history for alpha mode
-                if args.mode in ["alpha", "gsim", "srr"]:
+                if args.mode in ["alpha", "gsim", "random", "srr"]:
                     if best_simulator_info is not None:
                         process_kwargs["best_simulator_info"] = best_simulator_info
                         if best_simulator_info.get("iteration") is not None:
@@ -1506,7 +1558,7 @@ def run_data_analysis_test(
 
                 # Pass shared message list to code_generation_gsim so it can
                 # append the [system, user] messages it sends to the LLM.
-                if args.mode in ["gsim", "srr"] and "messages" in state:
+                if args.mode in ["gsim", "random", "srr"] and "messages" in state:
                     process_kwargs["messages"] = state["messages"]
                 
                 state["generated_code"] = agents["code_generation"].process(**process_kwargs)
@@ -1559,7 +1611,7 @@ def run_data_analysis_test(
                 save_artifact(args.output, f"evaluation_results_iter_{current_iteration}", state["evaluation_results"])
                 logger.info(f"{args.mode.upper()} mode: Placeholders created for verification, simulation, and evaluation results")
             # ACE/ALPHA mode: Skip verification, but execute simulation
-            elif args.mode in ["ace", "alpha", "gsim", "srr"]:
+            elif args.mode in ["ace", "alpha", "gsim", "random", "srr"]:
                 logger.info(f"{args.mode.upper()} mode: Skipping verification, but executing simulation")
                 state["verification_results"] = {
                     "placeholder": True,
@@ -1628,13 +1680,25 @@ def run_data_analysis_test(
                         project_root=project_root,
                         openai_api_key=openai_api_key
                     )
+                    if (
+                        args.mode == "random"
+                        and state["simulation_results"].get("execution_status")
+                        == "success"
+                    ):
+                        state["simulation_results"]["random_calibrator_audit"] = (
+                            audit_random_calibrator_result(
+                                state["simulation_results"],
+                                args.output,
+                                current_iteration,
+                            )
+                        )
                     save_artifact(args.output, f"simulation_results_iter_{current_iteration}", state["simulation_results"])
                 
                 if state["simulation_results"] and state["simulation_results"].get("execution_status") == "success":
                     logger.info(f"✅ Simulation execution completed successfully")
                     
                     # Update simulation_info_history and best_simulator_info for alpha mode
-                    if args.mode in ["alpha", "gsim", "srr"]:
+                    if args.mode in ["alpha", "gsim", "random", "srr"]:
                         # Prefer the common scalar val_loss. Daily-mobility
                         # simulators expose their scalar validation objective
                         # in evaluation_results_on_validation instead.
@@ -1687,15 +1751,15 @@ def run_data_analysis_test(
                                 task_spec.get("description", "") if task_spec else ""
                             ).lower()
                             _is_gsim_mask = (
-                                args.mode in ["gsim", "srr"]
+                                args.mode in ["gsim", "random", "srr"]
                                 and "mask-wearing behavior" in _task_description_lower
                             )
                             _is_daily_mobility = (
-                                args.mode in ["gsim", "srr"]
+                                args.mode in ["gsim", "random", "srr"]
                                 and "daily mobility trajectories" in _task_description_lower
                             )
                             _is_user_modeling = (
-                                args.mode in ["gsim", "srr"]
+                                args.mode in ["gsim", "random", "srr"]
                                 and "user rates a given item" in _task_description_lower
                             )
                             _gsim_simulation_metrics = None
@@ -1863,7 +1927,7 @@ def run_data_analysis_test(
             # --------------------------------------------------
             # STEP 5: Blueprint Feedback (ACE/ALPHA mode only)
             # --------------------------------------------------
-            if args.mode in ["ace", "alpha", "gsim"]:
+            if args.mode in ["ace", "alpha", "gsim", "random"]:
                 logger.info("BLUEPRINT FEEDBACK (ACE/ALPHA mode)")
                 
                 # Extract current blueprint from task_spec
@@ -1963,7 +2027,7 @@ def run_data_analysis_test(
             }
             
             # Add best_simulator_info and simulation_info_history for alpha mode
-            if args.mode in ["alpha", "gsim", "srr"]:
+            if args.mode in ["alpha", "gsim", "random", "srr"]:
                 if best_simulator_info is not None:
                     process_kwargs["best_simulator_info"] = best_simulator_info
                     if best_simulator_info.get("iteration") is not None:
@@ -1977,7 +2041,7 @@ def run_data_analysis_test(
 
                 # Pass shared message list to feedback_generation_gsim so it can
                 # append the feedback user-message and the assistant reply in-place.
-                if args.mode in ["gsim", "srr"] and "messages" in state:
+                if args.mode in ["gsim", "random", "srr"] and "messages" in state:
                     process_kwargs["messages"] = state["messages"]
 
             # Call feedback generation agent
@@ -2125,7 +2189,7 @@ def run_data_analysis_test(
             # The #STOP# check is now done in the main workflow before calling iteration_control
             # ACE/ALPHA mode uses decision function with simulation_results and feedback
             # Other modes use LLM-based iteration control
-            if args.mode in ["ace", "alpha", "gsim", "srr"]:
+            if args.mode in ["ace", "alpha", "gsim", "random", "srr"]:
                 state["iteration_decision"] = agents["iteration_control"].process(
                     current_iteration=current_iteration,
                     max_iterations=args.iterations,
@@ -2159,11 +2223,15 @@ def run_data_analysis_test(
         # ==================================================
         # FINAL SUMMARY
         # ==================================================
-        # Note: After loop ends, current_iteration is the next iteration number
-        # So the last completed iteration is current_iteration - 1
-        # But if we completed N iterations (0 to N-1), current_iteration = N
-        final_iteration = current_iteration  # This is the total number of iterations completed
-        last_code_iteration = current_iteration - 1 if current_iteration > 0 else 0
+        # A STOP decision breaks before current_iteration is incremented, while
+        # exhausting the while loop leaves it pointing one past the last run.
+        stopped_on_current_iteration = current_iteration < args.iterations
+        if stopped_on_current_iteration:
+            final_iteration = current_iteration + 1
+            last_code_iteration = current_iteration
+        else:
+            final_iteration = current_iteration
+            last_code_iteration = max(current_iteration - 1, 0)
         
         # Finalize playbook (session level)
         if playbook_manager and args.mode in ["ace", "alpha"]:

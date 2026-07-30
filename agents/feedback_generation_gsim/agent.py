@@ -102,7 +102,7 @@ class FeedbackGenerationAgent(BaseAgent):
         # Step 1: Detect work mode
         is_ace_mode = (mode == "ace")
         is_alpha_mode = (mode == "alpha")
-        is_gsim_mode = (mode == "gsim")
+        is_gsim_mode = mode in ("gsim", "random")
 
         # ACE / ALPHA / GSIM: same prompt + LLM path (history / best_simulator_info for gsim like alpha)
         if is_ace_mode or is_alpha_mode or is_gsim_mode:
@@ -110,6 +110,8 @@ class FeedbackGenerationAgent(BaseAgent):
                 mode_name = "ACE"
             elif is_alpha_mode:
                 mode_name = "ALPHA"
+            elif mode == "random":
+                mode_name = "RANDOM"
             else:
                 mode_name = "GSIM"
             self.logger.info(f"{mode_name} mode: Using ACE-specific feedback generation workflow")

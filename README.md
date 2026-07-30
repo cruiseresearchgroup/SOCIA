@@ -35,6 +35,11 @@ python main.py \
 
 `--auto` enables non-interactive execution. Omit it to supply feedback interactively. `--iterations` caps outer repair iterations; `--selfloop` caps code-generation self-check attempts.
 
+`--mode random` runs the same G-SIM/SOCIA workflow while appending an
+authoritative prompt policy that permits only single-seed uniform random search
+for calibration. Generated code and runtime artifacts are audited for
+`calibrator_name: "random_search"`; other active calibrators fail the run.
+
 ### A+B: known-defect recovery experiments
 
 The A+B controlled experiments start from the seven pre-specified Mask Adoption defects (D1–D7). The following runner prepares each frozen injected starting point, runs the matched structured-reflection (SRR) baseline with BO+TuRBO preserved, and writes an auditable artifact gate and progress record:

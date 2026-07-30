@@ -254,7 +254,7 @@ class SimulationExecutionAgent(BaseAgent):
         
         # Choose execution method based on mode
         # ACE/ALPHA/GSIM mode and lite mode both use subprocess execution (same path)
-        if mode in ["ace", "alpha", "lite", "gsim", "srr"]:
+        if mode in ["ace", "alpha", "lite", "gsim", "random", "srr"]:
             # Use direct subprocess execution for lite/ace/alpha mode
             self.logger.info(f"Using subprocess execution for {mode} mode")
             
@@ -505,11 +505,21 @@ class SimulationExecutionAgent(BaseAgent):
                             results_data = simulation_output["results"]
                             self.logger.info("Applying ACE-compatible mask-wearing mapping from results.json")
 
-                            if isinstance(results_data.get("metrics"), dict):
-                                execution_result["simulation_metrics"] = results_data["metrics"]
+                            metrics = results_data.get("metrics")
+                            if not isinstance(metrics, dict):
+                                metrics = results_data.get("validation_metrics")
+                            if isinstance(metrics, dict):
+                                execution_result["simulation_metrics"] = dict(metrics)
+                            if isinstance(results_data.get("val_loss"), (int, float)):
+                                execution_result["simulation_metrics"]["val_loss"] = float(
+                                    results_data["val_loss"]
+                                )
 
-                            if isinstance(results_data.get("val_metrics"), dict):
-                                execution_result["val_metrics"] = results_data["val_metrics"]
+                            val_metrics = results_data.get("val_metrics")
+                            if not isinstance(val_metrics, dict):
+                                val_metrics = results_data.get("validation_metrics")
+                            if isinstance(val_metrics, dict):
+                                execution_result["val_metrics"] = val_metrics
 
                             parameters = results_data.get(
                                 "parameters",

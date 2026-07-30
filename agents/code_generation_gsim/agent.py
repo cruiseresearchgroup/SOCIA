@@ -42,6 +42,78 @@ class CodeGenerationAgent(BaseAgent):
     PATCH_TEMPLATE_NAME: str = "code_generation_gsim_patch.txt"
     PATCH_MAX_OUTPUT_TOKENS: Optional[int] = None
     STRICT_PATCH_RESPONSE: bool = False
+    RANDOM_CALIBRATOR_TEMPLATE_NAME: str = "random_calibrator_constraint.txt"
+
+    def _random_calibrator_constraint(self) -> str:
+        """Load the authoritative prompt suffix used by ``--mode random``."""
+        project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        template_path = os.path.join(
+            project_root, "templates", self.RANDOM_CALIBRATOR_TEMPLATE_NAME
+        )
+        with open(template_path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+
+    def _append_random_calibrator_constraint(self, prompt: str, mode: str) -> str:
+        """Append the random-only policy without changing other prompt content."""
+        if mode != "random":
+            return prompt
+        constraint = self._random_calibrator_constraint()
+        if constraint in prompt:
+            return prompt
+        return f"{prompt.rstrip()}\n\n{constraint}\n"
+
+    @staticmethod
+    def _audit_random_calibrator_code(code: str) -> Dict[str, Any]:
+        """Verify that executable entry-point code selects random search."""
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"passed": False, "reason": f"syntax_error: {exc}"}
+
+        constants: Dict[str, Any] = {}
+        selections: List[str] = []
+
+        # Generated simulators commonly construct the calibrator inside a
+        # pipeline method called by main(), rather than directly in main().
+        # Audit all executable call sites while ignoring mere class/function
+        # definitions, which are not themselves active selections.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = node.value.value
+            if not isinstance(node, ast.Call):
+                continue
+            function_name = ""
+            if isinstance(node.func, ast.Name):
+                function_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                function_name = node.func.attr
+            if function_name == "RandomSearchCalibrator":
+                selections.append("random_search")
+            elif function_name == "get_calibrator" and node.args:
+                argument = node.args[0]
+                if isinstance(argument, ast.Constant) and isinstance(
+                    argument.value, str
+                ):
+                    selections.append(argument.value.lower())
+                elif isinstance(argument, ast.Name):
+                    resolved = constants.get(argument.id)
+                    if isinstance(resolved, str):
+                        selections.append(resolved.lower())
+
+        passed = bool(selections) and set(selections) == {"random_search"}
+        return {
+            "passed": passed,
+            "active_selections": selections,
+            "reason": (
+                "active calibrator is random_search"
+                if passed
+                else "executable code must select only RandomSearchCalibrator/random_search"
+            ),
+        }
 
     def process(
         self,
@@ -126,7 +198,7 @@ class CodeGenerationAgent(BaseAgent):
         #   best_simulator_info['code'] into the gsim-specific patch template and
         #   calls the LLM via Responses API with the shared messages conversation.
         if iteration is not None and iteration >= 1:
-            if mode == "gsim":
+            if mode in ["gsim", "random"]:
                 self.logger.info(
                     f"Using gsim patch prompt for iteration {iteration} (GSIM mode)"
                 )
@@ -138,6 +210,7 @@ class CodeGenerationAgent(BaseAgent):
                     simulation_info_history=simulation_info_history,
                     iteration=iteration,
                     messages=messages,
+                    force_random_calibrator=(mode == "random"),
                 )
                 # After getting refined code, trim the shared messages back to
                 # the original [system, user] pair so the next iteration starts
@@ -172,6 +245,14 @@ class CodeGenerationAgent(BaseAgent):
                     output_dir=output_dir,
                     iteration=iteration
                 )
+                random_audit = None
+                if mode == "random":
+                    random_audit = self._audit_random_calibrator_code(code)
+                    if not random_audit["passed"]:
+                        raise RuntimeError(
+                            "Random mode generated a non-random active calibrator: "
+                            f"{random_audit}"
+                        )
                 simulator_description = simulator_description_from_llm
                 if not simulator_description:
                     try:
@@ -190,6 +271,8 @@ class CodeGenerationAgent(BaseAgent):
                         "mode": mode
                     }
                 }
+                if random_audit is not None:
+                    result["metadata"]["random_calibrator_audit"] = random_audit
                 self.logger.info("Code generation (gsim patch) completed")
                 if blueprint is not None:
                     self._update_blueprint_from_generated_code(blueprint, result, task_spec)
@@ -219,6 +302,7 @@ class CodeGenerationAgent(BaseAgent):
         # Call LLM to generate code
         # Use medium effort for initial generation to reduce timeout risk
         # Self-loop will improve the code quality in subsequent iterations
+        prompt = self._append_random_calibrator_constraint(prompt, mode)
         llm_response, simulator_description_from_llm, _built_messages = self._call_llm_with_functions(
             prompt, reasoning={"effort": "medium"}
         )
@@ -263,6 +347,14 @@ class CodeGenerationAgent(BaseAgent):
             output_dir=output_dir,
             iteration=iteration
         )
+        random_audit = None
+        if mode == "random":
+            random_audit = self._audit_random_calibrator_code(code)
+            if not random_audit["passed"]:
+                raise RuntimeError(
+                    "Random mode generated a non-random active calibrator: "
+                    f"{random_audit}"
+                )
 
         # Use the description returned by the LLM tool call; fall back to a
         # separate generation call only when the tool call returned nothing.
@@ -287,6 +379,8 @@ class CodeGenerationAgent(BaseAgent):
                 "mode": mode
             }
         }
+        if random_audit is not None:
+            result["metadata"]["random_calibrator_audit"] = random_audit
         
         self.logger.info("Code generation completed")
         # Note: Syntax checking is already handled in _run_self_checking_loop
@@ -843,6 +937,8 @@ class CodeGenerationAgent(BaseAgent):
         else:
             # For other modes, use standard format
             task_info = json.dumps(task_spec, indent=2)
+        if mode == "random":
+            task_info += "\n\n" + self._random_calibrator_constraint()
         
         # Build prompt for LLM Linter (high-level issues)
         prompt = f"""
@@ -1248,6 +1344,8 @@ class CodeGenerationAgent(BaseAgent):
         else:
             # For other modes, use standard format
             task_info = json.dumps(task_spec, indent=2)
+        if mode == "random":
+            task_info += "\n\n" + self._random_calibrator_constraint()
         
         # Build prompt for improving code
         # Align with the 7 categories checked by LLM Linter
@@ -1553,7 +1651,7 @@ Respond as:
             data_path_str = f"Data directory: {data_path}" if data_path else "No data path provided"
             
             # For ACE/ALPHA/GSIM mode, use template with blue_print, file_summaries placeholders
-            if mode in ["ace", "alpha", "gsim"]:
+            if mode in ["ace", "alpha", "gsim", "random"]:
                 # Task description (both raw and lower-cased for matching)
                 task_description_raw = task_spec.get('description', '')
                 task_description = task_description_raw.lower()
@@ -1673,7 +1771,7 @@ Respond as:
                         self.logger.error(f"Error loading llm_api_call_patch_prompt.txt: {e}")
                         # Continue without the patch if file cannot be loaded
         
-        return prompt
+        return self._append_random_calibrator_constraint(prompt, mode)
     
     def _build_gsim_patch_prompt(
         self,
@@ -1684,6 +1782,7 @@ Respond as:
         simulation_info_history: Optional[List[Dict[str, Any]]] = None,
         iteration: Optional[int] = None,
         messages: Optional[List[Dict[str, str]]] = None,
+        force_random_calibrator: bool = False,
     ) -> tuple:
         """
         Build a gsim-specific patch prompt (iteration >= 1) and call the LLM via
@@ -1722,6 +1821,11 @@ Respond as:
         else:
             self.logger.warning("_build_gsim_patch_prompt: best_simulator_info has no code; using empty string")
         prompt = patch_template.replace("{completions}", best_code)
+        if force_random_calibrator:
+            prompt = (
+                f"{prompt.rstrip()}\n\n"
+                f"{self._random_calibrator_constraint()}\n"
+            )
 
         # Build the tool spec (same as _call_llm_with_functions)
         tool_spec = {
