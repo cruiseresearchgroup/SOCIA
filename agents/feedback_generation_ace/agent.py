@@ -89,14 +89,16 @@ class FeedbackGenerationAgent(BaseAgent):
         self.logger.info("Generating feedback for improvement")
         
         # Step 1: Detect work mode
-        is_ace_mode = (mode == "ace")
+        is_ace_mode = mode in ["ace", "nabla"]
+        is_nabla_mode = mode == "nabla"
         
         # ACE mode workflow
         if is_ace_mode:
-            self.logger.info("ACE mode: Using ACE-specific feedback generation workflow")
+            mode_name = "Nabla" if is_nabla_mode else "ACE"
+            self.logger.info("%s mode: Using ACE-equivalent structured feedback workflow", mode_name)
             
             # Step 2: Collect user feedback if in interactive mode
-            # Note: interactive=True only when --auto=False in test_data_analysis.py
+            # Note: interactive=True only when --auto=False in main.py
             # In auto mode (--auto=True), interactive=False, so user feedback collection is skipped
             user_feedback = None
             should_stop = False
@@ -128,7 +130,10 @@ class FeedbackGenerationAgent(BaseAgent):
             llm_response = self._call_llm(prompt)
             
             # Step 7: Parse response according to ACE format
-            feedback = self._parse_ace_response(llm_response)
+            feedback = self._parse_ace_response(
+                llm_response,
+                require_grounding=is_nabla_mode,
+            )
             
             # Step 8: Add should_stop flag to feedback if user requested stop
             if should_stop:
@@ -136,7 +141,7 @@ class FeedbackGenerationAgent(BaseAgent):
                 feedback["stop_reason"] = "User requested stop via #STOP# command in User Problem Feedback"
             
             # Step 9: Return structured feedback dictionary
-            self.logger.info("ACE mode feedback generation completed")
+            self.logger.info("%s mode feedback generation completed", mode_name)
             return feedback
         
         # Detect lite mode via generated_code metadata (for backward compatibility)
@@ -811,7 +816,11 @@ class FeedbackGenerationAgent(BaseAgent):
         
         return prompt
     
-    def _parse_ace_response(self, llm_response: str) -> Dict[str, Any]:
+    def _parse_ace_response(
+        self,
+        llm_response: str,
+        require_grounding: bool = False,
+    ) -> Dict[str, Any]:
         """
         Parse LLM response according to ACE format.
         
@@ -870,6 +879,15 @@ class FeedbackGenerationAgent(BaseAgent):
                     "issue_type", "severity", "blueprint_refs", "code_refs",
                     "error_identification", "root_cause_analysis", "correct_approach", "key_insight"
                 ]
+                if require_grounding:
+                    required_fields.extend([
+                        "residual",
+                        "diagnosed_mechanism",
+                        "affected_code_component",
+                        "spatial_or_interaction_context",
+                        "grounding_evidence",
+                        "recommended_repair",
+                    ])
                 
                 missing_fields = [field for field in required_fields if field not in issue_data]
                 if missing_fields:

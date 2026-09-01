@@ -68,10 +68,12 @@ class AgentContainer(containers.DeclarativeContainer):
             "data_analysis": {"prompt_template": "templates/data_analysis_prompt.txt", "output_format": "json"},
             "data_analysis_odd": {"prompt_template": "templates/data_analysis_odd_prompt.txt", "output_format": "json"},
             "data_analysis_ace": {"prompt_template": "templates/data_analysis_odd_prompt.txt", "output_format": "json"},
+            "data_analysis_nabla": {"prompt_template": "templates/data_analysis_nabla_prompt.txt", "output_format": "json"},
             "model_planning": {"prompt_template": "templates/model_planning_prompt.txt", "output_format": "json"},
             "code_generation": {"prompt_template": "templates/code_generation_prompt.txt", "output_format": "python"},
             "code_generation_odd": {"prompt_template": "templates/code_generation_prompt.txt", "output_format": "python"},
             "code_generation_ace": {"prompt_template": "templates/code_generation_odd_prompt.txt", "output_format": "python"},
+            "code_generation_nabla": {"prompt_template": "templates/code_generation_nabla_prompt.txt", "output_format": "python"},
             "code_generation_alpha": {"prompt_template": "templates/code_generation_ace_prompt.txt", "output_format": "python"},
             "code_generation_gsim": {"prompt_template": "templates/code_generation_ace_prompt.txt", "output_format": "python"},
             "data_analysis_gsim": {"prompt_template": "templates/data_analysis_alpha_prompt.txt", "output_format": "json"},
@@ -80,13 +82,16 @@ class AgentContainer(containers.DeclarativeContainer):
             "code_verification": {"prompt_template": "templates/code_verification_prompt.txt", "output_format": "json"},
             "simulation_execution": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
             "simulation_execution_ace": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
+            "simulation_execution_nabla": {"prompt_template": "templates/simulation_execution_prompt.txt", "output_format": "json"},
             "result_evaluation": {"prompt_template": "templates/result_evaluation_prompt.txt", "output_format": "json"},
             "feedback_generation": {"prompt_template": "templates/feedback_generation_prompt.txt", "output_format": "json"},
             "feedback_generation_odd": {"prompt_template": "templates/feedback_generation_prompt.txt", "output_format": "json"},
             "feedback_generation_ace": {"prompt_template": "templates/feedback_generation_ace_prompt.txt", "output_format": "json"},
+            "feedback_generation_nabla": {"prompt_template": "templates/feedback_generation_nabla_prompt.txt", "output_format": "json"},
             "feedback_generation_alpha": {"prompt_template": "templates/feedback_generation_alpha_prompt.txt", "output_format": "json"},
             "iteration_control": {"prompt_template": "templates/iteration_control_prompt.txt", "output_format": "json"},
-            "iteration_control_ace": {"prompt_template": "templates/iteration_control_prompt.txt", "output_format": "json"}
+            "iteration_control_ace": {"prompt_template": "templates/iteration_control_prompt.txt", "output_format": "json"},
+            "iteration_control_nabla": {"prompt_template": "templates/iteration_control_prompt.txt", "output_format": "json"}
         }
         return defaults.get(agent_name, {})
 
@@ -119,6 +124,12 @@ class AgentContainer(containers.DeclarativeContainer):
         output_path=output_path
     )
 
+    data_analysis_nabla_agent = providers.Factory(
+        DataAnalysisAceAgent,
+        config=config.agents.data_analysis_nabla,
+        output_path=output_path
+    )
+
     data_analysis_gsim_agent = providers.Factory(
         DataAnalysisAceAgent,
         config=config.agents.data_analysis_gsim,
@@ -143,6 +154,11 @@ class AgentContainer(containers.DeclarativeContainer):
     code_generation_ace_agent = providers.Factory(
         CodeGenerationAceAgent,
         config=config.agents.code_generation_ace
+    )
+
+    code_generation_nabla_agent = providers.Factory(
+        CodeGenerationAceAgent,
+        config=config.agents.code_generation_nabla
     )
     
     code_generation_alpha_agent = providers.Factory(
@@ -171,6 +187,12 @@ class AgentContainer(containers.DeclarativeContainer):
         SimulationExecutionAceAgent,
         output_dir=providers.Callable(lambda op: f"{op}/execution", output_path),
         config=config.agents.simulation_execution_ace
+    )
+
+    simulation_execution_nabla_agent = providers.Factory(
+        SimulationExecutionAceAgent,
+        output_dir=providers.Callable(lambda op: f"{op}/execution", output_path),
+        config=config.agents.simulation_execution_nabla
     )
     
     # Alpha simulation execution uses its own implementation/config
@@ -205,6 +227,11 @@ class AgentContainer(containers.DeclarativeContainer):
         FeedbackGenerationAceAgent,
         config=config.agents.feedback_generation_ace
     )
+
+    feedback_generation_nabla_agent = providers.Factory(
+        FeedbackGenerationAceAgent,
+        config=config.agents.feedback_generation_nabla
+    )
     
     feedback_generation_alpha_agent = providers.Factory(
         FeedbackGenerationAlphaAgent,
@@ -225,6 +252,11 @@ class AgentContainer(containers.DeclarativeContainer):
         IterationControlAceAgent,
         config=config.agents.iteration_control_ace
     )
+
+    iteration_control_nabla_agent = providers.Factory(
+        IterationControlAceAgent,
+        config=config.agents.iteration_control_nabla
+    )
     
     # Agent provider dictionary for bulk access
     agent_providers = providers.Dict(
@@ -234,10 +266,12 @@ class AgentContainer(containers.DeclarativeContainer):
             "data_analysis": data_analysis_agent,
             "data_analysis_odd": data_analysis_odd_agent,
             "data_analysis_ace": data_analysis_ace_agent,
+            "data_analysis_nabla": data_analysis_nabla_agent,
             "model_planning": model_planning_agent,
             "code_generation": code_generation_agent,
             "code_generation_odd": code_generation_odd_agent,
             "code_generation_ace": code_generation_ace_agent,
+            "code_generation_nabla": code_generation_nabla_agent,
             "code_generation_alpha": code_generation_alpha_agent,
             "code_generation_gsim": code_generation_gsim_agent,
             "data_analysis_gsim": data_analysis_gsim_agent,
@@ -246,13 +280,16 @@ class AgentContainer(containers.DeclarativeContainer):
             "code_verification": code_verification_agent,
             "simulation_execution": simulation_execution_agent,
             "simulation_execution_ace": simulation_execution_ace_agent,
+            "simulation_execution_nabla": simulation_execution_nabla_agent,
             "simulation_execution_alpha": simulation_execution_alpha_agent,
             "result_evaluation": result_evaluation_agent,
             "feedback_generation": feedback_generation_agent,
             "feedback_generation_odd": feedback_generation_odd_agent,
             "feedback_generation_ace": feedback_generation_ace_agent,
+            "feedback_generation_nabla": feedback_generation_nabla_agent,
             "feedback_generation_alpha": feedback_generation_alpha_agent,
             "iteration_control": iteration_control_agent,
-            "iteration_control_ace": iteration_control_ace_agent
+            "iteration_control_ace": iteration_control_ace_agent,
+            "iteration_control_nabla": iteration_control_nabla_agent
         }
     ) 

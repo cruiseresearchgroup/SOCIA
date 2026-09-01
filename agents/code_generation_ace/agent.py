@@ -98,8 +98,18 @@ class CodeGenerationAgent(BaseAgent):
             "iteration": iteration,
         }
         
+        # Nabla uses one external, grounding-aware prompt for both synthesis and repair.
+        if mode == "nabla":
+            prompt = self._build_nabla_prompt(
+                task_spec=task_spec,
+                previous_code=previous_code,
+                simulation_results=simulation_results,
+                feedback=feedback,
+                playbook=playbook,
+                iteration=iteration,
+            )
         # Use patch prompt for iteration >= 1 (second iteration and beyond)
-        if iteration is not None and iteration >= 1 and mode == "ace":
+        elif iteration is not None and iteration >= 1 and mode == "ace":
             self.logger.info(f"Using patch prompt for iteration {iteration} (ACE mode)")
             prompt = self._build_patch_prompt(
                 task_spec=task_spec,
@@ -1096,6 +1106,210 @@ class CodeGenerationAgent(BaseAgent):
         
         self.logger.info("Syntax fixed")
         return fixed_code
+
+    def _build_nabla_prompt(
+        self,
+        task_spec: Dict[str, Any],
+        previous_code: Optional[Dict[str, str]] = None,
+        simulation_results: Optional[Dict[str, Any]] = None,
+        feedback: Optional[Dict[str, Any]] = None,
+        playbook: Optional[Dict[str, Any]] = None,
+        iteration: Optional[int] = None,
+    ) -> str:
+        """Build the external Nabla synthesis/repair prompt."""
+        if not self.prompt_template:
+            raise ValueError(
+                "Prompt template not available. Check "
+                "config.yaml for code_generation_nabla.prompt_template"
+            )
+
+        blueprint = {
+            key: value
+            for key, value in task_spec.get("data_analysis_result", {}).items()
+            if key != "file_summaries"
+        }
+        blueprint_str = (
+            json.dumps(blueprint, indent=2, ensure_ascii=False)
+            if blueprint
+            else "No blueprint provided"
+        )
+        data_schema_contract = self._build_compact_data_schema_contract(task_spec)
+        data_schema_contract_str = (
+            json.dumps(data_schema_contract, indent=2, ensure_ascii=False)
+            if data_schema_contract
+            else "No input data schema contract is available."
+        )
+        task_requirements = self._build_compact_task_requirements(task_spec)
+        task_requirements_str = (
+            json.dumps(task_requirements, indent=2, ensure_ascii=False)
+            if task_requirements
+            else "No supplementary task requirements are available."
+        )
+
+        previous_code_str = "No previous code available; synthesize the initial simulator."
+        if isinstance(previous_code, dict) and previous_code:
+            previous_code_str = next(iter(previous_code.values()))
+        elif isinstance(previous_code, str) and previous_code.strip():
+            previous_code_str = previous_code
+
+        simulation_results_str = (
+            json.dumps(simulation_results, indent=2, default=str, ensure_ascii=False)
+            if simulation_results
+            else "No simulation results available for this iteration."
+        )
+        feedback_str = (
+            json.dumps(feedback, indent=2, default=str, ensure_ascii=False)
+            if feedback
+            else "No diagnosis is available; perform initial synthesis from the blueprint."
+        )
+        transformed_playbook = self._transform_playbook_for_prompt(playbook)
+        playbook_str = json.dumps(transformed_playbook, indent=2, ensure_ascii=False)
+
+        task_description = task_spec.get("description", "").lower()
+        coding_patch_content = "No supplementary task-specific coding specification."
+        patch_filename = None
+        if "daily mobility trajectories" in task_description:
+            patch_filename = "llmob_patch_prompt.txt"
+        elif "mask-wearing behavior" in task_description:
+            patch_filename = "mask_adoption_patch.txt"
+        if patch_filename:
+            project_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+            patch_path = os.path.join(project_root, "templates", patch_filename)
+            try:
+                with open(patch_path, "r", encoding="utf-8") as handle:
+                    coding_patch_content = handle.read()
+            except OSError as exc:
+                self.logger.error("Unable to load %s: %s", patch_filename, exc)
+
+        replacements = {
+            "{iteration}": str(iteration if iteration is not None else 0),
+            "{task_requirements}": task_requirements_str,
+            "{blue_print}": blueprint_str,
+            "{data_schemas}": data_schema_contract_str,
+            "{previous_code}": previous_code_str,
+            "{simulation_results}": simulation_results_str,
+            "{feedback}": feedback_str,
+            "{playbook}": playbook_str,
+            "{coding_patch}": coding_patch_content,
+        }
+        prompt = self.prompt_template
+        for placeholder, value in replacements.items():
+            prompt = prompt.replace(placeholder, value)
+        return prompt
+
+    @classmethod
+    def _build_compact_task_requirements(
+        cls,
+        task_spec: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Preserve top-level task constraints omitted from the DAA blueprint.
+
+        Task files often attach strict date ranges, joins, and output semantics
+        to ``data_files`` rather than ``data_analysis_result``.  These are
+        executable requirements and must reach the code generator.
+        """
+        requirements: Dict[str, Any] = {}
+        for key in (
+            "description",
+            "simulation_focus",
+            "data_files",
+            "evaluation_metrics",
+        ):
+            value = task_spec.get(key)
+            if value not in (None, "", {}, []):
+                requirements[key] = cls._compact_requirement_value(value)
+        return requirements
+
+    @classmethod
+    def _compact_requirement_value(cls, value: Any, depth: int = 0) -> Any:
+        """Bound task requirements without truncating ordinary constraint text."""
+        if depth >= 6:
+            return "<nested requirement truncated>"
+        if isinstance(value, dict):
+            return {
+                str(key): cls._compact_requirement_value(item, depth + 1)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [
+                cls._compact_requirement_value(item, depth + 1)
+                for item in value[:20]
+            ]
+        if isinstance(value, str) and len(value) > 6000:
+            return value[:6000] + "...<truncated>"
+        return value
+
+    @classmethod
+    def _build_compact_data_schema_contract(
+        cls,
+        task_spec: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return exact but bounded input schemas for Nabla code generation.
+
+        Data-analysis schemas can contain hundreds of thousands of characters
+        because a sampled mapping value may itself be a long list.  Passing the
+        complete object obscures the concrete input shape and wastes context.
+        This contract retains representative nested values and a short semantic
+        description so the code generator can implement explicit parsers.
+        """
+        schemas = task_spec.get("schemas", {})
+        if not isinstance(schemas, dict):
+            return {}
+
+        contract: Dict[str, Any] = {}
+        for file_name, schema in schemas.items():
+            if not isinstance(schema, dict):
+                continue
+            entry: Dict[str, Any] = {
+                "file_type": schema.get("file_type"),
+                "data_type": schema.get("data_type"),
+                "length": schema.get("length"),
+            }
+            if "value_structure" in schema:
+                entry["value_structure"] = cls._compact_schema_value(
+                    schema["value_structure"]
+                )
+            if "sample_data" in schema:
+                entry["sample_data"] = cls._compact_schema_value(
+                    schema["sample_data"]
+                )
+            semantic_summary = schema.get("file_semantic_summary")
+            if isinstance(semantic_summary, str) and semantic_summary.strip():
+                entry["semantic_summary"] = semantic_summary[:2000]
+            contract[str(file_name)] = entry
+        return contract
+
+    @classmethod
+    def _compact_schema_value(
+        cls,
+        value: Any,
+        depth: int = 0,
+    ) -> Any:
+        """Bound nested schema examples while preserving their concrete shape."""
+        if depth >= 5:
+            return "<nested value truncated>"
+        if isinstance(value, dict):
+            return {
+                str(key): cls._compact_schema_value(item, depth + 1)
+                for key, item in list(value.items())[:2]
+            }
+        if isinstance(value, (list, tuple)):
+            # Preserve short positional records such as [lat, lon, poi_id].
+            # Long scalar lists (for example many daily trajectory strings)
+            # are collections, so two representative items are sufficient.
+            is_short_positional_record = len(value) <= 10 and all(
+                not isinstance(item, (dict, list, tuple)) for item in value
+            )
+            selected_items = value if is_short_positional_record else value[:2]
+            return [
+                cls._compact_schema_value(item, depth + 1)
+                for item in selected_items
+            ]
+        if isinstance(value, str) and len(value) > 500:
+            return value[:500] + "...<truncated>"
+        return value
     
     def _build_prompt(
         self,
@@ -1191,7 +1405,7 @@ class CodeGenerationAgent(BaseAgent):
             
             # Format playbook as string (only for ACE/ALPHA mode)
             playbook_str = "No playbook provided"
-            if mode in ["ace", "alpha"] and playbook:
+            if mode in ["ace", "nabla", "alpha"] and playbook:
                 try:
                     playbook_str = json.dumps(playbook, indent=2, ensure_ascii=False)
                 except TypeError:
@@ -1217,7 +1431,7 @@ class CodeGenerationAgent(BaseAgent):
             data_path_str = f"Data directory: {data_path}" if data_path else "No data path provided"
             
             # For ACE/ALPHA mode, use template with blue_print, file_summaries, and playbook placeholders
-            if mode in ["ace", "alpha"]:
+            if mode in ["ace", "nabla", "alpha"]:
                 # Check task description for task-specific coding_patch replacement
                 task_description = task_spec.get('description', '').lower()
                 coding_patch_content = ""

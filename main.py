@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Test script for DataAnalysisOddAgent
-Tests the data analysis odd functionality by running task understanding, data analysis, and model planning steps.
-"""
+"""Command-line entry point for SOCIA simulator-construction workflows."""
 
 import argparse
 import logging
@@ -31,7 +28,7 @@ def setup_logging(output_path: Optional[str] = None, debug: bool = False):
             os.makedirs(output_path, exist_ok=True)
             
             # Create log file path
-            log_file_path = os.path.join(output_path, "test_data_analysis_odd.log")
+            log_file_path = os.path.join(output_path, "socia.log")
             
             # Add file handler to handlers list
             handlers.append(logging.FileHandler(log_file_path))
@@ -45,17 +42,17 @@ def setup_logging(output_path: Optional[str] = None, debug: bool = False):
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=handlers
     )
-    return logging.getLogger('SOCIA.DataAnalysisOddTest')
+    return logging.getLogger('SOCIA.Main')
 
 def parse_arguments():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Test script for SOCIA DataAnalysisOddAgent')
+    parser = argparse.ArgumentParser(description='SOCIA simulator-construction workflow')
     parser.add_argument('--task', type=str, required=True, help='Description of the simulation task')
     parser.add_argument('--task-file', type=str, help='Path to task description JSON file')
     parser.add_argument('--output', type=str, default='./output', help='Path to output directory')
     parser.add_argument('--config', type=str, default='./config.yaml', help='Path to configuration file')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
-    parser.add_argument('--mode', type=str, default='persona', choices=['lite', 'medium', 'persona', 'blueprint', 'odd', 'ace', 'alpha', 'gsim'], help='Workflow mode')
+    parser.add_argument('--mode', type=str.lower, default='persona', choices=['lite', 'medium', 'persona', 'blueprint', 'odd', 'ace', 'nabla', 'alpha', 'gsim'], help='Workflow mode')
     parser.add_argument('--selfloop', type=int, default=3, help='Number of self-checking loop attempts for code generation')
     parser.add_argument('--persisted-data-analysis-file', type=str, help='Path to persisted data analysis file (task_spec.json) to skip data analysis phase')
     parser.add_argument('--persisted-code-file', type=str, help='Path to persisted code file (simulation_code_iter_N.py) to skip data analysis and initial code generation')
@@ -900,9 +897,9 @@ def run_data_analysis_test(
     logger,
     agent_container: AgentContainer = Provide[AgentContainer]
 ):
-    """Run the data analysis test with multi-iteration support (ODD/ACE mode + lite workflow)."""
+    """Run a SOCIA workflow with multi-iteration support."""
     
-    logger.info(f"Starting DataAnalysisOddAgent test in {args.mode.upper()} mode")
+    logger.info(f"Starting SOCIA in {args.mode.upper()} mode")
     logger.info(f"Auto mode: {args.auto}, Max iterations: {args.iterations}")
     
     try:
@@ -913,7 +910,7 @@ def run_data_analysis_test(
         # Playbook is shared across all tasks, stored in project root /playbook_storage
         playbook = None
         playbook_manager = None
-        if getattr(args, "mode", None) in ["odd", "ace", "alpha"]:
+        if getattr(args, "mode", None) in ["odd", "ace", "nabla", "alpha"]:
             # Use default storage root (project_root/playbook_storage)
             playbook_manager = PlaybookManager()
             playbook = playbook_manager.playbook
@@ -927,6 +924,13 @@ def run_data_analysis_test(
             simulation_execution_agent = agent_container.simulation_execution_ace_agent()
             feedback_generation_agent = agent_container.feedback_generation_ace_agent()
             iteration_control_agent = agent_container.iteration_control_ace_agent()
+        elif args.mode == "nabla":
+            data_analysis_agent = agent_container.data_analysis_nabla_agent()
+            code_generation_agent = agent_container.code_generation_nabla_agent()
+            simulation_execution_agent = agent_container.simulation_execution_nabla_agent()
+            feedback_generation_agent = agent_container.feedback_generation_nabla_agent()
+            iteration_control_agent = agent_container.iteration_control_nabla_agent()
+            logger.info("Nabla mode: Using ACE-equivalent workflow with spatial/interaction-grounded prompts")
         elif args.mode == "alpha":
             data_analysis_agent = agent_container.data_analysis_ace_agent()
             # For alpha mode, override the prompt template to use data_analysis_alpha_prompt.txt
@@ -1278,7 +1282,7 @@ def run_data_analysis_test(
         # ==================================================
         # BLUEPRINT FEEDBACK AFTER DATA ANALYSIS (ACE/ALPHA mode only)
         # ==================================================
-        if args.mode in ["ace", "alpha", "gsim"]:
+        if args.mode in ["ace", "nabla", "alpha", "gsim"]:
             logger.info("=" * 50)
             logger.info("BLUEPRINT FEEDBACK AFTER DATA ANALYSIS (ACE mode)")
             logger.info("=" * 50)
@@ -1431,7 +1435,7 @@ def run_data_analysis_test(
                 logger.info("CODE GENERATION")
                 
                 # Select strategies for prompt BEFORE code generation (open/queued -> in_progress)
-                if playbook_manager and args.mode in ["ace", "alpha"] and current_iteration > 0:
+                if playbook_manager and args.mode in ["ace", "nabla", "alpha"] and current_iteration > 0:
                     logger.info("Selecting playbook strategies for code patch prompt...")
                     selected_ids = playbook_manager.select_strategies_for_prompt_simple(
                         max_count=None,  # Select all open/queued strategies
@@ -1480,7 +1484,7 @@ def run_data_analysis_test(
                     "iteration": current_iteration,
                     "simulation_results": prev_simulation_results  # Pass previous iteration's results for patch prompt
                 }
-                if args.mode in ["ace", "alpha"]:
+                if args.mode in ["ace", "nabla", "alpha"]:
                     process_kwargs["playbook"] = playbook
                 
                 # Add best_simulator_info and simulation_info_history for alpha mode
@@ -1551,7 +1555,7 @@ def run_data_analysis_test(
                 save_artifact(args.output, f"evaluation_results_iter_{current_iteration}", state["evaluation_results"])
                 logger.info(f"{args.mode.upper()} mode: Placeholders created for verification, simulation, and evaluation results")
             # ACE/ALPHA mode: Skip verification, but execute simulation
-            elif args.mode in ["ace", "alpha", "gsim"]:
+            elif args.mode in ["ace", "nabla", "alpha", "gsim"]:
                 logger.info(f"{args.mode.upper()} mode: Skipping verification, but executing simulation")
                 state["verification_results"] = {
                     "placeholder": True,
@@ -1775,7 +1779,7 @@ def run_data_analysis_test(
             # --------------------------------------------------
             # STEP 5: Blueprint Feedback (ACE/ALPHA mode only)
             # --------------------------------------------------
-            if args.mode in ["ace", "alpha", "gsim"]:
+            if args.mode in ["ace", "nabla", "alpha", "gsim"]:
                 logger.info("BLUEPRINT FEEDBACK (ACE/ALPHA mode)")
                 
                 # Extract current blueprint from task_spec
@@ -1841,7 +1845,7 @@ def run_data_analysis_test(
             # In other modes with manual feedback, we collect it here first
             user_feedback_text = None
             should_stop_from_user_feedback = False  # Check for #STOP# in non-ACE modes
-            if args.mode != "ace" and not args.auto:
+            if args.mode not in ["ace", "nabla"] and not args.auto:
                 logger.info("Manual feedback mode - prompting user for feedback before LLM generation")
                 user_feedback_text = get_user_feedback(
                     logger,
@@ -1912,7 +1916,7 @@ def run_data_analysis_test(
             
             # Combine user feedback (if any) with system feedback (non-ACE modes only)
             # ACE mode user feedback is handled internally by the agent
-            if args.mode != "ace" and not args.auto:
+            if args.mode not in ["ace", "nabla"] and not args.auto:
                 combined_feedback = dict(system_feedback)
                 
                 if user_feedback_text and not should_stop_from_user_feedback:
@@ -1959,7 +1963,7 @@ def run_data_analysis_test(
             save_artifact(args.output, f"feedback_iter_{current_iteration}", state["feedback"])
             
             # Convert feedback to playbook entries (ACE/ALPHA mode only)
-            if args.mode in ["ace", "alpha"] and playbook_manager:
+            if args.mode in ["ace", "nabla", "alpha"] and playbook_manager:
                 feedback_to_convert = state["feedback"]
                 
                 # Check if feedback is in ACE format (dict with issue_id keys)
@@ -2023,7 +2027,7 @@ def run_data_analysis_test(
                 save_artifact(args.output, f"iteration_decision_iter_{current_iteration}", state["iteration_decision"])
                 
                 # Save iteration snapshot for playbook (checkpoint level) - this is still needed
-                if playbook_manager and args.mode in ["ace", "alpha"]:
+                if playbook_manager and args.mode in ["ace", "nabla", "alpha"]:
                     playbook_manager.save_iteration_snapshot(current_iteration)
                     logger.info(f"📸 Playbook iteration snapshot saved: iter_{current_iteration:03d}")
                 
@@ -2037,7 +2041,7 @@ def run_data_analysis_test(
             # The #STOP# check is now done in the main workflow before calling iteration_control
             # ACE/ALPHA mode uses decision function with simulation_results and feedback
             # Other modes use LLM-based iteration control
-            if args.mode in ["ace", "alpha", "gsim"]:
+            if args.mode in ["ace", "nabla", "alpha", "gsim"]:
                 state["iteration_decision"] = agents["iteration_control"].process(
                     current_iteration=current_iteration,
                     max_iterations=args.iterations,
@@ -2056,7 +2060,7 @@ def run_data_analysis_test(
             save_artifact(args.output, f"iteration_decision_iter_{current_iteration}", state["iteration_decision"])
             
             # Save iteration snapshot for playbook (checkpoint level)
-            if playbook_manager and args.mode in ["ace", "alpha"]:
+            if playbook_manager and args.mode in ["ace", "nabla", "alpha"]:
                 playbook_manager.save_iteration_snapshot(current_iteration)
                 logger.info(f"📸 Playbook iteration snapshot saved: iter_{current_iteration:03d}")
             
@@ -2078,7 +2082,7 @@ def run_data_analysis_test(
         last_code_iteration = current_iteration - 1 if current_iteration > 0 else 0
         
         # Finalize playbook (session level)
-        if playbook_manager and args.mode in ["ace", "alpha"]:
+        if playbook_manager and args.mode in ["ace", "nabla", "alpha"]:
             final_archive_path = playbook_manager.finalize()
             logger.info(f"📚 Playbook finalized and archived: {final_archive_path}")
         

@@ -115,7 +115,7 @@ class FeedbackGenerationAgent(BaseAgent):
             self.logger.info(f"{mode_name} mode: Using ACE-specific feedback generation workflow")
             
             # Step 2: Collect user feedback if in interactive mode
-            # Note: interactive=True only when --auto=False in test_data_analysis.py
+            # Note: interactive=True only when --auto=False in main.py
             # In auto mode (--auto=True), interactive=False, so user feedback collection is skipped
             user_feedback = None
             should_stop = False

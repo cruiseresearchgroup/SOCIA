@@ -76,7 +76,7 @@ class IterationControlAgent(BaseAgent):
             iteration_decision["continue"] = continue_iteration
             iteration_decision["reason"] = "Default decision based on iteration count"
         
-        # Note: #STOP# checking is now handled in the main workflow (test_data_analysis.py)
+        # Note: #STOP# checking is now handled in the main workflow (main.py)
         # before calling this agent, so we don't need to check it here anymore.
         # User feedback can still be passed for informational purposes if needed.
         
@@ -148,7 +148,7 @@ class IterationControlAgent(BaseAgent):
             }
         }
         
-        # Note: #STOP# checking is now handled in the main workflow (test_data_analysis.py)
+        # Note: #STOP# checking is now handled in the main workflow (main.py)
         # before calling this agent, so we don't need to check it here anymore.
         
         return decision
