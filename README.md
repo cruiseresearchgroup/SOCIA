@@ -2,7 +2,7 @@
   <img src="docs/images/socia_logo_large.png" alt="SOCIA Logo" width="200px" />
 </p>
 
-# 🌆 SOCIA: Simulation Orchestration for Computational Intelligence with Agents
+# 🌆 SOCIA-nabla: Textual Gradient Meets Multi-Agent Orchestration for Automated Spatially Grounded Simulator Generation
 
 <!-- Illustration Image Placeholder -->
 
